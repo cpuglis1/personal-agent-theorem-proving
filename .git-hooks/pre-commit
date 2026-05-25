@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# Pre-commit hook: scan staged files for secrets using gitleaks.
+# Install once:
+#   brew install gitleaks
+#   git config core.hooksPath .git-hooks
+#
+# This runs automatically on every `git commit` and aborts if secrets are found.
+
+set -e
+
+if ! command -v gitleaks &>/dev/null; then
+  echo "⚠️  gitleaks not found — skipping secret scan."
+  echo "   Install it: brew install gitleaks"
+  exit 0
+fi
+
+echo "🔍 Scanning staged files for secrets..."
+
+if gitleaks protect --staged --no-banner -q; then
+  echo "✅ No secrets detected."
+else
+  echo ""
+  echo "🚨 gitleaks found potential secrets in staged files."
+  echo "   Review the output above, remove the secrets, then commit again."
+  echo "   To bypass (dangerous): git commit --no-verify"
+  exit 1
+fi

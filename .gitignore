@@ -1,0 +1,46 @@
+# ── Secrets ───────────────────────────────────────────────────────────────────
+.env
+*.env
+!*.env.example
+
+# ── Python ────────────────────────────────────────────────────────────────────
+.venv/
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ── Node ──────────────────────────────────────────────────────────────────────
+node_modules/
+npm-debug.log*
+
+# ── Logs & runtime state ──────────────────────────────────────────────────────
+logs/
+*.log
+*.err
+
+# ── Second brain runtime files ────────────────────────────────────────────────
+secondbrain/md_notion_map.json
+secondbrain/.last_ingest_time
+
+# ── macOS ─────────────────────────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# ── Docker volumes (never in repo) ────────────────────────────────────────────
+ai-router/volumes/
+
+# ── Editor ────────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo

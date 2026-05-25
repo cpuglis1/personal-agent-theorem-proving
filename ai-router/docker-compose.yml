@@ -1,0 +1,100 @@
+# =============================================================================
+# Local AI Multi-Model Routing Ecosystem
+# Services: LiteLLM (4000) · Open WebUI (3000) · Qdrant (6333)
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # LiteLLM — OpenAI-compatible proxy routing to GPT-4o, Gemini, Claude
+  # ---------------------------------------------------------------------------
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: litellm
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml:ro
+    env_file:
+      - .env
+    environment:
+      LITELLM_CONFIG_PATH: /app/config.yaml
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]
+    # curl is not in the LiteLLM image — use Python's urllib for the probe
+    healthcheck:
+      test: [
+        "CMD-SHELL",
+        "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:4000/health/liveliness')\" 2>/dev/null || exit 1"
+      ]
+      interval: 20s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+    networks:
+      - ai-net
+
+  # ---------------------------------------------------------------------------
+  # Open WebUI — chat UI; all API calls routed through LiteLLM proxy
+  # ---------------------------------------------------------------------------
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    ports:
+      - "3000:8080"
+    volumes:
+      - open-webui-data:/app/backend/data
+    environment:
+      OPENAI_API_BASE_URL: "http://litellm:4000/v1"
+      OPENAI_API_KEY: "${LITELLM_MASTER_KEY}"
+      OLLAMA_BASE_URL: ""
+      ENABLE_OLLAMA_API: "false"
+      WEBUI_SECRET_KEY: "${WEBUI_SECRET_KEY:-change-me-in-env-file}"
+      # Point Open WebUI's RAG engine at the Qdrant container
+      QDRANT_URI: "http://qdrant:6333"
+      VECTOR_DB: "qdrant"
+    depends_on:
+      litellm:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+    networks:
+      - ai-net
+
+  # ---------------------------------------------------------------------------
+  # Qdrant — vector DB for second brain RAG (Open WebUI + agent scripts)
+  # REST API : http://localhost:6333
+  # gRPC     : localhost:6334
+  # ---------------------------------------------------------------------------
+  qdrant:
+    image: qdrant/qdrant:latest
+    container_name: qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    healthcheck:
+      # /readyz does not exist in all Qdrant versions — /collections is stable
+      test: ["CMD-SHELL", "curl -sf http://localhost:6333/collections || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - ai-net
+
+# =============================================================================
+# Named volumes & networks
+# =============================================================================
+volumes:
+  open-webui-data:
+    driver: local
+  qdrant-data:
+    driver: local
+
+networks:
+  ai-net:
+    driver: bridge
