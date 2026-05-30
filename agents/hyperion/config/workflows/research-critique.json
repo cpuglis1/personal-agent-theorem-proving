@@ -1,0 +1,35 @@
+{
+  "id": "research-critique",
+  "name": "Research → Critique → Synthesize",
+  "description": "A deeper four-step pipeline that inserts a critic review of the research notes before the final report. Example of a multi-node, free-form workflow.",
+  "nodes": [
+    {
+      "id": "plan",
+      "agent": "planner",
+      "upstream": [],
+      "gate_before": false,
+      "instruction": null
+    },
+    {
+      "id": "research",
+      "agent": "researcher",
+      "upstream": ["plan"],
+      "gate_before": false,
+      "instruction": null
+    },
+    {
+      "id": "critique",
+      "agent": "critic",
+      "upstream": ["research"],
+      "gate_before": false,
+      "instruction": "Read plan.md and all notes/*.md from the workspace. Critically review the research for gaps, unsupported claims, and missing sources. Write your critique and concrete improvement requests to notes/critique.md."
+    },
+    {
+      "id": "synthesize",
+      "agent": "synthesizer",
+      "upstream": ["critique"],
+      "gate_before": false,
+      "instruction": null
+    }
+  ]
+}

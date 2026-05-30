@@ -1,0 +1,75 @@
+# Hyperion container — standalone override (infra services must already be up)
+#
+# Hyperion is now part of ~/ai/ai-router/docker-compose.yml.
+# The normal workflow is:
+#   cd ~/ai/ai-router && docker compose up -d
+#
+# To rebuild just Hyperion after a code change:
+#   cd ~/ai/ai-router && docker compose build hyperion hyperion-mcp
+#   docker compose up -d --no-deps hyperion hyperion-mcp
+#
+# This override is kept for standalone use (infra already up separately):
+#   cd ~/ai/ai-router
+#   docker compose -f docker-compose.yml -f ../agents/hyperion/docker-compose.override.yml \
+#     up hyperion hyperion-mcp
+
+services:
+
+  hyperion:
+    build:
+      context: ../
+      dockerfile: hyperion/Dockerfile
+    container_name: hyperion
+    restart: unless-stopped
+    ports:
+      - "4100:4100"
+    volumes:
+      - ./tasks:/app/tasks:rw
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    env_file:
+      - .env
+    environment:
+      LITELLM_BASE_URL: "http://litellm:4000/v1"
+      QDRANT_URL: "http://qdrant:6333"
+      SEARXNG_URL: "http://searxng:8888"
+      INFINITY_URL: "http://infinity:7997"
+      LANGFUSE_HOST: "http://langfuse:3000"
+    depends_on:
+      - litellm
+      - qdrant
+      - searxng
+      - infinity
+      - langfuse
+    networks:
+      - ai-net
+    command: ["uv", "run", "hyperion-api"]
+
+  hyperion-mcp:
+    build:
+      context: ../
+      dockerfile: hyperion/Dockerfile
+    container_name: hyperion-mcp
+    restart: unless-stopped
+    ports:
+      - "4101:4101"
+    volumes:
+      - ./tasks:/app/tasks:rw
+    env_file:
+      - .env
+    environment:
+      LITELLM_BASE_URL: "http://litellm:4000/v1"
+      QDRANT_URL: "http://qdrant:6333"
+      SEARXNG_URL: "http://searxng:8888"
+      INFINITY_URL: "http://infinity:7997"
+      LANGFUSE_HOST: "http://langfuse:3000"
+    depends_on:
+      - litellm
+      - qdrant
+    networks:
+      - ai-net
+    command: ["uv", "run", "hyperion-mcp"]
+
+networks:
+  ai-net:
+    external: true
+    name: ai-router_ai-net

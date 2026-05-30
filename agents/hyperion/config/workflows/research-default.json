@@ -1,0 +1,28 @@
+{
+  "id": "research-default",
+  "name": "Research → Synthesize",
+  "description": "The default pipeline: plan the request, research it, then write a polished report. Reproduces Hyperion's original fixed plan → work → synthesize flow.",
+  "nodes": [
+    {
+      "id": "plan",
+      "agent": "planner",
+      "upstream": [],
+      "gate_before": false,
+      "instruction": null
+    },
+    {
+      "id": "research",
+      "agent": "researcher",
+      "upstream": ["plan"],
+      "gate_before": false,
+      "instruction": null
+    },
+    {
+      "id": "synthesize",
+      "agent": "synthesizer",
+      "upstream": ["research"],
+      "gate_before": false,
+      "instruction": null
+    }
+  ]
+}
