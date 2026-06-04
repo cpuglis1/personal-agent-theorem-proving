@@ -30,20 +30,36 @@ from hyperion.config import settings
 
 
 def _task_dir(task_id: str):
+    """Resolve the on-disk directory for a task's feedback/affordance files.
+
+    Args:
+        task_id: The task identifier; used verbatim as a path segment.
+
+    Returns:
+        A ``Path`` to ``settings.tasks_dir / task_id`` (not guaranteed to exist).
+
+    Raises:
+        ValueError: If ``task_id`` is empty or contains ``/`` or ``..``. This is a
+            path-traversal guard: ``task_id`` becomes a filesystem segment, so we
+            reject separators and parent references to keep writes inside ``tasks_dir``.
+    """
     if not task_id or "/" in task_id or ".." in task_id:
         raise ValueError(f"Invalid task_id: {task_id!r}")
     return settings.tasks_dir / task_id
 
 
 def _feedback_md(task_id: str):
+    """Path to the human-readable Markdown feedback log for a task."""
     return _task_dir(task_id) / "feedback.md"
 
 
 def _feedback_queue(task_id: str):
+    """Path to the JSONL feedback queue (drainable, machine-readable) for a task."""
     return _task_dir(task_id) / "feedback_queue.jsonl"
 
 
 def _affordances_path(task_id: str):
+    """Path to the JSONL affordance log (agent-initiated human requests) for a task."""
     return _task_dir(task_id) / "affordances.jsonl"
 
 
@@ -53,7 +69,20 @@ def _affordances_path(task_id: str):
 
 
 def append_feedback(task_id: str, message: str) -> None:
-    """Record a human feedback message (human-readable log + drainable queue)."""
+    """Record a human feedback message (human-readable log + drainable queue).
+
+    Writes to two files so the message is both auditable and deliverable:
+      * ``feedback.md`` — append a timestamped Markdown section for humans to read.
+      * ``feedback_queue.jsonl`` — append a ``{message, ts, consumed: False}`` row
+        that :func:`drain_feedback` later marks consumed (exactly-once delivery).
+
+    Args:
+        task_id: Target task; its directory is created if missing.
+        message: Free-text human feedback. Treated downstream as untrusted DATA.
+
+    Side effects:
+        Creates the task directory and appends to both files on disk.
+    """
     d = _task_dir(task_id)
     d.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -64,7 +93,23 @@ def append_feedback(task_id: str, message: str) -> None:
 
 
 def drain_feedback(task_id: str) -> list[str]:
-    """Return unconsumed feedback messages and mark them consumed (delivered once)."""
+    """Return unconsumed feedback messages and mark them consumed (delivered once).
+
+    Reads the entire JSONL queue, extracts rows not yet marked ``consumed``, then
+    rewrites the file with every row flagged consumed. The rewrite is what
+    guarantees exactly-once delivery: a subsequent call sees no pending rows.
+
+    Args:
+        task_id: Task whose feedback queue should be drained.
+
+    Returns:
+        The ``message`` strings of the previously-unconsumed rows, in file order.
+        Empty list if the queue file is missing or has nothing pending.
+
+    Side effects:
+        Rewrites ``feedback_queue.jsonl`` in place when pending rows exist. Malformed
+        JSON lines are silently skipped (and thus dropped on rewrite).
+    """
     path = _feedback_queue(task_id)
     if not path.exists():
         return []
@@ -75,9 +120,11 @@ def drain_feedback(task_id: str) -> list[str]:
             try:
                 rows.append(json.loads(line))
             except json.JSONDecodeError:
+                # Skip corrupt lines rather than fail the whole drain.
                 continue
     pending = [r for r in rows if not r.get("consumed")]
     if not pending:
+        # Nothing to deliver; avoid an unnecessary file rewrite.
         return []
     for r in rows:
         r["consumed"] = True
@@ -91,7 +138,21 @@ def drain_feedback(task_id: str) -> list[str]:
 
 
 def record_affordance(task_id: str, affordance: dict) -> str:
-    """Append an affordance request; returns its generated id."""
+    """Append a structured affordance (agent-initiated request for human input).
+
+    Args:
+        task_id: Task the affordance belongs to; its directory is created if missing.
+        affordance: The request payload (e.g. ``{"type", "prompt", "agent_id", "stage"}``).
+            If it carries an ``id`` that value is reused; otherwise a short random id
+            is generated.
+
+    Returns:
+        The affordance id (caller's ``id`` or a freshly generated 8-char hex string).
+
+    Side effects:
+        Appends one row to ``affordances.jsonl`` with ``answered=False, answer=None``
+        merged in.
+    """
     d = _task_dir(task_id)
     d.mkdir(parents=True, exist_ok=True)
     aff_id = affordance.get("id") or uuid.uuid4().hex[:8]
@@ -102,6 +163,15 @@ def record_affordance(task_id: str, affordance: dict) -> str:
 
 
 def _load_affordances(task_id: str) -> list[dict]:
+    """Read and parse all affordance rows for a task.
+
+    Args:
+        task_id: Task whose affordance log to load.
+
+    Returns:
+        The affordance dicts in file (chronological) order. Empty list if the file
+        is missing; malformed JSON lines are skipped.
+    """
     path = _affordances_path(task_id)
     if not path.exists():
         return []

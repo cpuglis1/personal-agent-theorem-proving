@@ -1,6 +1,54 @@
 # =============================================================================
-# Local AI Multi-Model Routing Ecosystem
-# Services: LiteLLM (4000) · Open WebUI (3000) · Qdrant (6333)
+# Local AI Multi-Model Routing Ecosystem — Docker Compose stack definition
+# =============================================================================
+# PURPOSE
+#   The single Compose file that defines and wires together every backing
+#   service of Charlie's local AI ecosystem (~/ai). Bring the whole stack up
+#   with `docker compose up -d` from this directory (~/ai/ai-router).
+#
+# ROLE IN THE SYSTEM
+#   This is the infrastructure backbone. LiteLLM is the central LLM gateway —
+#   per the project convention, EVERY LLM call (Open WebUI, Hyperion, agent
+#   scripts) routes through the LiteLLM proxy and never hits a provider API
+#   directly. The other services provide the chat UI, vector search, web
+#   search, reranking, observability, and the Hyperion multi-agent app.
+#
+# SERVICES & HOST PORTS
+#   LiteLLM        (4000)  OpenAI-compatible proxy → GPT-4o, Gemini, Claude
+#   Open WebUI     (3000)  Chat UI (container listens on 8080)
+#   fs-mcp         (none)  Filesystem MCP→OpenAPI bridge (internal :8000 only)
+#   Qdrant         (6333 REST / 6334 gRPC)  Vector DB for second-brain RAG
+#   ai-postgres    (none)  Shared DB for LiteLLM key budgets + Langfuse (internal)
+#   Langfuse       (3001)  LLM tracing UI (container listens on 3000)
+#   SearXNG        (8888)  Federated meta-search JSON API (container :8080)
+#   Infinity       (7997)  Reranker / embedding server
+#   Hyperion       (4100)  CrewAI multi-agent orchestrator API
+#   Hyperion MCP   (4101)  Hyperion exposed as an MCP server
+#   Hyperion UI    (4102)  React/Vite web console
+#
+# KEY DESIGN DECISIONS / NON-OBVIOUS CONTEXT
+#   - Host port != container port for several services (Open WebUI, Langfuse,
+#     SearXNG). Inter-container traffic must use the INTERNAL port over the
+#     shared `ai-net` network (e.g. langfuse:3000, searxng:8080), not the host
+#     port. Getting this wrong is the most common misconfiguration here.
+#   - All services share the `ai-net` bridge network so they resolve each other
+#     by container name (DNS) rather than by host IP.
+#   - Secrets/config come from the gitignored `.env` file in this directory
+#     (and ../agents/hyperion/.env for the Hyperion services). See .env.example.
+#   - `depends_on` with `condition: service_healthy` enforces startup ordering:
+#     LiteLLM waits for Postgres, Open WebUI/Hyperion wait for LiteLLM, etc.
+#
+# REQUIRED ENV VARS (from .env / .env.example)
+#   POSTGRES_PASSWORD, LITELLM_MASTER_KEY, WEBUI_SECRET_KEY, MCPO_API_KEY,
+#   SEARXNG_SECRET_KEY, LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY,
+#   LANGFUSE_NEXTAUTH_SECRET, LANGFUSE_SALT, LANGFUSE_ENCRYPTION_KEY,
+#   LANGFUSE_ADMIN_PASSWORD; optional ANTHROPIC/OPENAI/GEMINI/NOTION keys.
+#
+# USAGE
+#   cd ~/ai/ai-router && docker compose up -d        # start the full stack
+#   docker compose ps                                # check service health
+#   docker compose logs -f <service>                 # tail one service
+#   docker compose down                              # stop (volumes persist)
 # =============================================================================
 
 services:
@@ -20,8 +68,15 @@ services:
       - .env
     environment:
       LITELLM_CONFIG_PATH: /app/config.yaml
+      # Postgres backend for virtual key budget tracking (Phase 0.2)
+      LITELLM_DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@ai-postgres:5432/litellm"
+      # Langfuse tracing — internal Docker URL (langfuse listens on 3000 internally; 3001 is the host port)
+      LANGFUSE_HOST: "http://langfuse:3000"
+      LANGFUSE_PUBLIC_KEY: "${LANGFUSE_PUBLIC_KEY}"
+      LANGFUSE_SECRET_KEY: "${LANGFUSE_SECRET_KEY}"
     command: ["--config", "/app/config.yaml", "--port", "4000", "--num_workers", "4"]
-    # curl is not in the LiteLLM image — use Python's urllib for the probe
+    # Liveness probe hits LiteLLM's /health/liveliness; start_period gives the
+    # proxy 60s to connect to Postgres and load the model config before failing.
     healthcheck:
       test: [
         "CMD-SHELL",
@@ -30,7 +85,10 @@ services:
       interval: 20s
       timeout: 10s
       retries: 5
-      start_period: 45s
+      start_period: 60s
+    depends_on:
+      ai-postgres:
+        condition: service_healthy
     networks:
       - ai-net
 
@@ -45,20 +103,68 @@ services:
       - "3000:8080"
     volumes:
       - open-webui-data:/app/backend/data
+      # Sandboxed host workspace exposed to the file tool
+      - ${AGENT_WORKSPACE_HOST:-${HOME}/agent_workspace}:/workspace:rw
+      # Google OAuth token (read-only; refreshed in-process by the tool)
+      - ${GOOGLE_TOKEN_DIR:-${HOME}/.config/agent-google}:/secrets/google:ro
     environment:
+      # Point OWUI's "OpenAI" provider at the LiteLLM proxy (internal port 4000),
+      # authenticated with the LiteLLM master key — never a real provider key.
       OPENAI_API_BASE_URL: "http://litellm:4000/v1"
       OPENAI_API_KEY: "${LITELLM_MASTER_KEY}"
+      # Disable the Ollama integration entirely (all models come via LiteLLM).
       OLLAMA_BASE_URL: ""
       ENABLE_OLLAMA_API: "false"
       WEBUI_SECRET_KEY: "${WEBUI_SECRET_KEY:-change-me-in-env-file}"
-      # Point Open WebUI's RAG engine at the Qdrant container
       QDRANT_URI: "http://qdrant:6333"
       VECTOR_DB: "qdrant"
+      AGENT_WORKSPACE: "/workspace"
+      GOOGLE_SECRETS_DIR: "/secrets/google"
+      # --- RAG retrieval tuning (native OWUI document RAG; PersistentConfig) ---
+      # These seed the DB config on first boot while rag.* is empty. After OWUI
+      # writes them to the DB, later edits here are IGNORED unless changed in the
+      # UI (Admin → Settings → Documents) — OWUI PersistentConfig gotcha.
+      # NOTE: this tunes OWUI's built-in upload/Knowledge RAG (local MiniLM-L6
+      # embeddings, 384-dim). The second_brain Qdrant collection (1536-dim,
+      # text-embedding-3-small) is a SEPARATE path served by the custom
+      # second_brain_search tool — these settings do not affect it.
+      RAG_TEXT_SPLITTER: "token"          # token-based chunking (was: character)
+      CHUNK_SIZE: "1200"                  # ~ one markdown section (default 1000)
+      CHUNK_OVERLAP: "200"                # continuity across chunks (default 100)
+      RAG_TOP_K: "5"                      # retrieved chunks per query (default 3)
+      RAG_RELEVANCE_THRESHOLD: "0.0"      # OFF: nonzero on raw MiniLM cosine silently drops results; raise only with a reranker
+      ENABLE_RAG_HYBRID_SEARCH: "false"   # leave off until a RAG_RERANKING_MODEL is set (BM25+rerank is the real recall win)
     depends_on:
       litellm:
         condition: service_healthy
       qdrant:
-        condition: service_healthy
+        condition: service_started
+    networks:
+      - ai-net
+
+  # ---------------------------------------------------------------------------
+  # fs-mcp (mcpo) — filesystem MCP server bridged to OpenAPI for Open WebUI.
+  # Gives OWUI agents full read/write file ops over the whole ~/ai workspace,
+  # complementing the read-only second_brain_search (Qdrant) tool.
+  #
+  # mcpo runs the @modelcontextprotocol/server-filesystem MCP server INSIDE this
+  # container and exposes it as OpenAPI on :8000. The ~/ai mount therefore lives
+  # HERE (not on open-webui) — OWUI reaches the files over the network, not via
+  # its own filesystem.
+  #
+  # Register in OWUI: Settings → Tools → "+" → URL http://fs-mcp:8000 ,
+  # auth = Bearer, key = ${MCPO_API_KEY}. OpenAPI spec at /openapi.json.
+  # ---------------------------------------------------------------------------
+  fs-mcp:
+    image: ghcr.io/open-webui/mcpo:main
+    container_name: fs-mcp
+    restart: unless-stopped
+    # Not published to the host — OWUI reaches it in-network at http://fs-mcp:8000.
+    command: >
+      --host 0.0.0.0 --port 8000 --api-key "${MCPO_API_KEY}"
+      -- npx -y @modelcontextprotocol/server-filesystem /ai
+    volumes:
+      - ${HOME}/ai:/ai:rw
     networks:
       - ai-net
 
@@ -76,13 +182,230 @@ services:
       - "6334:6334"
     volumes:
       - qdrant-data:/qdrant/storage
+    # /collections is used instead of /readyz because /readyz doesn't exist in
+    # all Qdrant versions; curl is available in the qdrant Docker image.
     healthcheck:
       # /readyz does not exist in all Qdrant versions — /collections is stable
       test: ["CMD-SHELL", "curl -sf http://localhost:6333/collections || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
-      start_period: 20s
+      start_period: 30s
+    networks:
+      - ai-net
+
+  # ---------------------------------------------------------------------------
+  # Postgres — shared DB for LiteLLM virtual-key budget tracking + Langfuse
+  # Internal only; not exposed on the host.
+  # ---------------------------------------------------------------------------
+  ai-postgres:
+    image: postgres:16-alpine
+    container_name: ai-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD}"
+      # `langfuse` DB is created by the image; the separate `litellm` DB is
+      # created by the init scripts mounted below (LiteLLM expects it to exist).
+      POSTGRES_DB: langfuse
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Init SQL run once on first boot of an empty data dir (creates litellm DB).
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    networks:
+      - ai-net
+
+  # ---------------------------------------------------------------------------
+  # Langfuse — self-hosted LLM observability + tracing
+  # UI: http://localhost:3001
+  # ---------------------------------------------------------------------------
+  langfuse:
+    image: langfuse/langfuse:2
+    container_name: langfuse
+    restart: unless-stopped
+    ports:
+      - "3001:3000"
+    environment:
+      DATABASE_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@ai-postgres:5432/langfuse"
+      DIRECT_URL: "postgresql://postgres:${POSTGRES_PASSWORD}@ai-postgres:5432/langfuse"
+      NEXTAUTH_URL: "http://localhost:3001"
+      NEXTAUTH_SECRET: "${LANGFUSE_NEXTAUTH_SECRET}"
+      SALT: "${LANGFUSE_SALT}"
+      # Auto-create initial org, project, and admin user on first boot
+      LANGFUSE_INIT_ORG_NAME: "Hyperion"
+      LANGFUSE_INIT_PROJECT_NAME: "hyperion"
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: "${LANGFUSE_PUBLIC_KEY}"
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: "${LANGFUSE_SECRET_KEY}"
+      LANGFUSE_INIT_USER_EMAIL: "${LANGFUSE_ADMIN_EMAIL:-admin@localhost}"
+      LANGFUSE_INIT_USER_PASSWORD: "${LANGFUSE_ADMIN_PASSWORD}"
+      LANGFUSE_INIT_USER_NAME: "admin"
+      TELEMETRY_ENABLED: "false"
+      # Required in Langfuse v2.x for encrypting API keys at rest
+      # Generate: openssl rand -hex 32
+      ENCRYPTION_KEY: "${LANGFUSE_ENCRYPTION_KEY}"
+    depends_on:
+      ai-postgres:
+        condition: service_healthy
+    networks:
+      - ai-net
+
+  # ---------------------------------------------------------------------------
+  # SearXNG — self-hosted federated meta-search
+  # JSON API: http://localhost:8888/search?q=...&format=json
+  # ---------------------------------------------------------------------------
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "8888:8080"
+    volumes:
+      - ./searxng:/etc/searxng:rw
+    environment:
+      SEARXNG_BASE_URL: "http://localhost:8888/"
+      SEARXNG_SECRET_KEY: "${SEARXNG_SECRET_KEY}"
+    networks:
+      - ai-net
+
+  # ---------------------------------------------------------------------------
+  # Infinity — self-hosted reranker + embedding server
+  # Rerank endpoint: POST http://localhost:7997/rerank
+  # Model: BAAI/bge-reranker-v2-m3 (CPU mode; set INFINITY_DEVICE=cuda for GPU)
+  # ---------------------------------------------------------------------------
+  infinity:
+    image: michaelf34/infinity:latest
+    container_name: infinity
+    restart: unless-stopped
+    ports:
+      - "7997:7997"
+    volumes:
+      - infinity-cache:/app/.cache
+    environment:
+      # Set to "cuda" and add `deploy: resources: reservations: devices:` for GPU
+      INFINITY_DEVICE: "${INFINITY_DEVICE:-cpu}"
+    command: >
+      v2
+      --model-id BAAI/bge-reranker-v2-m3
+      --served-model-name BAAI/bge-reranker-v2-m3
+      --port 7997
+      --batch-size 32
+      --device ${INFINITY_DEVICE:-cpu}
+    networks:
+      - ai-net
+
+  # ---------------------------------------------------------------------------
+  # Hyperion — CrewAI multi-agent orchestrator
+  # API: http://localhost:4100   MCP: http://localhost:4101
+  # Requires: ../agents/hyperion/.env (copy from .env.example and fill in)
+  # ---------------------------------------------------------------------------
+  hyperion:
+    build:
+      context: ../agents
+      dockerfile: hyperion/Dockerfile
+    container_name: hyperion
+    restart: unless-stopped
+    ports:
+      - "4100:4100"
+    volumes:
+      - ../agents/hyperion/tasks:/app/tasks:rw
+      - ../agents/hyperion/config:/app/config:rw
+      - ../agents/hyperion/src:/app/src:rw
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    env_file:
+      - ../agents/hyperion/.env
+    environment:
+      LITELLM_BASE_URL: "http://litellm:4000/v1"
+      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"
+      QDRANT_URL: "http://qdrant:6333"
+      SEARXNG_URL: "http://searxng:8080"
+      INFINITY_URL: "http://infinity:7997"
+      LANGFUSE_HOST: "http://langfuse:3000"
+      HYPERION_TASKS_DIR: "/app/tasks"
+      HYPERION_CONFIG_DIR: "/app/config"
+      # Pass provider keys through (used only by /config endpoint to report which
+      # providers are configured — actual LLM calls route via LiteLLM proxy).
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+      LANGFUSE_PUBLIC_URL: "http://localhost:3001"
+      # Project id makes trace deep-links resolvable: {host}/project/{id}/sessions/{task_id}.
+      # Without it the link falls back to /sessions/{id}, which Langfuse 404s.
+      LANGFUSE_PROJECT_ID: "${LANGFUSE_PROJECT_ID:-}"
+      # Phase 9 "save to Notion" follow-up. Both must be set for the affordance to
+      # write a page; absent, the endpoint returns a clear "not configured" 502.
+      NOTION_API_KEY: "${NOTION_API_KEY:-}"
+      NOTION_DATABASE_ID: "${NOTION_DATABASE_ID:-}"
+    depends_on:
+      litellm:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    networks:
+      - ai-net
+    command: ["uv", "run", "hyperion-api"]
+
+  hyperion-mcp:
+    build:
+      context: ../agents
+      dockerfile: hyperion/Dockerfile
+    container_name: hyperion-mcp
+    restart: unless-stopped
+    ports:
+      - "4101:4101"
+    volumes:
+      - ../agents/hyperion/tasks:/app/tasks:rw
+      - ../agents/hyperion/config:/app/config:rw
+    env_file:
+      - ../agents/hyperion/.env
+    environment:
+      LITELLM_BASE_URL: "http://litellm:4000/v1"
+      LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"
+      QDRANT_URL: "http://qdrant:6333"
+      SEARXNG_URL: "http://searxng:8080"
+      INFINITY_URL: "http://infinity:7997"
+      LANGFUSE_HOST: "http://langfuse:3000"
+      HYPERION_TASKS_DIR: "/app/tasks"
+      HYPERION_CONFIG_DIR: "/app/config"
+      # Pass provider keys through (used only by /config endpoint to report which
+      # providers are configured — actual LLM calls route via LiteLLM proxy).
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      GEMINI_API_KEY: "${GEMINI_API_KEY:-}"
+    depends_on:
+      litellm:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+    networks:
+      - ai-net
+    command: ["uv", "run", "hyperion-mcp"]
+
+  # ---------------------------------------------------------------------------
+  # Hyperion Web UI (Phase 7) — React/Vite built to static assets, nginx-served.
+  # VITE_HYPERION_API is baked in at build time and must point at the *host*
+  # published port (the browser, not a container, makes the calls).
+  # ---------------------------------------------------------------------------
+  hyperion-ui:
+    build:
+      context: ../agents/hyperion-ui
+      dockerfile: Dockerfile
+      args:
+        # Baked into the static bundle at build time (build arg, not runtime env):
+        # must be the HOST-published Hyperion API URL because the browser — not
+        # a container — issues these calls, so it cannot use `http://hyperion:4100`.
+        VITE_HYPERION_API: "${VITE_HYPERION_API:-http://localhost:4100}"
+    container_name: hyperion-ui
+    restart: unless-stopped
+    ports:
+      - "4102:4102"
+    depends_on:
+      - hyperion
     networks:
       - ai-net
 
@@ -93,6 +416,10 @@ volumes:
   open-webui-data:
     driver: local
   qdrant-data:
+    driver: local
+  postgres-data:
+    driver: local
+  infinity-cache:
     driver: local
 
 networks:

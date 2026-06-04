@@ -1,25 +1,87 @@
 # =============================================================================
 # LiteLLM Proxy Configuration
 # Docs: https://docs.litellm.ai/docs/proxy/configs
+#
+# WHAT THIS IS
+#   The single config that drives the LiteLLM proxy container in the ai-router
+#   Docker Compose stack. The proxy exposes an OpenAI-compatible API at
+#   http://localhost:4000/v1 and is the ONLY path through which the rest of the
+#   ecosystem (Hyperion agents, the second-brain ingestion pipeline, Open WebUI,
+#   slash-command skills) is allowed to reach an LLM. No component calls a
+#   provider API (OpenAI / Anthropic / Gemini) directly — see ~/ai/CLAUDE.md.
+#
+# WHY A PROXY
+#   - One place to swap models, add providers, and tune timeouts/retries.
+#   - Centralized Langfuse tracing of every generation (see litellm_settings).
+#   - Virtual-key budget tracking via a Postgres DB (see general_settings).
+#   - Provider-agnostic "role" aliases (smart/worker/cheap/fast) so calling code
+#     names an intent, not a vendor model, and stays portable across providers.
+#
+# KEY DESIGN DECISIONS
+#   - Provider API keys are ALL optional. Each model entry references its key via
+#     os.environ/<NAME>; if that env var is unset the entry returns an auth error
+#     at call time and LiteLLM simply skips it. So you only need keys for the
+#     providers you actually have — the role aliases degrade gracefully.
+#   - Role aliases list EVERY supported provider in priority (preference) order.
+#     LiteLLM round-robins within an alias group and skips auth-failing entries,
+#     so the first provider whose key is present effectively "wins".
+#   - Two layers of resilience: (1) within a model group, LiteLLM retries across
+#     entries on auth/rate errors; (2) the litellm_settings.fallbacks map kicks
+#     in only when EVERY entry in a group fails, routing to a different group.
+#
+# ENV VARS CONSUMED (resolved at proxy startup from ai-router/.env)
+#   LITELLM_MASTER_KEY     — admin/auth key for the proxy itself (required)
+#   LITELLM_DATABASE_URL   — Postgres URL for virtual-key budget tracking
+#   OPENAI_API_KEY         — enables gpt-4o / gpt-4o-mini / o1-mini / embeddings
+#   ANTHROPIC_API_KEY      — enables claude-* models
+#   GEMINI_API_KEY         — enables gemini-* models
+#   LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST — tracing sink
+#
+# Provider keys are ALL optional — only define the ones you have.
+# Role aliases (smart / worker / cheap / fast) each list every supported
+# provider in priority order; LiteLLM tries them round-robin and falls back
+# automatically when a key is missing or a call fails.
 # =============================================================================
 
+# Proxy-wide auth and persistence settings.
 general_settings:
-  master_key: os.environ/LITELLM_MASTER_KEY
-  store_model_in_db: false
+  master_key: os.environ/LITELLM_MASTER_KEY   # admin key; also the default bearer token clients present
+  store_model_in_db: false                    # model_list below is the source of truth (not the DB / admin UI)
+  # DATABASE_URL is injected via env for virtual key budget tracking (Phase 0.2)
+  database_url: os.environ/LITELLM_DATABASE_URL
 
+# Global behavior applied to every request regardless of model.
 litellm_settings:
-  drop_params: true
-  set_verbose: false
-  request_timeout: 120
-  num_retries: 2
+  drop_params: true        # silently drop params a target provider doesn't support (keeps cross-provider calls portable)
+  set_verbose: false       # keep proxy logs quiet; flip to true only for local debugging
+  request_timeout: 120     # seconds per upstream call before LiteLLM aborts it
+  num_retries: 2           # retries per entry on transient/rate errors before moving on
+  # Langfuse tracing — every LLM call is logged as a generation, grouped by
+  # session_id metadata (set by the calling agent — Hyperion sets it to task_id).
+  # Keys + host are read from env: LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY / LANGFUSE_HOST
+  success_callback: ["langfuse"]
+  failure_callback: ["langfuse"]
+  # Cross-model fallbacks: when ALL entries in a model group fail, try these.
+  # Within a group, LiteLLM already retries across entries on auth/rate errors.
+  # Each list is tried left-to-right; note these chains can hop between role
+  # aliases and concrete model names (e.g. smart -> worker -> gpt-4o).
   fallbacks:
-    - "gpt-4o": ["claude-sonnet-4-6", "gemini-1.5-pro"]
-    - "claude-sonnet-4-6": ["gpt-4o", "gemini-1.5-pro"]
-    - "gemini-1.5-pro": ["gpt-4o", "claude-sonnet-4-6"]
+    - smart:            ["worker", "gpt-4o", "gemini-2.5-pro"]
+    - worker:           ["gpt-4o", "gemini-2.5-pro"]
+    - cheap:            ["fast", "gpt-4o-mini"]
+    - fast:             ["gpt-4o-mini", "cheap"]
+    - gpt-4o:           ["gemini-2.5-pro", "claude-sonnet-4-6"]
+    - claude-sonnet-4-6: ["gpt-4o", "gemini-2.5-pro"]
+    - gemini-2.5-pro:   ["gpt-4o", "claude-sonnet-4-6"]
 
+# Concrete model definitions plus role-alias groups.
+# model_name is the public handle clients request; litellm_params.model is the
+# provider-prefixed upstream id LiteLLM actually calls. Multiple entries sharing
+# one model_name form a "group" that LiteLLM load-balances / fails over across.
 model_list:
 
-  # ── OpenAI ──────────────────────────────────────────────────────────────────
+  # ── OpenAI ────────────────────────────────────────────────────────────────
+  # Requires OPENAI_API_KEY
 
   - model_name: gpt-4o
     litellm_params:
@@ -36,8 +98,9 @@ model_list:
       model: openai/o1-mini
       api_key: os.environ/OPENAI_API_KEY
 
-  # ── Anthropic Claude ────────────────────────────────────────────────────────
-  # Requires ANTHROPIC_API_KEY (pay-as-you-go; separate from your subscription)
+  # ── Anthropic Claude ──────────────────────────────────────────────────────
+  # Requires ANTHROPIC_API_KEY (console.anthropic.com — pay-per-use)
+  # Omit ANTHROPIC_API_KEY and these models will be skipped by the aliases below.
 
   - model_name: claude-opus-4-6
     litellm_params:
@@ -49,37 +112,107 @@ model_list:
       model: anthropic/claude-sonnet-4-6
       api_key: os.environ/ANTHROPIC_API_KEY
 
-  # ── Google Gemini ────────────────────────────────────────────────────────────
-
-  - model_name: gemini-1.5-pro
+  - model_name: claude-haiku-4-5
     litellm_params:
-      model: gemini/gemini-1.5-pro
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  # ── Google Gemini ─────────────────────────────────────────────────────────
+  # Requires GEMINI_API_KEY (aistudio.google.com)
+
+  - model_name: gemini-2.5-flash
+    litellm_params:
+      model: gemini/gemini-2.5-flash
       api_key: os.environ/GEMINI_API_KEY
 
-  - model_name: gemini-1.5-flash
+  - model_name: gemini-2.5-pro
     litellm_params:
-      model: gemini/gemini-1.5-flash
+      model: gemini/gemini-2.5-pro
       api_key: os.environ/GEMINI_API_KEY
 
-  - model_name: gemini-2.0-flash
+  # ── Embeddings ────────────────────────────────────────────────────────────
+  # text-embedding-3-small is used for Qdrant RAG (requires OPENAI_API_KEY)
+
+  - model_name: text-embedding-3-small
     litellm_params:
-      model: gemini/gemini-2.0-flash
-      api_key: os.environ/GEMINI_API_KEY
+      model: openai/text-embedding-3-small
+      api_key: os.environ/OPENAI_API_KEY
 
-  # ── Routing aliases ──────────────────────────────────────────────────────────
+  # ── Role aliases ──────────────────────────────────────────────────────────
+  # Each alias is a multi-provider group. LiteLLM picks entries round-robin
+  # and skips ones that return auth errors, so only providers with valid keys
+  # are actually used. Add your preferred provider first.
+  #
+  # To change which model is used for a role, set the env var in
+  # agents/hyperion/.env (MODEL_PLANNER, MODEL_WORKER, MODEL_CHEAP).
 
-  - model_name: smart          # best reasoning model available
+  # smart — best reasoning. Claude Opus preferred; falls back to Gemini Pro, GPT-4o.
+  - model_name: smart
     litellm_params:
       model: anthropic/claude-opus-4-6
       api_key: os.environ/ANTHROPIC_API_KEY
 
-  - model_name: fast           # cheapest/fastest for iteration
+  - model_name: smart
     litellm_params:
-      model: gemini/gemini-2.0-flash
+      model: gemini/gemini-2.5-pro
       api_key: os.environ/GEMINI_API_KEY
 
+  - model_name: smart
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+
+  # worker — balanced reasoning/cost. Claude Sonnet preferred.
+  - model_name: worker
+    litellm_params:
+      model: anthropic/claude-sonnet-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: worker
+    litellm_params:
+      model: gemini/gemini-2.5-pro
+      api_key: os.environ/GEMINI_API_KEY
+
+  - model_name: worker
+    litellm_params:
+      model: openai/gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+
+  # cheap — fast, low-cost. Claude Haiku preferred; falls back to Gemini Flash.
+  - model_name: cheap
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: cheap
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: os.environ/GEMINI_API_KEY
+
+  - model_name: cheap
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+  # fast — alias for cheapest/fastest iteration (same as cheap, Gemini-first).
+  - model_name: fast
+    litellm_params:
+      model: gemini/gemini-2.5-flash
+      api_key: os.environ/GEMINI_API_KEY
+
+  - model_name: fast
+    litellm_params:
+      model: anthropic/claude-haiku-4-5-20251001
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: fast
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+# Router-level controls for how entries within a model group are selected/retried.
 router_settings:
-  routing_strategy: simple-shuffle
-  num_retries: 2
-  timeout: 120
-  retry_after: 5
+  routing_strategy: simple-shuffle  # pick a random healthy entry per request (cheap stateless load-balancing across providers)
+  num_retries: 2                    # router-level retries across group entries (complements litellm_settings.num_retries)
+  timeout: 120                      # seconds the router waits on a chosen entry before failing it over
+  retry_after: 5                    # seconds to back off before retrying a failed entry

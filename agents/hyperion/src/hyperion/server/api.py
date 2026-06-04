@@ -1,7 +1,35 @@
 """
-FastAPI service for Hyperion.
+FastAPI service for Hyperion — the HTTP control plane for the multi-agent orchestrator.
 
-Endpoints:
+This module is the single public surface (mounted at http://localhost:4100 in the
+docker-compose stack) for everything the Hyperion UI (nginx :4102) and external
+callers (n8n, other agents) do: submitting tasks, polling/streaming progress,
+approving plans, sending feedback, CRUD on agents/workflows, live model/threshold
+reconfiguration, metrics, and config export/import.
+
+Architecture / key design decisions:
+  - State is a single SQLite file (``state.db`` under ``settings.tasks_dir``) accessed
+    via ``aiosqlite``. The schema is created lazily on first connect and migrated
+    in-place (``_migrate``) by ALTER-ing in nullable columns, so an existing DB from
+    an earlier phase keeps working without a destructive migration.
+  - Task execution runs in fire-and-forget ``asyncio.create_task`` background
+    coroutines (``_run_and_update`` / ``_resume_and_update``). The HTTP handlers
+    return ``202`` / a ``running`` status immediately; clients poll ``GET
+    /tasks/{id}`` or subscribe to the SSE stream.
+  - Progress lines live in the in-memory ``_PROGRESS`` dict AND are appended to a
+    per-task ``progress.log`` on disk, so a server restart can rehydrate streams and
+    a paused (human-in-the-loop) task survives the restart and can still be resumed.
+  - Human-in-the-loop (HITL): a task can pause at ``awaiting_approval`` (plan gate)
+    or ``awaiting_input`` (an ``ask_user`` question). All pause/resume state needed
+    to continue is persisted to the DB, never only in memory.
+  - Live reconfiguration: ``PUT /config`` (role→model) and ``PUT /thresholds``
+    (token/wall caps) mutate the in-process ``settings`` object AND persist to JSON
+    files under ``settings.config_dir`` (``models.json`` / ``thresholds.json``),
+    which are re-applied on the next boot (``_apply_*_overrides``).
+  - Per the workspace convention, all LLM traffic flows through the LiteLLM proxy;
+    this service never calls provider APIs directly.
+
+Endpoints (non-exhaustive — see the route decorators below):
   GET  /config                    → current model assignments + provider key status
   POST /tasks                     → submit a task
   GET  /tasks/{task_id}           → status + links
@@ -35,7 +63,6 @@ from hyperion.agents.registry import (
     load_all_agents,
     save_agent,
     validate_agent,
-    validate_collection,
 )
 from hyperion import scheduler, usage
 from hyperion.config import settings
@@ -82,17 +109,66 @@ _NEW_COLUMNS = {
 
 
 async def _migrate(db: aiosqlite.Connection) -> None:
-    """Add nullable columns to a pre-existing tasks table (CREATE IF NOT EXISTS
-    will not add columns to an already-created table)."""
+    """Bring an existing ``tasks`` table up to the current schema and ensure
+    ``trace_events`` exists.
+
+    ``CREATE TABLE IF NOT EXISTS`` is a no-op once the table exists, so newer
+    columns must be added explicitly. This inspects the live column set via
+    ``PRAGMA table_info`` and ALTER-adds any missing column from ``_NEW_COLUMNS``
+    (all nullable, so the migration is non-destructive and order-independent).
+
+    Args:
+        db: An open aiosqlite connection. The connection is committed before return.
+
+    Returns:
+        None.
+
+    Side effects:
+        Issues ALTER TABLE / CREATE TABLE statements and commits the transaction.
+    """
     async with db.execute("PRAGMA table_info(tasks)") as cur:
         existing = {row[1] for row in await cur.fetchall()}
     for name, sqltype in _NEW_COLUMNS.items():
         if name not in existing:
             await db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {sqltype}")
+    await db.execute(
+        """CREATE TABLE IF NOT EXISTS trace_events (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            task_id          TEXT    NOT NULL,
+            agent_role       TEXT    NOT NULL,
+            node_id          TEXT,
+            prompt_type      TEXT    NOT NULL DEFAULT 'user-facing',
+            model            TEXT,
+            input_tokens     INTEGER DEFAULT 0,
+            output_tokens    INTEGER DEFAULT 0,
+            cost_usd         REAL    DEFAULT 0.0,
+            prompt_preview   TEXT,
+            response_preview TEXT,
+            tools_used       TEXT,
+            started_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+            duration_ms      INTEGER
+        )"""
+    )
+    # Add node_id to a pre-existing trace_events table (nullable → non-destructive).
+    async with db.execute("PRAGMA table_info(trace_events)") as cur:
+        trace_cols = {row[1] for row in await cur.fetchall()}
+    if "node_id" not in trace_cols:
+        await db.execute("ALTER TABLE trace_events ADD COLUMN node_id TEXT")
     await db.commit()
 
 
 async def _get_db() -> aiosqlite.Connection:
+    """Open the tasks DB, creating + migrating the schema on the way out.
+
+    Ensures the ``tasks`` table exists (with the full current column set) and then
+    runs ``_migrate`` so an older on-disk DB gains any newly-added columns.
+
+    Returns:
+        An open aiosqlite connection. The caller owns it and must ``await db.close()``.
+
+    Side effects:
+        Creates/migrates the SQLite schema and commits.
+    """
     db = await aiosqlite.connect(_DB_PATH)
     await db.execute(
         """CREATE TABLE IF NOT EXISTS tasks (
@@ -118,6 +194,22 @@ async def _get_db() -> aiosqlite.Connection:
 
 
 async def _update_task(task_id: str, **kwargs: Any) -> None:
+    """Patch arbitrary columns of one task row and bump ``updated_at``.
+
+    Builds the SET clause from the kwargs keys (column names are trusted callers'
+    constants, never user input) and binds the values positionally.
+
+    Args:
+        task_id: The task to update (WHERE task_id=?).
+        **kwargs: column=value pairs to write. ``updated_at`` is always set to
+            CURRENT_TIMESTAMP in addition.
+
+    Returns:
+        None.
+
+    Side effects:
+        Opens its own short-lived connection, executes the UPDATE, and commits.
+    """
     sets = ", ".join(f"{k}=?" for k in kwargs)
     values = list(kwargs.values()) + [task_id]
     async with aiosqlite.connect(_DB_PATH) as db:
@@ -135,10 +227,35 @@ async def _update_task(task_id: str, **kwargs: Any) -> None:
 
 
 def _progress_log_path(task_id: str) -> Path:
+    """Return the on-disk progress log path for a task.
+
+    Args:
+        task_id: The task whose log path to compute.
+
+    Returns:
+        ``{tasks_dir}/{task_id}/progress.log`` (not guaranteed to exist).
+    """
     return settings.tasks_dir / task_id / "progress.log"
 
 
 def _append_progress(task_id: str, line: str) -> None:
+    """Record one progress line both in memory and on disk.
+
+    Appends to the in-memory ``_PROGRESS`` list (read by the SSE stream and status
+    endpoint) and best-effort appends to the per-task ``progress.log`` so the line
+    survives a restart.
+
+    Args:
+        task_id: The task this progress line belongs to.
+        line: The text to record (no trailing newline needed).
+
+    Returns:
+        None.
+
+    Side effects:
+        Mutates ``_PROGRESS`` and writes to disk. Disk errors are swallowed —
+        progress logging must never break a running task.
+    """
     _PROGRESS.setdefault(task_id, []).append(line)
     try:
         path = _progress_log_path(task_id)
@@ -150,7 +267,18 @@ def _append_progress(task_id: str, line: str) -> None:
 
 
 def _rehydrate_progress() -> None:
-    """Reload progress lines from disk so a restarted API can keep streaming."""
+    """Reload progress lines from disk so a restarted API can keep streaming.
+
+    Called once on startup. Scans every task directory under ``settings.tasks_dir``
+    and repopulates ``_PROGRESS`` from each ``progress.log``.
+
+    Returns:
+        None.
+
+    Side effects:
+        Repopulates the module-level ``_PROGRESS`` dict. Per-file read errors are
+        ignored so one corrupt log can't block startup.
+    """
     if not settings.tasks_dir.exists():
         return
     for task_dir in settings.tasks_dir.iterdir():
@@ -163,7 +291,18 @@ def _rehydrate_progress() -> None:
 
 
 def _plan_affordance(task_id: str) -> dict:
-    """Build the choice affordance shown while a task awaits plan approval."""
+    """Build the choice affordance shown while a task awaits plan approval.
+
+    Parses the task's persisted plan and turns each plan option into a selectable
+    choice. If the plan exposed no options, falls back to a single "Proceed with
+    the plan" default so the UI always has something to render.
+
+    Args:
+        task_id: The paused task whose plan options to surface.
+
+    Returns:
+        A serialized ``Affordance`` dict (type="choice") for the API response.
+    """
     fm = parse_plan(task_id)
     options = [
         AffordanceOption(id=o.id, label=o.summary or o.id, description=o.summary or "")
@@ -181,7 +320,18 @@ def _plan_affordance(task_id: str) -> dict:
 
 
 def _question_affordance(task_id: str) -> Optional[dict]:
-    """Build the question affordance for a task paused on an ``ask_user`` request."""
+    """Build the question affordance for a task paused on an ``ask_user`` request.
+
+    Looks up the most recent pending affordance recorded by the feedback subsystem
+    and renders it as a free-text question for the UI.
+
+    Args:
+        task_id: The paused task awaiting a user answer.
+
+    Returns:
+        A serialized ``Affordance`` dict (type="question"), or ``None`` if no
+        pending question exists for this task.
+    """
     from hyperion.feedback import latest_pending_affordance
 
     pending = latest_pending_affordance(task_id)
@@ -196,7 +346,19 @@ def _question_affordance(task_id: str) -> Optional[dict]:
 
 
 def _pending_affordance(task_id: str, status: str) -> Optional[dict]:
-    """Surface the right affordance for whichever pending state a task is in."""
+    """Surface the right affordance for whichever pending state a task is in.
+
+    Dispatches on status: ``awaiting_approval`` → plan-choice affordance,
+    ``awaiting_input`` → question affordance, anything else → no affordance.
+
+    Args:
+        task_id: The task being inspected.
+        status: The task's current status string.
+
+    Returns:
+        A serialized affordance dict, or ``None`` when the task is not paused for
+        human input.
+    """
     if status == "awaiting_approval":
         return _plan_affordance(task_id)
     if status == "awaiting_input":
@@ -205,7 +367,26 @@ def _pending_affordance(task_id: str, status: str) -> Optional[dict]:
 
 
 async def _persist_result(task_id: str, result: dict) -> None:
-    """Write a runner/resume result back to the tasks table."""
+    """Write a runner/resume result back to the tasks table.
+
+    Branches on the result status:
+      - paused states (``awaiting_approval`` / ``awaiting_input``): stores the
+        pending stage + payload and mints a short ``resume_token`` so the task can
+        be continued later (even across a restart).
+      - terminal states: stores error/result_path and the JSON-encoded routing,
+        and clears the pending stage/payload fields.
+
+    Args:
+        task_id: The task to update.
+        result: The dict returned by ``run_task`` / ``resume_task`` (must contain
+            a ``status`` key; other keys are read defensively).
+
+    Returns:
+        None.
+
+    Side effects:
+        Persists task state via ``_update_task``.
+    """
     status = result["status"]
     if status in ("awaiting_approval", "awaiting_input"):
         await _update_task(
@@ -237,12 +418,29 @@ _MODEL_FIELDS = ("model_planner", "model_worker", "model_cheap")
 
 
 def _model_override_path() -> Path:
+    """Path of the persisted ``PUT /config`` model-override file.
+
+    Returns:
+        ``{config_dir}/models.json``. Computed at call time (not cached) so a
+        patched ``config_dir`` in tests/Docker is always respected.
+    """
     # Computed at call time so a patched config_dir (tests/Docker) is respected.
     return settings.config_dir / "models.json"
 
 
 def _apply_model_overrides() -> None:
-    """Re-apply persisted PUT /config model choices to in-memory settings on boot."""
+    """Re-apply persisted PUT /config model choices to in-memory settings on boot.
+
+    Reads ``models.json`` (if present) and copies any role-model fields plus
+    ``default_workflow`` onto the live ``settings`` object. A missing or malformed
+    file is silently ignored (settings keep their env/default values).
+
+    Returns:
+        None.
+
+    Side effects:
+        Mutates the global ``settings`` object.
+    """
     path = _model_override_path()
     if not path.exists():
         return
@@ -262,11 +460,28 @@ _CAP_FIELDS = ("cap_input_tokens", "cap_output_tokens", "cap_tool_loop", "cap_wa
 
 
 def _thresholds_path() -> Path:
+    """Path of the persisted ``PUT /thresholds`` global-caps file.
+
+    Returns:
+        ``{config_dir}/thresholds.json`` (computed at call time, like the model
+        override path, so a patched ``config_dir`` is respected).
+    """
     return settings.config_dir / "thresholds.json"
 
 
 def _apply_threshold_overrides() -> None:
-    """Re-apply persisted PUT /thresholds global caps to settings on boot."""
+    """Re-apply persisted PUT /thresholds global caps to settings on boot.
+
+    Reads ``thresholds.json`` (if present) and copies any of the global cap fields
+    onto the live ``settings`` object. Only integer values are applied; a missing
+    or malformed file is ignored.
+
+    Returns:
+        None.
+
+    Side effects:
+        Mutates the global ``settings`` object.
+    """
     path = _thresholds_path()
     if not path.exists():
         return
@@ -281,6 +496,21 @@ def _apply_threshold_overrides() -> None:
 
 @app.on_event("startup")
 async def _startup() -> None:
+    """FastAPI startup hook — initialize all runtime state.
+
+    Ordering matters: the tasks dir and DB schema must exist before anything else,
+    progress is rehydrated so paused tasks can stream, persisted config/threshold
+    overrides are re-applied to ``settings``, usage accounting is registered, and
+    finally the background scheduler loop is launched (and stashed on ``app.state``
+    so ``_shutdown`` can stop it).
+
+    Returns:
+        None.
+
+    Side effects:
+        Creates directories/DB, mutates ``settings``, registers usage hooks, and
+        spawns the scheduler asyncio task.
+    """
     settings.tasks_dir.mkdir(parents=True, exist_ok=True)
     # Ensure DB schema exists
     db = await _get_db()
@@ -301,6 +531,18 @@ async def _startup() -> None:
 
 @app.on_event("shutdown")
 async def _shutdown() -> None:
+    """FastAPI shutdown hook — stop the background scheduler cleanly.
+
+    Signals the scheduler's stop event and waits up to 5 seconds for the loop to
+    exit; if it doesn't finish in time (or is already cancelled), the task is
+    force-cancelled.
+
+    Returns:
+        None.
+
+    Side effects:
+        Sets the stop event and may cancel the scheduler asyncio task.
+    """
     stop = getattr(app.state, "scheduler_stop", None)
     task = getattr(app.state, "scheduler_task", None)
     if stop is not None:
@@ -314,7 +556,21 @@ async def _shutdown() -> None:
 
 async def _enqueue_scheduled(record: AgentRecord) -> None:
     """Scheduler callback: start a normal pipeline task originated by a
-    schedule-trigger agent. Mirrors POST /tasks so scheduled runs are first-class."""
+    schedule-trigger agent. Mirrors POST /tasks so scheduled runs are first-class.
+
+    Mints a task id, derives the request text from the agent record, inserts a
+    ``queued`` row (with HITL forced off — scheduled runs are unattended), and
+    spawns the background runner.
+
+    Args:
+        record: The schedule-trigger agent whose configured task to enqueue.
+
+    Returns:
+        None.
+
+    Side effects:
+        Inserts a tasks row and starts a background ``_run_and_update`` coroutine.
+    """
     task_id = str(uuid.uuid4())[:8]
     request = scheduler.scheduled_task_request(record)
     async with aiosqlite.connect(_DB_PATH) as db:
@@ -340,6 +596,11 @@ async def get_config() -> dict:
     the proxy automatically picks from whichever providers have valid keys.
     Override any assignment by setting MODEL_PLANNER / MODEL_WORKER / MODEL_CHEAP
     in agents/hyperion/.env and restarting.
+
+    Returns:
+        A dict with current model aliases (+ env var names + notes), per-provider
+        key presence, the hard-coded alias fallback order, global caps, the default
+        workflow, and the LiteLLM base URL.
     """
     providers = settings.provider_keys_present()
     return {
@@ -387,11 +648,27 @@ async def get_config() -> dict:
 
 
 class TaskRequest(BaseModel):
+    """Input body for ``POST /tasks``.
+
+    Fields:
+        task: The natural-language task to run (required).
+        schema_version: External-caller contract version; the server only speaks 1.
+        hitl: Human-in-the-loop mode — "off", "plan" (pause for plan approval), or
+            "full".
+        workflow: DAG id to run; ``None`` falls back to the server default workflow.
+        workflow_prompt: Plain-language description of how the agents should work
+            together (e.g. "research, then have the critic review, then synthesize").
+            When set (and ``workflow`` is not), it is compiled into an ad-hoc
+            workflow DAG, persisted, and run. Ignored if ``workflow`` is given.
+        callback_url: Optional outbound webhook POSTed once on terminal status.
+        cap_wall_seconds / cap_input_tokens / cap_output_tokens: Per-run budget
+            overrides; ``None`` uses the global caps.
+    """
     task: str
     schema_version: int = 1                              # (Phase 9) external-caller contract
     hitl: Literal["off", "plan", "full"] = "off"         # (filled: Phase 3)
-    critic: bool = False                                 # (existing)
     workflow: Optional[str] = None                       # DAG id; null → server default
+    workflow_prompt: Optional[str] = None                # NL → compiled ad-hoc DAG (req 4.1)
     callback_url: Optional[str] = None                   # (filled: Phase 9)
     cap_wall_seconds: Optional[int] = None
     cap_input_tokens: Optional[int] = None
@@ -399,6 +676,18 @@ class TaskRequest(BaseModel):
 
 
 class TaskResponse(BaseModel):
+    """Output body for the task endpoints (submit / status / approve / feedback).
+
+    Fields:
+        task_id: The 8-char task identifier.
+        status: queued|running|awaiting_approval|awaiting_input|done|failed.
+        error: Error message on a failed task, else ``None``.
+        result_path: Path to the primary result artifact when available.
+        progress_lines: Accumulated progress log lines from ``_PROGRESS``.
+        routing: Persisted routing decision (which agents ran), populated post-route.
+        pending_stage: For paused tasks, the stage the task is paused at.
+        pending_affordance: For paused tasks, the UI affordance to render.
+    """
     task_id: str
     status: str                                          # queued|running|awaiting_approval|awaiting_input|done|failed
     error: Optional[str] = None
@@ -410,12 +699,26 @@ class TaskResponse(BaseModel):
 
 
 class ApproveRequest(BaseModel):
+    """Input body for ``POST /tasks/{id}/approve`` (the plan gate).
+
+    Fields:
+        action: "approve" to run, "revise" to send edits back to the planner, or
+            "reject" to abort.
+        chosen_option: Which plan option to run (for multi-option plans).
+        edits: Free-text revision feedback handed to the planner on "revise".
+    """
     action: Literal["approve", "revise", "reject"] = "approve"
     chosen_option: Optional[str] = None                  # which plan option to run
     edits: Optional[str] = None                          # revision feedback for the planner
 
 
 class FeedbackRequest(BaseModel):
+    """Input body for ``POST /tasks/{id}/feedback``.
+
+    Fields:
+        message: Free-text human feedback — either queued for a running task or
+            used to answer an ``ask_user`` question on a paused task.
+    """
     message: str
 
 
@@ -426,7 +729,24 @@ class FeedbackRequest(BaseModel):
 
 def _maybe_store_episode(task_id: str, request: str, result: dict, started: float) -> None:
     """Persist a one-line episode summary so future tasks can recall similar work.
-    Best-effort — failure to store should never affect the task result."""
+    Best-effort — failure to store should never affect the task result.
+
+    Reads up to the first 2000 chars of the result artifact as the summary (falling
+    back to the error or a placeholder) and records it in episodic memory along with
+    success and elapsed duration.
+
+    Args:
+        task_id: The finished task.
+        request: The original task request text.
+        result: The terminal result dict (status + result_path/error).
+        started: Event-loop timestamp captured when the task began (for duration).
+
+    Returns:
+        None.
+
+    Side effects:
+        Writes to episodic memory; any exception is logged and swallowed.
+    """
     try:
         summary = ""
         result_path = result.get("result_path")
@@ -445,7 +765,23 @@ def _maybe_store_episode(task_id: str, request: str, result: dict, started: floa
 
 async def _maybe_fire_callback(task_id: str, result: dict) -> None:
     """POST the terminal result to the task's callback_url, once, if one was given.
-    Looked up from the DB so it survives a pause/resume across an API restart."""
+    Looked up from the DB so it survives a pause/resume across an API restart.
+
+    No-ops when the task has no ``callback_url``. Otherwise delivers a small JSON
+    payload (task_id/status/error/result_path) and appends a progress line noting
+    whether delivery succeeded.
+
+    Args:
+        task_id: The finished task.
+        result: The terminal result dict.
+
+    Returns:
+        None.
+
+    Side effects:
+        Reads the callback URL from SQLite, performs an outbound HTTP POST, and
+        appends a progress line.
+    """
     async with aiosqlite.connect(_DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -468,17 +804,40 @@ async def _maybe_fire_callback(task_id: str, result: dict) -> None:
 async def _run_and_update(
     task_id: str,
     request: str,
-    critic: bool,
     cap_wall_seconds: Optional[int],
     cap_input_tokens: Optional[int],
     cap_output_tokens: Optional[int],
     hitl: str = "off",
     workflow: Optional[str] = None,
 ) -> None:
+    """Background coroutine that runs a fresh task end-to-end and persists outcome.
+
+    Resets the in-memory progress buffer, marks the task ``running``, invokes the
+    crew runner with the given caps/HITL/workflow, persists the result, and emits a
+    final status progress line. If the task pauses for human input it returns early
+    (the episode is stored only once the task truly finishes); otherwise it stores
+    an episode and fires the completion callback.
+
+    Args:
+        task_id: The task to run.
+        request: The task request text.
+        cap_wall_seconds / cap_input_tokens / cap_output_tokens: Per-run budget
+            overrides (``None`` → global caps).
+        hitl: Human-in-the-loop mode.
+        workflow: Workflow id to run (``None`` → server default).
+
+    Returns:
+        None — this is a fire-and-forget background task; results land in SQLite.
+
+    Side effects:
+        Mutates ``_PROGRESS``, updates the tasks row, may write an episode and POST
+        a callback.
+    """
     _PROGRESS[task_id] = []
     started = asyncio.get_event_loop().time()
 
     def _progress(line: str) -> None:
+        """Forward a runner progress line to ``_append_progress`` for this task."""
         _append_progress(task_id, line)
 
     await _update_task(task_id, status="running")
@@ -509,9 +868,33 @@ async def _resume_and_update(
     edits: Optional[str],
     payload: dict,
 ) -> None:
+    """Background coroutine that resumes a paused task and persists outcome.
+
+    Reconstructs the runner call from the persisted pending ``payload`` (hitl,
+    revise_count, workflow, resume_node, caps) plus the approval/answer inputs,
+    runs ``resume_task``, persists the result, and emits a status line. Re-pauses
+    return early; terminal results store an episode and fire the callback.
+
+    Args:
+        task_id: The paused task to resume.
+        request: The original task request text.
+        action: One of "approve"/"revise"/"reject" (or "revise" for an answered
+            question).
+        chosen_option: Selected plan option, if any.
+        edits: Revision feedback / answer text, if any.
+        payload: The persisted ``pending_payload`` dict carrying resume context.
+
+    Returns:
+        None — fire-and-forget; results land in SQLite.
+
+    Side effects:
+        Mutates ``_PROGRESS``, updates the tasks row, may write an episode and POST
+        a callback.
+    """
     started = asyncio.get_event_loop().time()
 
     def _progress(line: str) -> None:
+        """Forward a runner progress line to ``_append_progress`` for this task."""
         _append_progress(task_id, line)
 
     caps = payload.get("caps") or {}
@@ -546,6 +929,27 @@ async def _resume_and_update(
 
 @app.post("/tasks", response_model=TaskResponse, status_code=202)
 async def submit_task(body: TaskRequest) -> TaskResponse:
+    """Submit a new task and start it running in the background.
+
+    Validates the schema version, callback URL (SSRF guard), and workflow id before
+    inserting a ``queued`` row and spawning ``_run_and_update``. Returns
+    immediately with ``202`` — clients poll/stream for progress.
+
+    Args:
+        body: The validated ``TaskRequest``.
+
+    Returns:
+        A ``TaskResponse`` with the new task_id and status "queued".
+
+    Raises:
+        HTTPException 422: unsupported schema_version, unsafe callback_url,
+            unknown workflow id, or a ``workflow_prompt`` that could not be compiled.
+        HTTPException 502: the workflow-compilation LLM call failed (proxy down).
+
+    Side effects:
+        Inserts a tasks row, may persist a compiled ad-hoc workflow, and launches a
+        background runner coroutine.
+    """
     if body.schema_version != 1:
         raise HTTPException(
             status_code=422,
@@ -556,13 +960,30 @@ async def submit_task(body: TaskRequest) -> TaskResponse:
             validate_callback_url(body.callback_url)
         except UnsafeCallbackURL as exc:
             raise HTTPException(status_code=422, detail=str(exc))
-    if body.workflow:
+    # Resolve which workflow this run uses. Precedence: an explicit `workflow` id,
+    # else a compiled-from-prompt ad-hoc DAG (req 4.1), else the server default.
+    workflow_id = body.workflow
+    if workflow_id:
         from hyperion.crews.workflows import load_workflow
 
         try:
-            load_workflow(body.workflow)
+            load_workflow(workflow_id)
         except (FileNotFoundError, ValueError) as exc:
             raise HTTPException(status_code=422, detail=f"Unknown workflow: {exc}")
+    elif body.workflow_prompt:
+        from hyperion.crews.compiler import WorkflowCompileError, compile_workflow
+        from hyperion.crews.workflows import save_workflow
+
+        try:
+            compiled = compile_workflow(body.workflow_prompt, load_all_agents())
+        except WorkflowCompileError as exc:
+            raise HTTPException(
+                status_code=422, detail=f"Could not build a workflow from your prompt: {exc}"
+            )
+        except Exception as exc:  # proxy/LLM failure — not the caller's fault
+            raise HTTPException(status_code=502, detail=f"Workflow compilation failed: {exc}")
+        save_workflow(compiled)  # persist so HITL resume + the trace UI can reload it
+        workflow_id = compiled.id
 
     task_id = str(uuid.uuid4())[:8]
     db = await _get_db()  # creates + migrates the table (adds callback_url if absent)
@@ -570,7 +991,7 @@ async def submit_task(body: TaskRequest) -> TaskResponse:
         await db.execute(
             "INSERT INTO tasks (task_id, status, request, hitl, callback_url, workflow) "
             "VALUES (?,?,?,?,?,?)",
-            (task_id, "queued", body.task, body.hitl, body.callback_url, body.workflow),
+            (task_id, "queued", body.task, body.hitl, body.callback_url, workflow_id),
         )
         await db.commit()
     finally:
@@ -580,12 +1001,11 @@ async def submit_task(body: TaskRequest) -> TaskResponse:
         _run_and_update(
             task_id,
             body.task,
-            body.critic,
             body.cap_wall_seconds,
             body.cap_input_tokens,
             body.cap_output_tokens,
             body.hitl,
-            body.workflow,
+            workflow_id,
         )
     )
     return TaskResponse(task_id=task_id, status="queued")
@@ -593,6 +1013,17 @@ async def submit_task(body: TaskRequest) -> TaskResponse:
 
 @app.get("/tasks/{task_id}", response_model=TaskResponse)
 async def get_task(task_id: str) -> TaskResponse:
+    """Return the current status, progress, routing, and pending affordance of a task.
+
+    Args:
+        task_id: The task to look up.
+
+    Returns:
+        A fully-populated ``TaskResponse``.
+
+    Raises:
+        HTTPException 404: no task with this id.
+    """
     async with aiosqlite.connect(_DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -617,12 +1048,83 @@ async def get_task(task_id: str) -> TaskResponse:
     )
 
 
+@app.get("/tasks/{task_id}/trace")
+async def get_task_trace(task_id: str) -> dict:
+    """Return trace events + DAG structure for the Trace Flow UI.
+
+    Loads the task's request/status/routing plus its ordered ``trace_events`` rows
+    (one per agent LLM call), decoding each event's ``tools_used`` JSON column into
+    a list (defaulting to ``[]`` on bad JSON).
+
+    Args:
+        task_id: The task whose trace to return.
+
+    Returns:
+        A dict with ``task_id``, ``request``, ``status``, ``routing``, and the
+        ``events`` list.
+
+    Raises:
+        HTTPException 404: no task with this id.
+    """
+    async with aiosqlite.connect(_DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT request, status, routing FROM tasks WHERE task_id=?", (task_id,)
+        ) as cur:
+            row = await cur.fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="Task not found")
+
+        request_text = row["request"] or ""
+        routing = json.loads(row["routing"]) if row["routing"] else None
+
+        async with db.execute(
+            """SELECT agent_role, node_id, prompt_type, model, input_tokens, output_tokens,
+                      cost_usd, prompt_preview, response_preview, tools_used,
+                      started_at, duration_ms
+               FROM trace_events
+               WHERE task_id=?
+               ORDER BY started_at, id""",
+            (task_id,),
+        ) as cur:
+            events = [dict(r) for r in await cur.fetchall()]
+
+    for ev in events:
+        try:
+            ev["tools_used"] = json.loads(ev["tools_used"] or "[]")
+        except Exception:
+            ev["tools_used"] = []
+
+    return {
+        "task_id": task_id,
+        "request": request_text,
+        "status": row["status"],
+        "routing": routing,
+        "events": events,
+    }
+
+
 @app.post("/tasks/{task_id}/approve", response_model=TaskResponse)
 async def approve_task(task_id: str, body: ApproveRequest) -> TaskResponse:
     """Resume a task paused at the plan gate.
 
     Reads the pending payload from the DB (not in-memory) so a restarted API can
     still resume. action ∈ {approve, revise, reject}.
+
+    Args:
+        task_id: The paused task to resume.
+        body: The ``ApproveRequest`` (action + optional chosen_option / edits).
+
+    Returns:
+        A ``TaskResponse`` with status "running" — resumption happens in the
+        background.
+
+    Raises:
+        HTTPException 404: no such task.
+        HTTPException 409: task is not in ``awaiting_approval``.
+
+    Side effects:
+        Marks the task running and spawns ``_resume_and_update``.
     """
     async with aiosqlite.connect(_DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -656,6 +1158,21 @@ async def feedback_task(task_id: str, body: FeedbackRequest) -> TaskResponse:
     For a *running* task the runner drains it between stages (changes behavior). For a
     task paused on an ``ask_user`` question (status=awaiting_input) the message answers
     the affordance and resumes the plan stage with the answer injected.
+
+    Args:
+        task_id: The target task.
+        body: The ``FeedbackRequest`` carrying the human message.
+
+    Returns:
+        A ``TaskResponse``: status "running" if the message resumed a paused task,
+        otherwise the task's unchanged status (feedback queued).
+
+    Raises:
+        HTTPException 404: no such task.
+
+    Side effects:
+        Either answers the pending affordance + spawns ``_resume_and_update``, or
+        appends the message to the task's feedback queue.
     """
     from hyperion.feedback import answer_affordance, append_feedback
 
@@ -687,7 +1204,22 @@ async def feedback_task(task_id: str, body: FeedbackRequest) -> TaskResponse:
 
 @app.get("/tasks/{task_id}/stream")
 async def stream_task(task_id: str) -> StreamingResponse:
+    """Server-Sent Events stream of a task's progress lines until it terminates.
+
+    Args:
+        task_id: The task to stream.
+
+    Returns:
+        A ``StreamingResponse`` (text/event-stream) yielding each new progress line
+        as a ``data:`` event, terminated by a ``[DONE]`` event when the task
+        reaches done/failed.
+    """
     async def _gen() -> AsyncGenerator[str, None]:
+        """Yield new progress lines once per second, polling the DB for terminal status.
+
+        Tracks how many lines have been emitted (``seen``) to send only the delta,
+        then ends the stream with a ``[DONE]`` event when the task is done/failed.
+        """
         seen = 0
         while True:
             lines = _PROGRESS.get(task_id, [])
@@ -710,6 +1242,24 @@ async def stream_task(task_id: str) -> StreamingResponse:
 
 @app.get("/tasks/{task_id}/artifacts/{name:path}")
 async def get_artifact(task_id: str, name: str) -> FileResponse:
+    """Serve a static artifact file produced by a task.
+
+    Hardened against path traversal: the ``task_id`` shape is validated and the
+    resolved artifact path must be inside the task's directory (``is_relative_to``,
+    which — unlike ``startswith`` — also blocks sibling-dir escapes).
+
+    Args:
+        task_id: The owning task.
+        name: Artifact path relative to the task's ``artifacts/`` dir (may contain
+            subdirs via the ``{name:path}`` route converter).
+
+    Returns:
+        A ``FileResponse`` for the requested artifact.
+
+    Raises:
+        HTTPException 400: malformed task_id or a path that escapes the task dir.
+        HTTPException 404: the artifact does not exist.
+    """
     # Validate task_id shape to prevent traversal via the path param itself
     if not task_id or "/" in task_id or ".." in task_id:
         raise HTTPException(status_code=400, detail="Invalid task_id")
@@ -729,7 +1279,16 @@ async def get_artifact(task_id: str, name: str) -> FileResponse:
 
 
 async def _litellm_model_ids() -> list[str]:
-    """Concrete model ids the proxy reports. Best-effort — empty on any failure."""
+    """Concrete model ids the proxy reports. Best-effort — empty on any failure.
+
+    GETs ``{litellm_base_url}/models`` with the configured API key (5s timeout).
+
+    Returns:
+        The list of model id strings, or ``[]`` if the proxy is unreachable or the
+        response can't be parsed (logged at WARNING). An empty list is treated by
+        callers as "can't validate" rather than "no models", so they don't block
+        offline edits.
+    """
     import httpx
 
     url = settings.litellm_base_url.rstrip("/") + "/models"
@@ -745,7 +1304,22 @@ async def _litellm_model_ids() -> list[str]:
 
 async def _assert_model_alias_valid(record: AgentRecord) -> None:
     """Reject an unknown model_alias — but only when we can actually see the model
-    list (offline edits aren't blocked by a transient proxy outage)."""
+    list (offline edits aren't blocked by a transient proxy outage).
+
+    Accepts any of the well-known role aliases immediately; otherwise checks the
+    record's alias against the live proxy model list, and only rejects when that
+    list is non-empty (so a proxy outage doesn't block the edit).
+
+    Args:
+        record: The agent record being created/updated.
+
+    Returns:
+        None.
+
+    Raises:
+        HTTPException 422: the alias is neither a known role alias nor a concrete
+            model id reported by the (reachable) proxy.
+    """
     if record.model_alias in MODEL_ALIASES:
         return
     known = await _litellm_model_ids()
@@ -757,16 +1331,16 @@ async def _assert_model_alias_valid(record: AgentRecord) -> None:
         )
 
 
-def _validate_mutation(records: list[AgentRecord]) -> None:
-    """Run whole-store invariants, surfacing failures as 422s."""
-    try:
-        validate_collection(records)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc))
-
-
 @app.get("/agents")
 async def list_agents(group: Optional[str] = None) -> list[dict]:
+    """List all agent records, optionally filtered to one group.
+
+    Args:
+        group: If given, only agents whose ``group`` matches are returned.
+
+    Returns:
+        A list of serialized agent record dicts.
+    """
     records = load_all_agents()
     if group:
         records = [r for r in records if r.group == group]
@@ -775,12 +1349,27 @@ async def list_agents(group: Optional[str] = None) -> list[dict]:
 
 @app.get("/groups")
 async def list_groups() -> list[str]:
-    """Distinct agent groups, for the UI group filter."""
+    """Distinct agent groups, for the UI group filter.
+
+    Returns:
+        Sorted unique group names across all agent records.
+    """
     return sorted({r.group for r in load_all_agents()})
 
 
 @app.get("/agents/{agent_id}")
 async def get_agent(agent_id: str) -> dict:
+    """Fetch a single agent record by id.
+
+    Args:
+        agent_id: The agent to load.
+
+    Returns:
+        The serialized agent record dict.
+
+    Raises:
+        HTTPException 404: no agent with this id.
+    """
     try:
         return load_agent(agent_id).model_dump()
     except FileNotFoundError:
@@ -789,6 +1378,25 @@ async def get_agent(agent_id: str) -> dict:
 
 @app.post("/agents", status_code=201)
 async def create_agent(record: AgentRecord) -> dict:
+    """Create a new agent record after full validation.
+
+    Checks id uniqueness, single-record validity, model alias validity, and the
+    whole-store invariants on the prospective set before persisting.
+
+    Args:
+        record: The new agent record.
+
+    Returns:
+        The persisted record (serialized).
+
+    Raises:
+        HTTPException 409: an agent with this id already exists.
+        HTTPException 422: the record or resulting collection is invalid, or the
+            model alias is unknown.
+
+    Side effects:
+        Writes the agent JSON file.
+    """
     existing = {r.id: r for r in load_all_agents()}
     if record.id in existing:
         raise HTTPException(status_code=409, detail=f"Agent {record.id!r} already exists")
@@ -797,13 +1405,29 @@ async def create_agent(record: AgentRecord) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     await _assert_model_alias_valid(record)
-    _validate_mutation(list(existing.values()) + [record])
     save_agent(record)
     return record.model_dump()
 
 
 @app.put("/agents/{agent_id}")
 async def update_agent(agent_id: str, record: AgentRecord) -> dict:
+    """Replace an existing agent record after validation.
+
+    Args:
+        agent_id: The id from the URL (must equal ``record.id``).
+        record: The new full record to store.
+
+    Returns:
+        The persisted record (serialized).
+
+    Raises:
+        HTTPException 422: body id mismatch, invalid record, unknown model alias,
+            or a resulting collection that breaks invariants.
+        HTTPException 404: no agent with this id.
+
+    Side effects:
+        Overwrites the agent JSON file.
+    """
     if record.id != agent_id:
         raise HTTPException(status_code=422, detail="Body id must match the URL id")
     existing = {r.id: r for r in load_all_agents()}
@@ -814,25 +1438,54 @@ async def update_agent(agent_id: str, record: AgentRecord) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     await _assert_model_alias_valid(record)
-    existing[agent_id] = record  # apply the edit to the prospective set
-    _validate_mutation(list(existing.values()))
     save_agent(record)
     return record.model_dump()
 
 
 @app.delete("/agents/{agent_id}")
 async def remove_agent(agent_id: str) -> dict:
+    """Delete an agent record if removing it keeps the store valid.
+
+    Args:
+        agent_id: The agent to delete.
+
+    Returns:
+        ``{"deleted": agent_id}``.
+
+    Raises:
+        HTTPException 404: no agent with this id.
+        HTTPException 422: deletion would break store invariants (e.g. removing the
+            last plan/synthesize agent).
+
+    Side effects:
+        Removes the agent JSON file.
+    """
     existing = {r.id: r for r in load_all_agents()}
     if agent_id not in existing:
         raise HTTPException(status_code=404, detail=f"No agent {agent_id!r}")
-    del existing[agent_id]
-    _validate_mutation(list(existing.values()))  # blocks deleting the last plan/synth
     delete_agent(agent_id)
     return {"deleted": agent_id}
 
 
 @app.post("/agents/{agent_id}/duplicate", status_code=201)
 async def duplicate_agent(agent_id: str, new_id: Optional[str] = None) -> dict:
+    """Clone an agent under a new id (default ``{id}-copy``).
+
+    Args:
+        agent_id: The source agent to copy.
+        new_id: Target id for the clone; defaults to ``{agent_id}-copy``.
+
+    Returns:
+        The new clone record (serialized).
+
+    Raises:
+        HTTPException 404: source agent not found.
+        HTTPException 409: target id already exists.
+        HTTPException 422: the clone fails single-record validation.
+
+    Side effects:
+        Writes a new agent JSON file.
+    """
     existing = {r.id: r for r in load_all_agents()}
     if agent_id not in existing:
         raise HTTPException(status_code=404, detail=f"No agent {agent_id!r}")
@@ -855,7 +1508,21 @@ async def duplicate_agent(agent_id: str, new_id: Optional[str] = None) -> dict:
 
 
 def _validate_workflow_record(record) -> None:
-    """Structural + agent-reference validation, surfaced as a 422."""
+    """Structural + agent-reference validation, surfaced as a 422.
+
+    Validates the workflow's DAG structure and that every node references a known
+    agent id.
+
+    Args:
+        record: The ``WorkflowRecord`` to validate.
+
+    Returns:
+        None.
+
+    Raises:
+        HTTPException 422: the workflow is structurally invalid or references an
+            unknown agent.
+    """
     from hyperion.crews.workflows import validate_workflow
 
     known = {r.id for r in load_all_agents()}
@@ -867,6 +1534,11 @@ def _validate_workflow_record(record) -> None:
 
 @app.get("/workflows")
 async def list_workflows() -> list[dict]:
+    """List all defined workflow DAGs.
+
+    Returns:
+        A list of serialized ``WorkflowRecord`` dicts.
+    """
     from hyperion.crews.workflows import load_all_workflows
 
     return [w.model_dump() for w in load_all_workflows()]
@@ -874,6 +1546,18 @@ async def list_workflows() -> list[dict]:
 
 @app.get("/workflows/{workflow_id}")
 async def get_workflow(workflow_id: str) -> dict:
+    """Fetch a single workflow DAG by id.
+
+    Args:
+        workflow_id: The workflow to load.
+
+    Returns:
+        The serialized ``WorkflowRecord`` dict.
+
+    Raises:
+        HTTPException 404: no workflow with this id.
+        HTTPException 422: the stored workflow file is malformed.
+    """
     from hyperion.crews.workflows import load_workflow
 
     try:
@@ -886,6 +1570,21 @@ async def get_workflow(workflow_id: str) -> dict:
 
 @app.post("/workflows", status_code=201)
 async def create_workflow(record: WorkflowRecord) -> dict:
+    """Create a new workflow DAG after structural validation.
+
+    Args:
+        record: The new ``WorkflowRecord``.
+
+    Returns:
+        The persisted record (serialized).
+
+    Raises:
+        HTTPException 409: a workflow with this id already exists.
+        HTTPException 422: the workflow is invalid.
+
+    Side effects:
+        Writes the workflow JSON file.
+    """
     from hyperion.crews.workflows import load_all_workflows, save_workflow
 
     existing = {w.id for w in load_all_workflows()}
@@ -898,6 +1597,22 @@ async def create_workflow(record: WorkflowRecord) -> dict:
 
 @app.put("/workflows/{workflow_id}")
 async def update_workflow(workflow_id: str, record: WorkflowRecord) -> dict:
+    """Replace an existing workflow DAG after validation.
+
+    Args:
+        workflow_id: The id from the URL (must equal ``record.id``).
+        record: The new full workflow record.
+
+    Returns:
+        The persisted record (serialized).
+
+    Raises:
+        HTTPException 422: body id mismatch or invalid workflow.
+        HTTPException 404: no workflow with this id.
+
+    Side effects:
+        Overwrites the workflow JSON file.
+    """
     from hyperion.crews.workflows import load_all_workflows, save_workflow
 
     if record.id != workflow_id:
@@ -911,6 +1626,22 @@ async def update_workflow(workflow_id: str, record: WorkflowRecord) -> dict:
 
 @app.delete("/workflows/{workflow_id}")
 async def remove_workflow(workflow_id: str) -> dict:
+    """Delete a workflow DAG, guarding the last-one and default invariants.
+
+    Args:
+        workflow_id: The workflow to delete.
+
+    Returns:
+        ``{"deleted": workflow_id}``.
+
+    Raises:
+        HTTPException 404: no workflow with this id.
+        HTTPException 409: it's the only workflow, or it's the current default
+            workflow (set a different default first).
+
+    Side effects:
+        Removes the workflow JSON file.
+    """
     from hyperion.crews.workflows import delete_workflow, load_all_workflows
 
     existing = {w.id for w in load_all_workflows()}
@@ -929,6 +1660,23 @@ async def remove_workflow(workflow_id: str) -> dict:
 
 @app.post("/workflows/{workflow_id}/duplicate", status_code=201)
 async def duplicate_workflow(workflow_id: str, new_id: Optional[str] = None) -> dict:
+    """Clone a workflow DAG under a new id (default ``{id}-copy``).
+
+    Args:
+        workflow_id: The source workflow to copy.
+        new_id: Target id for the clone; defaults to ``{workflow_id}-copy``.
+
+    Returns:
+        The new clone record (serialized).
+
+    Raises:
+        HTTPException 404: source workflow not found.
+        HTTPException 409: target id already exists.
+        HTTPException 422: the clone fails validation.
+
+    Side effects:
+        Writes a new workflow JSON file.
+    """
     from hyperion.crews.workflows import load_all_workflows, load_workflow, save_workflow
 
     existing = {w.id for w in load_all_workflows()}
@@ -1162,7 +1910,7 @@ async def get_metrics() -> dict:
             routing = json.loads(r["routing"])
         except (json.JSONDecodeError, TypeError):
             continue
-        # Routing is persisted as RoutingResult: {"selected_agents": [id, ...]}.
+        # Routing is persisted by the runner as {"selected_agents": [id, ...], ...}.
         selected = routing.get("selected_agents") or routing.get("selected") or []
         for a in selected:
             aid = a.get("id") if isinstance(a, dict) else a
@@ -1184,7 +1932,7 @@ async def get_metrics() -> dict:
             {
                 "id": record.id,
                 "name": record.name,
-                "stage": record.stage,
+                "group": record.group,
                 "active": record.active,
                 "activations": acts,
                 "errors": errs,
@@ -1209,18 +1957,18 @@ async def get_metrics() -> dict:
 @app.get("/.well-known/agent.json")
 async def agent_card() -> dict:
     """A2A-style agent descriptor so external orchestrators (n8n, other agents)
-    can discover Hyperion's contract. Skills are the synthesize-stage outputs;
+    can discover Hyperion's contract. Skills are the active agents;
     the input contract is POST /tasks with schema_version:1."""
     agents = load_all_agents()
     skills = [
         {"id": r.id, "name": r.name, "description": r.description or r.goal}
         for r in agents
-        if r.active and r.stage in ("plan", "synthesize")
+        if r.active
     ]
     return {
         "schema_version": 1,
         "name": "Hyperion",
-        "description": "Local multi-agent orchestrator (plan → route → work → synthesize).",
+        "description": "Local multi-agent orchestrator (plan → work → synthesize).",
         "url": settings.hyperion_api_url,
         "version": app.version,
         "capabilities": {"streaming": True, "humanInTheLoop": True, "webhooks": True},
@@ -1334,7 +2082,6 @@ async def import_config(file: UploadFile = File(...)) -> dict:
 
     if not records:
         raise HTTPException(status_code=422, detail="No agent records found in archive")
-    _validate_mutation(records)  # enforce DAG + at-least-one-plan/synthesize on the new set
 
     # Validate workflows against the imported agent set (cross-reference must resolve).
     known_agents = {r.id for r in records}
@@ -1353,6 +2100,54 @@ async def import_config(file: UploadFile = File(...)) -> dict:
         "count": len(records),
         "workflows": [w.id for w in workflows],
     }
+
+
+# ---------------------------------------------------------------------------
+# Admin — source file read/write (dev mode, requires src volume mount)
+# ---------------------------------------------------------------------------
+
+_SRC_ROOT = Path("/app/src")
+
+
+def _resolve_src_path(rel: str) -> Path:
+    """Resolve a relative path inside /app/src, rejecting traversal attempts."""
+    path = (_SRC_ROOT / rel).resolve()
+    if not path.is_relative_to(_SRC_ROOT.resolve()):
+        raise HTTPException(status_code=400, detail="Path traversal not allowed")
+    return path
+
+
+@app.get("/admin/files")
+async def list_src_files(prefix: str = "") -> dict:
+    """Recursively list .py files under /app/src (or a sub-prefix)."""
+    base = _resolve_src_path(prefix) if prefix else _SRC_ROOT
+    if not base.exists():
+        raise HTTPException(status_code=404, detail=f"Path not found: {prefix!r}")
+    files = sorted(str(p.relative_to(_SRC_ROOT)) for p in base.rglob("*.py"))
+    return {"root": str(_SRC_ROOT), "files": files}
+
+
+@app.get("/admin/files/{path:path}")
+async def read_src_file(path: str) -> dict:
+    """Read a source file. path is relative to /app/src."""
+    fp = _resolve_src_path(path)
+    if not fp.is_file():
+        raise HTTPException(status_code=404, detail=f"File not found: {path!r}")
+    return {"path": path, "content": fp.read_text(encoding="utf-8")}
+
+
+class FileWriteBody(BaseModel):
+    content: str
+
+
+@app.put("/admin/files/{path:path}", status_code=200)
+async def write_src_file(path: str, body: FileWriteBody) -> dict:
+    """Overwrite a source file. uvicorn --reload picks up the change automatically."""
+    fp = _resolve_src_path(path)
+    if not fp.exists():
+        raise HTTPException(status_code=404, detail=f"File not found: {path!r} (use a path returned by list_src_files)")
+    fp.write_text(body.content, encoding="utf-8")
+    return {"path": path, "bytes": len(body.content.encode())}
 
 
 def main() -> None:

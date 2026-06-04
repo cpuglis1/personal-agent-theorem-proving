@@ -25,18 +25,49 @@ logger = logging.getLogger(__name__)
 
 
 def _context_path(task_id: str):
+    """Resolve the on-disk path of a task's context blackboard JSON file.
+
+    The path is ``{settings.tasks_dir}/{task_id}/context.json``.
+
+    Args:
+        task_id: The task identifier. Used as a directory name segment.
+
+    Returns:
+        A ``pathlib.Path`` pointing at the task's ``context.json``. The file is
+        not guaranteed to exist.
+
+    Raises:
+        ValueError: If ``task_id`` is empty or contains path-traversal characters
+            (``/`` or ``..``). This guard prevents a malicious or malformed
+            ``task_id`` from escaping ``settings.tasks_dir``.
+    """
+    # Reject path-traversal / nested ids so the task_id can only name a single
+    # subdirectory directly under tasks_dir.
     if not task_id or "/" in task_id or ".." in task_id:
         raise ValueError(f"Invalid task_id: {task_id!r}")
     return settings.tasks_dir / task_id / "context.json"
 
 
 def _load(task_id: str) -> dict[str, Any]:
+    """Load a task's context blackboard from disk as a plain dict.
+
+    Args:
+        task_id: The task identifier whose context file should be read.
+
+    Returns:
+        The parsed key/value mapping. Returns an empty dict when the file does
+        not exist, is empty, contains invalid JSON, or cannot be read — callers
+        treat a missing/corrupt blackboard the same as an empty one rather than
+        failing a stage.
+    """
     path = _context_path(task_id)
     if not path.exists():
         return {}
     try:
+        # ``or {}`` guards against a file whose JSON content is literally null.
         return json.loads(path.read_text(encoding="utf-8")) or {}
     except (json.JSONDecodeError, OSError):
+        # Corrupt or unreadable file is treated as an empty blackboard.
         return {}
 
 

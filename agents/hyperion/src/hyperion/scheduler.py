@@ -1,9 +1,9 @@
 """
-scheduler.py — fire ``schedule``-trigger agents as entry-point tasks (Phase 8).
+scheduler.py — fire scheduled agents as entry-point tasks (Phase 8).
 
-A single asyncio loop ticks once per minute, evaluates every active agent whose
-``trigger.type == "schedule"`` against its 5-field ``trigger.cron`` expression,
-and enqueues a normal pipeline task for each match. Dependency-free: a tiny cron
+A single asyncio loop ticks once per minute, evaluates every active agent that
+carries a 5-field ``schedule_cron`` expression against the current time, and
+enqueues a normal pipeline task for each match. Dependency-free: a tiny cron
 matcher (``*``, ``*/n``, ``a,b``, ``a-b``, plain ints) covers the standard fields
 so no APScheduler/croniter install is needed (the Docker image build is kept lean
 and offline-safe).
@@ -29,6 +29,27 @@ EnqueueFn = Callable[[AgentRecord], Awaitable[None]]
 
 
 def _match_field(spec: str, value: int, lo: int, hi: int) -> bool:
+    """Test whether a single cron field ``spec`` matches an integer ``value``.
+
+    Supports the standard cron sub-syntaxes for one field: ``*`` / ``?`` (any),
+    ``*/n`` (every n within the field's full range), ``a-b`` (inclusive range),
+    ``a-b/n`` or ``*/n`` (stepped range), comma-separated lists of any of those,
+    and a plain integer. ``lo``/``hi`` bound the field (e.g. 0..59 for minutes)
+    and are used as the implicit start/end when the base is ``*`` or empty.
+
+    Args:
+        spec: The raw cron field text (e.g. ``"*/15"``, ``"1,3,5"``, ``"9-17"``).
+        value: The current value of the corresponding datetime component.
+        lo: Lowest legal value for this field (used to expand ``*``).
+        hi: Highest legal value for this field (used to expand ``*``).
+
+    Returns:
+        True if any comma-separated part of ``spec`` matches ``value``.
+
+    Notes:
+        The step check ``(value - start) % step == 0`` is anchored at ``start``,
+        matching standard cron semantics (e.g. ``5-20/5`` fires at 5, 10, 15, 20).
+    """
     for part in spec.split(","):
         part = part.strip()
         if part in ("*", "?"):
@@ -51,7 +72,24 @@ def _match_field(spec: str, value: int, lo: int, hi: int) -> bool:
 
 
 def cron_matches(expr: str, dt: datetime) -> bool:
-    """True when ``dt`` (minute resolution) satisfies a 5-field cron expression."""
+    """True when ``dt`` (minute resolution) satisfies a 5-field cron expression.
+
+    Args:
+        expr: A standard 5-field cron string ``"minute hour dom month dow"``.
+            A ``None``/empty/malformed expression (not exactly 5 fields) never
+            matches and returns False rather than raising.
+        dt: The datetime to test; only minute-and-coarser components are used.
+
+    Returns:
+        True only if every one of the 5 fields matches the corresponding
+        component of ``dt``.
+
+    Notes:
+        Day-of-week handling bridges two conventions: cron treats both 0 and 7
+        as Sunday, while Python's ``weekday()`` is Mon=0..Sun=6. We convert to
+        ``py_dow`` (Sun=0..Sat=6) and additionally test the Sunday-as-7 form so
+        expressions written either way match.
+    """
     fields = (expr or "").split()
     if len(fields) != 5:
         return False
@@ -68,15 +106,31 @@ def cron_matches(expr: str, dt: datetime) -> bool:
 
 
 def scheduled_agents() -> list[AgentRecord]:
-    return [
-        r
-        for r in load_all_agents()
-        if r.active and r.trigger.type == "schedule" and r.trigger.cron
-    ]
+    """Load the agents eligible to be fired by the scheduler.
+
+    Reads the full agent registry on every call (so newly added/edited agents
+    are picked up without a restart) and keeps only those that are active and
+    carry a non-empty ``schedule_cron`` expression.
+
+    Returns:
+        A list of matching ``AgentRecord`` objects (possibly empty).
+
+    Side effects:
+        Calls ``load_all_agents()``, which performs registry I/O each tick.
+    """
+    return [r for r in load_all_agents() if r.active and r.schedule_cron]
 
 
 def due_agents(now: datetime) -> list[AgentRecord]:
-    return [r for r in scheduled_agents() if cron_matches(r.trigger.cron or "", now)]
+    """Return the scheduled agents whose cron expression fires at ``now``.
+
+    Args:
+        now: The reference time (minute resolution) to evaluate against.
+
+    Returns:
+        The subset of ``scheduled_agents()`` whose cron matches ``now``.
+    """
+    return [r for r in scheduled_agents() if cron_matches(r.schedule_cron or "", now)]
 
 
 # ---------------------------------------------------------------------------
@@ -92,7 +146,30 @@ async def run_scheduler(
     now_fn: Callable[[], datetime] = datetime.now,
 ) -> None:
     """Tick every ``tick_seconds``; enqueue each due schedule-agent at most once
-    per minute. Aligns the first tick to the next minute boundary."""
+    per minute. Aligns the first tick to the next minute boundary.
+
+    Args:
+        enqueue_fn: Injected coroutine that turns a due ``AgentRecord`` into a
+            pipeline task. Injected (rather than imported) to avoid an import
+            cycle with the API layer.
+        stop_event: Set by the FastAPI shutdown hook to break the loop. Also
+            used as the sleep primitive so shutdown is immediate (no waiting out
+            a full tick).
+        tick_seconds: Polling interval; defaults to 60 to match the cron
+            minute resolution.
+        now_fn: Clock source, overridable in tests to drive deterministic time.
+
+    Returns:
+        None. Runs until ``stop_event`` is set.
+
+    Notes:
+        ``last_fired_minute`` maps agent id -> the ``YYYY-mm-ddTHH:MM`` key it
+        last fired in, giving idempotency: even if the loop ticks several times
+        within the same minute, each agent enqueues at most once per minute.
+        Exceptions from a single ``enqueue_fn`` call are swallowed so one bad
+        agent cannot kill the whole scheduler.
+    """
+    # agent id -> minute key of its last fire; enforces once-per-minute firing.
     last_fired_minute: dict[str, str] = {}
 
     while not stop_event.is_set():
@@ -107,6 +184,9 @@ async def run_scheduler(
             except Exception:
                 # A single bad enqueue must not kill the scheduler loop.
                 pass
+        # Sleep until the next tick OR until stop is requested, whichever first:
+        # waiting on stop_event makes shutdown instant; the TimeoutError is the
+        # normal "tick elapsed, loop again" path and is intentionally ignored.
         try:
             await asyncio.wait_for(stop_event.wait(), timeout=tick_seconds)
         except asyncio.TimeoutError:
@@ -115,6 +195,18 @@ async def run_scheduler(
 
 def scheduled_task_request(record: AgentRecord) -> str:
     """The entry-point prompt a scheduled agent runs. Uses the agent's own
-    description/goal so the run is meaningful without an external trigger."""
+    description/goal so the run is meaningful without an external trigger.
+
+    Args:
+        record: The scheduled agent being fired.
+
+    Returns:
+        A prompt string prefixed with a ``[Scheduled run ...]`` marker so
+        downstream logs/traces can distinguish cron-triggered runs.
+
+    Notes:
+        Body falls back ``description -> goal -> name`` so there is always some
+        meaningful instruction text even for sparsely configured agents.
+    """
     body = record.description or record.goal or record.name
     return f"[Scheduled run of agent '{record.name}'] {body}".strip()

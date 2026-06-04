@@ -57,6 +57,38 @@ except IndexError:
 
 
 class Settings(BaseSettings):
+    """Central, typed configuration for the entire Hyperion service.
+
+    A single module-level instance (``settings``, created at the bottom of this
+    file) is imported throughout the codebase as the source of truth for service
+    URLs, credentials, model assignments, run caps, and feature toggles.
+
+    Values resolve in this priority order (later layers do not override earlier
+    ones unless noted):
+
+      1. Real process environment variables (set by the shell or by Docker
+         compose's ``environment:`` block) — always win.
+      2. ``agents/hyperion/.env`` — loaded with ``override=True``.
+      3. ``~/ai/ai-router/.env`` — loaded with ``override=False`` as a fallback
+         for shared infrastructure vars (LiteLLM key, etc.).
+
+    Pydantic ``BaseSettings`` also reads matching env vars by attribute name
+    (case-insensitive), so e.g. ``MODEL_PLANNER`` populates ``model_planner``
+    and ``HYPERION_API_URL`` populates ``hyperion_api_url``. Several fields below
+    additionally call ``os.getenv(...)`` directly to support a distinct env-var
+    name (e.g. ``HYPERION_TASKS_DIR`` -> ``tasks_dir``).
+
+    Design notes:
+      - Defaults target the local docker-compose stack (localhost ports). The
+        Docker deployment overrides the URL/path fields via service-name hosts
+        and ``/app/...`` paths injected by compose.
+      - Model fields hold LiteLLM alias names, not provider model IDs; the proxy
+        resolves provider/fallback. See the module docstring for details.
+      - ``extra = "ignore"`` (in the nested ``Config``) means unknown env vars
+        are silently dropped rather than raising — important because the shared
+        ``.env`` files contain many vars unrelated to Hyperion.
+    """
+
     # LiteLLM proxy
     litellm_base_url: str = "http://localhost:4000/v1"
     litellm_master_key: str = ""
@@ -122,9 +154,6 @@ class Settings(BaseSettings):
         str(Path(__file__).parents[2] / "config"),
     ))
 
-    # Critic (off | planner | always)
-    hyperion_critic_default: str = "off"
-
     # Deviation alerts (on | off) — soft-threshold warnings during a run (Phase 6)
     hyperion_hitl_alerts: str = "on"
 
@@ -138,6 +167,13 @@ class Settings(BaseSettings):
     hyperion_callback_ssrf_guard: str = "on"
 
     class Config:
+        """Pydantic settings metadata for the ``Settings`` model.
+
+        - ``env_file_encoding``: encoding used when reading any ``.env`` file.
+        - ``extra = "ignore"``: drop env vars that don't map to a field instead
+          of raising a validation error (the shared ``.env`` files carry many
+          non-Hyperion vars).
+        """
         env_file_encoding = "utf-8"
         extra = "ignore"
 
@@ -155,7 +191,19 @@ class Settings(BaseSettings):
         return key
 
     def provider_keys_present(self) -> dict[str, bool]:
-        """Return which provider API keys are configured (for /config endpoint)."""
+        """Report which upstream LLM provider keys are configured.
+
+        Reads the raw process environment (not the typed fields) so the answer
+        reflects whatever keys LiteLLM itself will see at request time. Used by
+        the ``/config`` endpoint to tell the UI which providers are available,
+        which in turn determines how the role aliases ("smart"/"worker"/"cheap")
+        will route.
+
+        Returns:
+            Mapping of provider name -> ``True`` if its API key env var is set
+            and non-empty, ``False`` otherwise. Keys: ``"anthropic"``,
+            ``"openai"``, ``"gemini"``.
+        """
         return {
             "anthropic": bool(os.getenv("ANTHROPIC_API_KEY")),
             "openai": bool(os.getenv("OPENAI_API_KEY")),
@@ -163,4 +211,6 @@ class Settings(BaseSettings):
         }
 
 
+# Module-level singleton: import this everywhere rather than re-instantiating,
+# so configuration is parsed once and shared across the whole service.
 settings = Settings()

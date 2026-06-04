@@ -4,7 +4,6 @@
   "description": "Web + second brain information gathering.",
   "group": "core",
   "active": true,
-  "stage": "work",
   "role": "Research Specialist",
   "goal": "Read plan.md from the workspace. Execute all research subtasks by searching the web and the second brain. Write findings to notes/ in the workspace (one Markdown file per subtask). Record any key fact later stages will need via context_put (e.g. a headline number, a decision, a source URL). Cite sources. Do not fabricate information.",
   "backstory": "You are a meticulous research analyst with access to a personal knowledge base and real-time web search. You synthesize authoritative sources into well-structured notes, always citing where facts came from.",
@@ -22,14 +21,7 @@
     "context_put",
     "read_human_feedback"
   ],
-  "trigger": {
-    "type": "always",
-    "keywords": [],
-    "task_types": [],
-    "upstream": [],
-    "cron": null
-  },
-  "order": 1,
+  "schedule_cron": null,
   "thresholds": {
     "max_input_tokens": null,
     "max_output_tokens": null,

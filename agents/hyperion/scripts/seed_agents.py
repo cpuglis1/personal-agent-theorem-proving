@@ -8,12 +8,47 @@ hardcoded factories in src/hyperion/agents/*.py:
 
 Re-running overwrites the five core records. Safe to run after editing this file
 to regenerate seeds; it does not touch agents you created via the API/UI.
+
+Role in the system
+------------------
+Hyperion's orchestrator (FastAPI :4100, CrewAI-based) builds crews from a
+*data-driven* agent registry — each agent is a JSON record under
+``config/agents/<id>.json`` rather than a hardcoded Python factory. This script
+is the one-time bootstrap that writes those JSON files for the five built-in
+agents (planner, researcher, synthesizer, developer, critic) so a fresh
+checkout has a working default crew. After seeding, agents are edited/created
+at runtime via the API/UI and persisted back to the same JSON store.
+
+Each ``AgentRecord`` below mirrors the agent definitions described in
+PLAN_UNIFIED.md Phase 0 and is intended to be byte-identical to the original
+hardcoded factories so behavior is unchanged by the migration to a JSON store.
+
+Key design notes
+----------------
+- The records are intentionally *literal* (no abstraction) so the seed output is
+  reproducible and reviewable as a verbatim copy of the original factories.
+- An agent is a pure persona: it carries no ordering or activation metadata. The
+  role it plays (plan / work / synthesize) and whether it fires for a given task
+  are properties of the *workflow node* that references it, not the agent. (The
+  developer's old "only on code tasks" rule, for example, now belongs on a node's
+  ``when`` field — see ``hyperion.crews.workflows``.)
+- ``model_alias`` ("smart" / "worker") is resolved to a concrete model by the
+  LLM layer, which routes through the LiteLLM proxy — never a provider API
+  directly. "smart" is used for planning/critique; "worker" for bulk work.
+- Agents communicate across nodes through the workspace files (plan.md, notes/,
+  artifacts/) and the shared task context store (context_put / context_get), so
+  the ``goal`` / ``tools`` fields encode that contract.
+- ``developer`` and ``critic`` are seeded ``active=False`` (group "optional");
+  they exist in the store but are opt-in and do not run by default.
 """
 
 from __future__ import annotations
 
-from hyperion.agents.registry import AgentRecord, Trigger, save_agent, validate_agent
+from hyperion.agents.registry import AgentRecord, save_agent, validate_agent
 
+# The verbatim seed records for the five built-in agents. Order in this list is
+# cosmetic (it controls only the seeding/print order); actual run ordering is
+# governed entirely by the workflow DAG that references these agents.
 SEEDS = [
     AgentRecord(
         id="planner",
@@ -21,7 +56,6 @@ SEEDS = [
         description="Decomposes the user's request into a structured plan.",
         group="core",
         active=True,
-        stage="plan",
         role="Task Planner",
         goal=(
             "Decompose the user's request into a clear, actionable plan. "
@@ -50,8 +84,6 @@ SEEDS = [
         temperature=0.1,
         max_iter=3,
         tools=["workspace_write", "recall_similar_tasks", "context_get", "ask_user"],
-        trigger=Trigger(type="always"),
-        order=1,
     ),
     AgentRecord(
         id="researcher",
@@ -59,7 +91,6 @@ SEEDS = [
         description="Web + second brain information gathering.",
         group="core",
         active=True,
-        stage="work",
         role="Research Specialist",
         goal=(
             "Read plan.md from the workspace. "
@@ -81,8 +112,6 @@ SEEDS = [
             "second_brain", "web_search", "workspace_read", "workspace_write",
             "context_put", "read_human_feedback",
         ],
-        trigger=Trigger(type="always"),
-        order=1,
     ),
     AgentRecord(
         id="synthesizer",
@@ -90,7 +119,6 @@ SEEDS = [
         description="Reads plan + notes, produces the final artifact.",
         group="core",
         active=True,
-        stage="synthesize",
         role="Report Synthesizer",
         goal=(
             "Read plan.md and all files under notes/ from the workspace. "
@@ -109,8 +137,6 @@ SEEDS = [
         temperature=0.2,
         max_iter=5,
         tools=["workspace_list", "workspace_read", "workspace_write", "context_get"],
-        trigger=Trigger(type="always"),
-        order=1,
     ),
     AgentRecord(
         id="developer",
@@ -118,7 +144,6 @@ SEEDS = [
         description="Code writing and execution (seeded inactive).",
         group="optional",
         active=False,
-        stage="work",
         role="Software Developer",
         goal=(
             "Write Python code to complete development subtasks from plan.md. "
@@ -134,8 +159,6 @@ SEEDS = [
         temperature=0.2,
         max_iter=8,
         tools=[],
-        trigger=Trigger(type="task_type", task_types=["code"]),
-        order=2,
     ),
     AgentRecord(
         id="critic",
@@ -143,7 +166,6 @@ SEEDS = [
         description="Optional quality-review pass on synthesizer output (seeded inactive).",
         group="optional",
         active=False,
-        stage="synthesize",
         role="Quality Critic",
         goal=(
             "Read artifacts/result.md. "
@@ -161,17 +183,31 @@ SEEDS = [
         temperature=0.1,
         max_iter=3,
         tools=["workspace_read", "workspace_write"],
-        trigger=Trigger(type="always"),
-        order=2,
     ),
 ]
 
 
 def main() -> None:
+    """Validate and persist every seed record to the JSON agent store.
+
+    For each ``AgentRecord`` in ``SEEDS``, validates it (raising if malformed —
+    see ``validate_agent``) and writes it to ``config/agents/<id>.json`` via
+    ``save_agent``, overwriting any existing record with the same id. Prints a
+    one-line confirmation per agent.
+
+    Side effects:
+        - Writes/overwrites the five built-in ``config/agents/*.json`` files.
+        - Emits progress lines to stdout.
+
+    Raises:
+        Whatever ``validate_agent`` raises on an invalid record (propagated, so
+        seeding stops at the first bad record).
+    """
     for record in SEEDS:
+        # Validate before writing so a malformed record never lands on disk.
         validate_agent(record)
         save_agent(record)
-        print(f"seeded {record.id}.json (stage={record.stage}, active={record.active})")
+        print(f"seeded {record.id}.json (group={record.group}, active={record.active})")
 
 
 if __name__ == "__main__":

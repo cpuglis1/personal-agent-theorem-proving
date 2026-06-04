@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Callable, Literal, Optional
+from typing import Callable, Optional
 
 from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
@@ -26,9 +26,9 @@ from hyperion.tools.second_brain import SecondBrainTool
 from hyperion.tools.web_search import WebSearchTool
 from hyperion.tools.workspace import WorkspaceListTool, WorkspaceReadTool, WorkspaceWriteTool
 
-Stage = Literal["plan", "work", "synthesize"]
-TriggerType = Literal["always", "keyword", "task_type", "upstream", "schedule"]
-
+# Valid agent-id format: lowercase slug (letters/digits to start, then letters/digits/_/-).
+# Enforced everywhere an id is turned into a filesystem path to prevent path traversal
+# and to keep record filenames portable.
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
@@ -52,12 +52,35 @@ TOOL_REGISTRY: dict[str, Callable[[str], BaseTool]] = {
 
 
 def register_tool(name: str, factory: Callable[[str], BaseTool]) -> None:
-    """Register a tool factory. Later phases call this to add new capabilities."""
+    """Register a tool factory. Later phases call this to add new capabilities.
+
+    Args:
+        name: Registry key that agent records reference in their ``tools`` list.
+        factory: Callable taking the current ``task_id`` and returning a fresh
+            ``BaseTool`` instance. Per-task construction lets task-scoped tools
+            (e.g. workspace/context tools) bind to the correct task.
+
+    Side effects:
+        Mutates the module-global ``TOOL_REGISTRY`` in place. Re-registering an
+        existing name overwrites the previous factory.
+    """
     TOOL_REGISTRY[name] = factory
 
 
 def build_tools(names: list[str], task_id: str) -> list[BaseTool]:
-    """Resolve a list of tool names against the registry for a given task."""
+    """Resolve a list of tool names against the registry for a given task.
+
+    Args:
+        names: Tool names (registry keys) requested by an agent record.
+        task_id: The run/task identifier passed to each tool factory so that
+            task-scoped tools bind to the right workspace and context store.
+
+    Returns:
+        Freshly constructed ``BaseTool`` instances, one per name, in input order.
+
+    Raises:
+        ValueError: If any name is not present in ``TOOL_REGISTRY``.
+    """
     tools: list[BaseTool] = []
     for name in names:
         factory = TOOL_REGISTRY.get(name)
@@ -72,29 +95,48 @@ def build_tools(names: list[str], task_id: str) -> list[BaseTool]:
 # ---------------------------------------------------------------------------
 
 
-class Trigger(BaseModel):
-    """When a work-stage agent activates. Fields beyond ``type`` are filled in Phase 2."""
-
-    type: TriggerType = "always"
-    keywords: list[str] = Field(default_factory=list)
-    task_types: list[str] = Field(default_factory=list)
-    upstream: list[str] = Field(default_factory=list)
-    cron: Optional[str] = None
-
-
 class Thresholds(BaseModel):
+    """Optional per-agent guardrails enforced by the runner/usage layer.
+
+    Each ``None`` value means "no limit". Token caps bound a single activation's
+    input/output; ``max_activations_per_day`` rate-limits how often the agent runs.
+    """
+
     max_input_tokens: Optional[int] = None
     max_output_tokens: Optional[int] = None
     max_activations_per_day: Optional[int] = None
 
 
 class AgentRecord(BaseModel):
+    """Declarative definition of one agent, persisted as ``config/agents/<id>.json``.
+
+    This is the central data-driven contract of the system: the runner builds a
+    CrewAI agent purely from these fields (role/goal/backstory + model/tool config),
+    so new agents are added by writing a record, never by editing code.
+
+    An agent is a pure *persona*: it carries no ordering or activation metadata.
+    *When* and *in what order* an agent runs is decided entirely by the workflow
+    DAG that references it (see ``hyperion.crews.workflows``). The lone exception is
+    ``schedule_cron``, which lets the background scheduler fire an agent on a timer
+    independently of any workflow.
+
+    Notable fields:
+        id: Slug-format unique identifier; also the JSON filename stem.
+        role / goal / backstory: the persona prompt that defines the agent's behavior.
+        model_alias / fallback_alias: LiteLLM role aliases (see ``MODEL_ALIASES``)
+            or concrete model ids; fallback is used when the primary model fails.
+        temperature / top_p / max_tokens / max_iter: LLM and agent-loop tuning.
+        tools: Tool registry names resolved via ``build_tools`` at run time.
+        schedule_cron: Optional 5-field cron expression; when set, the scheduler
+            fires this agent as a standalone task on that timer.
+        thresholds: Optional per-agent token/activation guardrails.
+    """
+
     id: str
     name: str
     description: str = ""
     group: str = "core"
     active: bool = True
-    stage: Stage = "work"
     role: str
     goal: str
     backstory: str
@@ -105,8 +147,7 @@ class AgentRecord(BaseModel):
     max_tokens: Optional[int] = None
     max_iter: int = 3
     tools: list[str] = Field(default_factory=list)
-    trigger: Trigger = Field(default_factory=Trigger)
-    order: int = 0
+    schedule_cron: Optional[str] = None
     thresholds: Thresholds = Field(default_factory=Thresholds)
 
 
@@ -116,17 +157,47 @@ class AgentRecord(BaseModel):
 
 
 def _agents_dir():
+    """Return the directory holding agent JSON records (``<config_dir>/agents``).
+
+    Resolved from ``settings.config_dir`` on each call so it tracks the volume-mounted
+    config path; the directory may not yet exist (``save_agent`` creates it).
+    """
     d = settings.config_dir / "agents"
     return d
 
 
 def _record_path(agent_id: str):
+    """Map an agent id to its on-disk JSON path, validating the id is a safe slug.
+
+    Args:
+        agent_id: Candidate agent identifier.
+
+    Returns:
+        ``Path`` to ``<agents_dir>/<agent_id>.json``.
+
+    Raises:
+        ValueError: If ``agent_id`` is not a valid slug (guards against path
+            traversal and unportable filenames).
+    """
     if not _SLUG_RE.match(agent_id):
         raise ValueError(f"Invalid agent id {agent_id!r} (must be a slug)")
     return _agents_dir() / f"{agent_id}.json"
 
 
 def load_agent(agent_id: str) -> AgentRecord:
+    """Load and parse a single agent record by id.
+
+    Args:
+        agent_id: Slug-format agent identifier.
+
+    Returns:
+        The parsed ``AgentRecord``.
+
+    Raises:
+        ValueError: If ``agent_id`` is not a valid slug.
+        FileNotFoundError: If no record file exists for the id.
+        pydantic.ValidationError: If the JSON does not match ``AgentRecord``.
+    """
     path = _record_path(agent_id)
     if not path.exists():
         raise FileNotFoundError(f"No agent record for id {agent_id!r} at {path}")
@@ -134,20 +205,40 @@ def load_agent(agent_id: str) -> AgentRecord:
 
 
 def load_all_agents() -> list[AgentRecord]:
-    """All records, sorted by (stage order, then ``order``, then id)."""
+    """All records, sorted by id.
+
+    Returns:
+        Every ``AgentRecord`` under the agents dir, ordered by ``id`` for
+        determinism. Execution order is no longer a property of the agent set —
+        it is defined per-run by the workflow DAG. Returns an empty list if the
+        directory does not exist.
+
+    Raises:
+        pydantic.ValidationError: If any record file is malformed.
+    """
     d = _agents_dir()
     if not d.exists():
         return []
-    records = [
+    return [
         AgentRecord.model_validate_json(p.read_text(encoding="utf-8"))
         for p in sorted(d.glob("*.json"))
     ]
-    stage_rank = {"plan": 0, "work": 1, "synthesize": 2}
-    records.sort(key=lambda r: (stage_rank.get(r.stage, 1), r.order, r.id))
-    return records
 
 
 def save_agent(record: AgentRecord) -> None:
+    """Persist an agent record to disk as pretty-printed, git-friendly JSON.
+
+    Args:
+        record: The agent record to write. Its ``id`` determines the filename.
+
+    Side effects:
+        Creates the agents directory if missing and writes/overwrites
+        ``<id>.json``. The 2-space indent, ``ensure_ascii=False`` and trailing
+        newline keep diffs clean for the git-tracked, volume-mounted config.
+
+    Raises:
+        ValueError: If ``record.id`` is not a valid slug.
+    """
     d = _agents_dir()
     d.mkdir(parents=True, exist_ok=True)
     path = _record_path(record.id)
@@ -158,18 +249,34 @@ def save_agent(record: AgentRecord) -> None:
 
 
 def delete_agent(agent_id: str) -> None:
+    """Delete an agent record file if it exists (no-op when already absent).
+
+    Args:
+        agent_id: Slug-format agent identifier.
+
+    Side effects:
+        Removes ``<id>.json`` from the agents directory.
+
+    Raises:
+        ValueError: If ``agent_id`` is not a valid slug.
+    """
     path = _record_path(agent_id)
     if path.exists():
         path.unlink()
 
 
 def validate_agent(record: AgentRecord) -> None:
-    """Structural validation of a single record. Cross-record invariants
-    (acyclic DAG, at-least-one-plan/synthesize) live in ``validate_collection``."""
+    """Structural validation of a single agent record.
+
+    Args:
+        record: The agent record to check in isolation.
+
+    Raises:
+        ValueError: If the id is not a slug or the record references a tool absent
+            from ``TOOL_REGISTRY``.
+    """
     if not _SLUG_RE.match(record.id):
         raise ValueError(f"Agent id {record.id!r} must be a slug ([a-z0-9_-])")
-    if record.stage not in ("plan", "work", "synthesize"):
-        raise ValueError(f"Invalid stage {record.stage!r}")
     for tool_name in record.tools:
         if tool_name not in TOOL_REGISTRY:
             raise ValueError(f"Agent {record.id!r} references unknown tool {tool_name!r}")
@@ -178,36 +285,3 @@ def validate_agent(record: AgentRecord) -> None:
 # Recognized LiteLLM role aliases (multi-provider groups). A model_alias is valid
 # if it is one of these or a concrete model id the proxy reports.
 MODEL_ALIASES: tuple[str, ...] = ("smart", "worker", "cheap", "fast")
-
-
-def _assert_acyclic(records: list[AgentRecord]) -> None:
-    """Reject cycles in work-stage ``upstream`` edges (DFS 3-color)."""
-    work = {r.id: r for r in records if r.stage == "work"}
-    WHITE, GRAY, BLACK = 0, 1, 2
-    color = {rid: WHITE for rid in work}
-
-    def visit(rid: str, path: list[str]) -> None:
-        color[rid] = GRAY
-        for u in work[rid].trigger.upstream:
-            if u not in work:  # edge to a non-work or missing agent — not a cycle
-                continue
-            if color[u] == GRAY:
-                cycle = " -> ".join(path + [rid, u])
-                raise ValueError(f"Cycle in work-stage upstream edges: {cycle}")
-            if color[u] == WHITE:
-                visit(u, path + [rid])
-        color[rid] = BLACK
-
-    for rid in work:
-        if color[rid] == WHITE:
-            visit(rid, [])
-
-
-def validate_collection(records: list[AgentRecord]) -> None:
-    """Whole-store invariants that must hold after any CRUD mutation:
-    at least one active plan AND one active synthesize agent, and an acyclic work DAG."""
-    if not any(r.stage == "plan" and r.active for r in records):
-        raise ValueError("At least one active 'plan' agent is required.")
-    if not any(r.stage == "synthesize" and r.active for r in records):
-        raise ValueError("At least one active 'synthesize' agent is required.")
-    _assert_acyclic(records)

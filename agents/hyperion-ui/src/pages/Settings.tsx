@@ -1,3 +1,35 @@
+/**
+ * Settings.tsx — Hyperion UI "Settings" page.
+ *
+ * Role in the system:
+ *   Rendered as a route in the Hyperion web console (Vite/React app on :4102, see
+ *   `agents/hyperion-ui`). This page is the operator-facing control panel for global
+ *   Hyperion configuration, talking to the Hyperion FastAPI backend (:4100) via the
+ *   typed hooks in `../api/client`. All data flows through TanStack Query, so reads are
+ *   cached and writes invalidate the relevant query keys to keep the UI in sync.
+ *
+ * What it lets the operator do:
+ *   1. Role models   — map each logical agent role (planner / worker / cheap) to a
+ *      concrete model alias served by the LiteLLM proxy (:4000). Edited in a local
+ *      `draft` and committed via `useUpdateConfig`.
+ *   2. Default workflow — choose which workflow DAG runs when a request doesn't pick
+ *      one. The actual DAGs are authored on the separate "Workflows" tab.
+ *   3. Caps          — read-only display of token/cost caps (configured via env or
+ *      per-request; per-agent overrides live in the agent editor, not here).
+ *   4. Agent store   — export the full agent config as a zip, or import one (server
+ *      validates the whole set before writing).
+ *   5. Providers     — read-only badges showing whether each provider has an API key.
+ *
+ * Key design decisions / non-obvious context:
+ *   - `draft` holds the in-progress model selections so typing doesn't fire a save on
+ *     every keystroke; `useUpdateConfig().mutate(draft)` commits the batch.
+ *   - Model autocomplete (`<datalist>`) is de-duplicated because the LiteLLM proxy
+ *     reports alias groups as models too (see comment at `choices`).
+ *   - The bottom config cards (default workflow / caps / agent store / providers) only
+ *     render once `config` has loaded, hence the `{config && (...)}` guard.
+ *
+ * @module pages/Settings
+ */
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import {
@@ -10,12 +42,39 @@ import {
 } from "../api/client";
 import { useToast } from "../components/Toast";
 
+/**
+ * Static descriptor for the three editable "role -> model" rows.
+ *
+ * - `key`   maps to the config field name sent to the backend (and the `draft` key).
+ * - `label` is the human-readable role name shown in the row.
+ * - `note`  is a short hint describing what that role is used for.
+ *
+ * Declared `as const` so `key` is narrowed to a string-literal union rather than
+ * widened to `string`, keeping the `draft` indexing type-safe.
+ */
 const ROLES = [
   { key: "model_planner", label: "Planner", note: "high-stakes planning" },
   { key: "model_worker", label: "Worker", note: "research + synthesis" },
   { key: "model_cheap", label: "Cheap", note: "summarization sub-calls" },
 ] as const;
 
+/**
+ * Settings page component (default route export).
+ *
+ * Composes the global-configuration UI for Hyperion: role-model mapping, default
+ * workflow selection, read-only caps, agent-store import/export, and provider key
+ * status. Takes no props — it sources everything from the API hooks
+ * (`useConfig`, `useModels`, `useWorkflows`, `useUpdateConfig`).
+ *
+ * Side effects:
+ *   - Issues backend mutations via `useUpdateConfig().mutate(...)` (save models,
+ *     change default workflow) and `importConfig(...)` (zip upload).
+ *   - Invalidates the "agents", "groups", and "workflows" query caches after a
+ *     successful import so dependent views refetch.
+ *   - Surfaces toast notifications for import/workflow success and errors.
+ *
+ * @returns The Settings page JSX.
+ */
 export default function Settings() {
   const { data: config } = useConfig();
   const { data: models } = useModels();
@@ -26,6 +85,18 @@ export default function Settings() {
   const fileRef = useRef<HTMLInputElement>(null);
   const [importing, setImporting] = useState(false);
 
+  /**
+   * Upload an agent-config zip to the backend and reconcile the UI on success.
+   *
+   * Flow: flips the `importing` flag (drives button disabled/label), POSTs the file
+   * via `importConfig`, then toasts a summary (agents imported, plus optional
+   * workflow count) and invalidates the agents/groups/workflows query caches so the
+   * rest of the app refetches. Errors are caught and shown as an error toast.
+   * The `finally` block always clears `importing` and resets the file input value so
+   * selecting the same file again re-triggers `onChange`.
+   *
+   * @param file - The `.zip` config archive chosen by the operator.
+   */
   async function onImportFile(file: File) {
     setImporting(true);
     try {
@@ -43,8 +114,13 @@ export default function Settings() {
     }
   }
 
+  // Local, uncommitted edits for the role-model inputs, keyed by ROLES[].key.
+  // Seeded from the server's current mapping by the effect below and only pushed
+  // to the backend when "Save models" is clicked.
   const [draft, setDraft] = useState<Record<string, string>>({});
 
+  // Hydrate `draft` from the server's current model mapping once `models.current`
+  // is available (and re-sync if it changes), so the inputs reflect saved state.
   useEffect(() => {
     if (models?.current) {
       setDraft({

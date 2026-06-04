@@ -6,6 +6,7 @@
     {
       "id": "plan",
       "agent": "planner",
+      "kind": "plan",
       "upstream": [],
       "gate_before": false,
       "instruction": null
@@ -13,22 +14,31 @@
     {
       "id": "research",
       "agent": "researcher",
-      "upstream": ["plan"],
+      "kind": "work",
+      "upstream": [
+        "plan"
+      ],
       "gate_before": false,
       "instruction": null
     },
     {
       "id": "critique",
       "agent": "critic",
-      "upstream": ["research"],
+      "kind": "synthesize",
+      "upstream": [
+        "research"
+      ],
       "gate_before": false,
       "instruction": "Read plan.md and all notes/*.md from the workspace. Critically review the research for gaps, unsupported claims, and missing sources. Write your critique and concrete improvement requests to notes/critique.md."
     },
     {
       "id": "synthesize",
       "agent": "synthesizer",
-      "upstream": ["critique"],
-      "gate_before": false,
+      "kind": "synthesize",
+      "upstream": [
+        "critique"
+      ],
+      "gate_before": true,
       "instruction": null
     }
   ]

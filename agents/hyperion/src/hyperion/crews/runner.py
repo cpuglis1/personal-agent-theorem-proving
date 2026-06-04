@@ -1,11 +1,10 @@
 """
 Unified stage-runner (PLAN_UNIFIED.md §1.2) — the single execution engine.
 
-It is simultaneously data-driven (agents from records), stage-based
-(plan → work → synthesize), DAG-routed (work stage), and resumable between stages.
+It is simultaneously data-driven (agents from records), workflow-DAG-driven
+(nodes topo-sorted on their upstream edges), and resumable between nodes.
 It is rewritten exactly ONCE (Phase 1) with stubbed hook points that later phases fill:
 
-    route()             work-stage agent selection + DAG order   (filled: Phase 2)
     gate()              HITL pause between stages                 (filled: Phase 3)
     discover_context()  pre-plan context brief                   (filled: Phase 4)
     inject_feedback()   drain human feedback between subtasks     (filled: Phase 6)
@@ -26,7 +25,7 @@ from typing import Any, Callable
 
 from crewai import Agent, Crew, Process, Task
 
-from hyperion.agents.registry import AgentRecord, build_tools, load_agent, load_all_agents
+from hyperion.agents.registry import AgentRecord, build_tools, load_agent
 from hyperion.config import settings
 from hyperion.crews.plan_contract import parse_plan, update_plan_frontmatter
 from hyperion.crews.workflows import topo_sort
@@ -36,6 +35,10 @@ logger = logging.getLogger(__name__)
 
 
 class CapExceeded(RuntimeError):
+    """Raised when a run trips a safety cap (a stuck tool-call loop here; the
+    wall-clock budget surfaces as ``asyncio.TimeoutError``). Callers convert this
+    into a ``failed`` task result rather than letting the crew run unbounded."""
+
     pass
 
 
@@ -49,6 +52,22 @@ class ToolCallTracker:
     _last_key: str = ""
 
     def check(self, tool_name: str, args: Any) -> None:
+        """Record one tool invocation and abort if it repeats too many times.
+
+        Args:
+            tool_name: Name of the tool the agent just called.
+            args: The tool's arguments (any JSON-serializable shape).
+
+        Raises:
+            CapExceeded: When the same (tool_name, args) pair has been called
+                ``cap`` consecutive times — the signature of a stuck ReAct loop.
+
+        Side effects:
+            Mutates the internal repeat counters. Emits a "tool-loop" alert one
+            call short of the cap (only when ``task_id`` is set) as an early warning.
+        """
+        # Identify a call by a stable hash of (tool, args) so identical repeats
+        # collapse to the same key regardless of dict ordering.
         key = hashlib.md5(
             json.dumps({"t": tool_name, "a": args}, sort_keys=True, default=str).encode()
         ).hexdigest()
@@ -69,6 +88,7 @@ class ToolCallTracker:
                     f"with identical args — one short of the {self.cap} cap.",
                 )
         else:
+            # A different call breaks the streak — reset and start counting anew.
             self._counts = defaultdict(int)
             self._counts[key] = 1
             self._last_key = key
@@ -77,23 +97,6 @@ class ToolCallTracker:
 # ---------------------------------------------------------------------------
 # Hook points — no-ops in Phase 1; later phases replace the bodies.
 # ---------------------------------------------------------------------------
-
-
-def route(
-    work_records: list[AgentRecord],
-    request: str,
-    task_type: str = "mixed",
-    keywords: list[str] | None = None,
-) -> "RoutingResult":
-    """Select + order the work-stage agents for this task (Phase 2).
-
-    Delegates to the rule-based routing engine: evaluate triggers, build the work
-    DAG, topo-sort, reject cycles. Returns a RoutingResult (ordered selected records
-    + skipped reasons + dag).
-    """
-    from hyperion.crews.router import route_work
-
-    return route_work(work_records, request, task_type=task_type, keywords=keywords)
 
 
 def gate(task_id: str, stage: str, hitl: str) -> bool:
@@ -207,6 +210,11 @@ def inject_feedback(task_id: str) -> str | None:
 
 
 def _prepare_workspace(task_id: str) -> None:
+    """Create the per-task workspace layout (``notes/`` and ``artifacts/``).
+
+    Idempotent — uses ``exist_ok=True`` so re-running or resuming a task is safe.
+    Agents read/write plan.md, notes/*.md, and artifacts/result.md under this dir.
+    """
     base = settings.tasks_dir / task_id
     (base / "notes").mkdir(parents=True, exist_ok=True)
     (base / "artifacts").mkdir(parents=True, exist_ok=True)
@@ -220,14 +228,19 @@ def _esc(text: str) -> str:
     return text.replace("{", "{{").replace("}", "}}")
 
 
-def build_agent(record: AgentRecord, task_id: str) -> Agent:
+def build_agent(record: AgentRecord, task_id: str, node_id: str | None = None) -> Agent:
     """Construct a CrewAI Agent from a record using the exact kwargs the original
-    hardcoded factories used (CrewAI 0.86 is pinned — no new kwargs)."""
+    hardcoded factories used (CrewAI 0.86 is pinned — no new kwargs).
+
+    ``node_id`` is the workflow node this agent runs under; it is threaded onto the
+    trace metadata so the trace UI can attribute each LLM call to the exact node
+    (the same agent may appear in more than one node)."""
     llm = make_agent_llm(
         record.model_alias,
         temperature=record.temperature,
         task_id=task_id,
         agent_role=record.id,
+        node_id=node_id,
         top_p=record.top_p,
         max_tokens=record.max_tokens,
         fallback_alias=record.fallback_alias,
@@ -251,6 +264,17 @@ def build_agent(record: AgentRecord, task_id: str) -> Agent:
 
 
 def _plan_task(request: str, agent: Agent, context_brief: str | None = None) -> Task:
+    """Build the plan-stage Task: ask the planner to write a structured plan.md.
+
+    Args:
+        request: The user's original request, embedded verbatim in the description.
+        agent: The CrewAI Agent that will run this task.
+        context_brief: Optional auto-discovered brief, appended as reference data
+            (explicitly framed as data, not instructions, to resist prompt injection).
+
+    Returns:
+        A CrewAI Task whose expected output is plan.md in the workspace.
+    """
     brief_block = ""
     if context_brief:
         # Auto-discovered context is reference material, not instructions.
@@ -271,6 +295,16 @@ def _plan_task(request: str, agent: Agent, context_brief: str | None = None) -> 
 
 
 def _work_task(record: AgentRecord, agent: Agent, feedback: str | None = None) -> Task:
+    """Build a work-stage Task: execute the plan's subtasks into notes/*.md.
+
+    Args:
+        record: The agent record (its id names the Task).
+        agent: The CrewAI Agent that will run this task.
+        feedback: Optional human-feedback block appended to the description.
+
+    Returns:
+        A CrewAI Task whose expected output is one notes/*.md file per subtask.
+    """
     return Task(
         name=record.id,
         description=_esc(
@@ -284,6 +318,16 @@ def _work_task(record: AgentRecord, agent: Agent, feedback: str | None = None) -
 
 
 def _synthesize_task(record: AgentRecord, agent: Agent, feedback: str | None = None) -> Task:
+    """Build the synthesize-stage Task: fold plan + notes into artifacts/result.md.
+
+    Args:
+        record: The agent record (its id names the Task).
+        agent: The CrewAI Agent that will run this task.
+        feedback: Optional human-feedback block appended to the description.
+
+    Returns:
+        A CrewAI Task whose expected output is the final result.md report.
+    """
     return Task(
         name=record.id,
         description=_esc(
@@ -299,7 +343,19 @@ def _synthesize_task(record: AgentRecord, agent: Agent, feedback: str | None = N
 def _make_callbacks(
     progress_callback: Callable[[str], None] | None,
 ) -> tuple[Callable, Callable]:
+    """Adapt a simple ``progress_callback(str)`` into CrewAI's step/task callbacks.
+
+    Args:
+        progress_callback: Sink for human-readable progress lines, or None to disable.
+
+    Returns:
+        A (step_callback, task_callback) pair to pass to Crew(). Both are no-ops
+        when ``progress_callback`` is None, and both swallow their own exceptions so
+        a progress-logging hiccup can never abort the crew.
+    """
+
     def _step_cb(step) -> None:
+        """Per-agent-step hook: report the tool being used or the first thought line."""
         if progress_callback is None:
             return
         try:
@@ -314,6 +370,7 @@ def _make_callbacks(
             pass
 
     def _task_cb(task_output) -> None:
+        """Per-task-completion hook: report that a node's task finished."""
         if progress_callback is None:
             return
         try:
@@ -431,6 +488,7 @@ _MAX_REVISIONS = 2  # plan revise passes before we force-continue
 
 
 def _failed(task_id: str, error: str, routing: dict | None = None) -> dict[str, Any]:
+    """Build the canonical ``failed`` result dict the API persists for a run."""
     return {"task_id": task_id, "status": "failed", "result_path": None,
             "error": error, "routing": routing}
 
@@ -467,42 +525,25 @@ def _caps_payload(
     }
 
 
-def _node_stage(node) -> str:
-    """The pipeline stage of a node's agent (plan/work/synthesize). Defaults to
-    'work' if the agent record can't be loaded (validation catches that earlier)."""
-    try:
-        return load_agent(node.agent).stage
-    except Exception:
-        return "work"
-
-
-def _node_fires(record: AgentRecord, request: str, signals) -> tuple[bool, str]:
-    """Optional per-node firing condition from the agent's trigger. Returns
-    (fires, skip_reason). 'upstream'/'schedule' triggers always fire inside a
-    workflow — the workflow's own edges define ordering, and placing an agent in a
-    workflow is itself the activation."""
-    trig = record.trigger
-    haystack = (request or "").lower()
-    keywords = list(getattr(signals, "keywords", []) or [])
-    kw_set = {k.lower() for k in keywords}
+def _node_fires(node, signals) -> tuple[bool, str]:
+    """Optional per-node firing condition from the node's ``when`` rule. Returns
+    (fires, skip_reason). A node with no ``when`` always fires — the workflow's own
+    edges define ordering, and placing an agent in a workflow is itself the
+    activation. ``when.task_types`` gates the node on the planner-classified task
+    type (e.g. a developer node that runs only on ``code`` tasks)."""
+    when = node.when
+    if when is None or not when.task_types:
+        return True, ""
     task_type = getattr(signals, "task_type", None) or "mixed"
-
-    if trig.type == "keyword":
-        for kw in trig.keywords:
-            if kw.lower() in haystack or kw.lower() in kw_set:
-                return True, ""
-        return False, f"no keyword match ({trig.keywords})"
-    if trig.type == "task_type":
-        if task_type in trig.task_types:
-            return True, ""
-        return False, f"task_type {task_type!r} not in {trig.task_types}"
-    return True, ""
+    if task_type in when.task_types:
+        return True, ""
+    return False, f"task_type {task_type!r} not in {when.task_types}"
 
 
 def _node_task(node, record: AgentRecord, agent, request: str,
                context_brief: str | None, feedback: str | None):
     """Build the CrewAI Task for a node. A node ``instruction`` overrides the
-    stage-derived description; otherwise reuse the original per-stage templates."""
+    kind-derived description; otherwise reuse the per-kind templates."""
     if node.instruction:
         return Task(
             name=node.id,
@@ -510,21 +551,20 @@ def _node_task(node, record: AgentRecord, agent, request: str,
             expected_output="The node's output written to the task workspace.",
             agent=agent,
         )
-    stage = record.stage
-    if stage == "plan":
+    if node.kind == "plan":
         return _plan_task(request, agent, context_brief=context_brief)
-    if stage == "synthesize":
+    if node.kind == "synthesize":
         return _synthesize_task(record, agent, feedback=feedback)
     return _work_task(record, agent, feedback=feedback)
 
 
-def _implicit_gate_node_id(ordered: list, stages: list[str]) -> str | None:
+def _implicit_gate_node_id(ordered: list) -> str | None:
     """The node before which a plan/full HITL run implicitly pauses: the first
     non-plan node that has at least one plan node ahead of it. Preserves the old
     'pause after planning' behavior for workflows that declare no explicit gates."""
     seen_plan = False
-    for node, st in zip(ordered, stages):
-        if st == "plan":
+    for node in ordered:
+        if node.kind == "plan":
             seen_plan = True
             continue
         if seen_plan:
@@ -551,8 +591,7 @@ async def _execute_workflow(
     straight-through path (start 0) and the post-approval resume path. Pauses before
     any gated node; returns done/failed/awaiting_* dicts the API persists."""
     ordered = topo_sort(workflow.nodes)
-    stages = [_node_stage(n) for n in ordered]
-    implicit_gate_id = _implicit_gate_node_id(ordered, stages)
+    implicit_gate_id = _implicit_gate_node_id(ordered)
 
     routing: dict = {
         "workflow": workflow.id,
@@ -575,7 +614,7 @@ async def _execute_workflow(
             record = load_agent(node.agent)
             signals = parse_plan(task_id)
 
-            fires, reason = _node_fires(record, request, signals)
+            fires, reason = _node_fires(node, signals)
             if not fires:
                 routing["skipped"].append({"id": node.id, "reason": reason})
                 continue
@@ -593,23 +632,23 @@ async def _execute_workflow(
 
             # When proceeding past planning into work, auto-select the first plan
             # option if a human hasn't chosen one (mirrors the old straight-through).
-            if record.stage != "plan" and signals.options and not signals.selected_option:
+            if node.kind != "plan" and signals.options and not signals.selected_option:
                 update_plan_frontmatter(task_id, selected_option=signals.options[0].id)
 
             feedback = inject_feedback(task_id)
             if feedback and progress_callback:
                 progress_callback(f"[feedback] injecting human feedback into '{node.id}'")
 
-            agent = build_agent(record, task_id)
+            agent = build_agent(record, task_id, node_id=node.id)
             tsk = _node_task(node, record, agent, request, context_brief, feedback)
             last_result = await _run_stage(
                 task_id, request, node.id, [agent], [tsk], progress_callback, deadline
             )
             routing["selected_agents"].append(node.id)
-            _check_empty_stage(task_id, record.stage)
+            _check_empty_stage(task_id, node.kind)
 
             # ---- Post-plan checks: affordance pause + record context brief --
-            if record.stage == "plan":
+            if node.kind == "plan":
                 if context_brief:
                     update_plan_frontmatter(task_id, context_brief=context_brief)
                 from hyperion.feedback import latest_pending_affordance
@@ -627,6 +666,25 @@ async def _execute_workflow(
         return _failed(task_id, str(exc), routing)
 
     result_path = _write_fallback_result(task_id, last_result)
+
+    # Post-run meta-prompt pipeline (title/followups/tags). Best-effort: failures
+    # here never affect the task's done status.
+    result_text = ""
+    if result_path:
+        try:
+            from pathlib import Path
+
+            result_text = Path(result_path).read_text(encoding="utf-8")
+        except Exception:
+            pass
+    if result_text:
+        try:
+            from hyperion.server.meta_tasks import run_meta_tasks
+
+            await run_meta_tasks(task_id, result_text)
+        except Exception as exc:
+            logger.warning("task %s: meta_tasks failed: %s", task_id, exc)
+
     return {
         "task_id": task_id, "status": "done", "result_path": result_path,
         "error": None, "routing": routing,
@@ -714,7 +772,7 @@ async def resume_task(
     # When the caller didn't record which node we paused before (older pending
     # payloads, or a bare revise call), fall back to the implicit plan gate node.
     if resume_node is None:
-        resume_node = _implicit_gate_node_id(ordered, [_node_stage(n) for n in ordered])
+        resume_node = _implicit_gate_node_id(ordered)
 
     if action == "reject":
         if progress_callback:
@@ -725,11 +783,11 @@ async def resume_task(
         revise_request = request
         if edits:
             revise_request = f"{request}\n\nRevise the plan per this feedback:\n{edits}"
-        plan_nodes = [n for n in ordered if _node_stage(n) == "plan"]
+        plan_nodes = [n for n in ordered if n.kind == "plan"]
         try:
             for n in plan_nodes:
                 record = load_agent(n.agent)
-                agent = build_agent(record, task_id)
+                agent = build_agent(record, task_id, node_id=n.id)
                 tsk = _node_task(n, record, agent, revise_request, None, None)
                 await _run_stage(task_id, request, n.id, [agent], [tsk], progress_callback, deadline)
         except asyncio.TimeoutError:
@@ -777,7 +835,7 @@ async def resume_task(
         start_index = ids.index(resume_node) if resume_node in ids else 0
     else:
         for i, n in enumerate(ordered):
-            if _node_stage(n) != "plan":
+            if n.kind != "plan":
                 start_index = i
                 break
 

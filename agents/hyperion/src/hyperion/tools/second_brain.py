@@ -1,4 +1,30 @@
-"""Second brain tool — semantic search over second_brain Qdrant collection."""
+"""Second brain tool — semantic search over the ``second_brain`` Qdrant collection.
+
+Role in the system
+------------------
+Exposes Charlie's personal Obsidian/Notion "second brain" (the PARA vault ingested
+into Qdrant) as a CrewAI ``BaseTool`` so Hyperion agents (planner, researcher, etc.)
+can pull in background knowledge, past notes, career goals, projects, and investments
+while reasoning. It is one of the retrieval tools registered with the agents alongside
+``web_search``, ``notion``, etc.
+
+Pipeline
+--------
+1. Embed + vector-search the ``second_brain`` collection via the shared
+   ``search_second_brain`` helper (over-fetches candidates).
+2. Rerank candidates against the query with the Infinity reranker (``rerank``).
+3. Format the top-``k`` results into a Markdown string, trimming output to a
+   per-call token budget so a single call can't flood a stage's context window.
+
+Key design decisions / non-obvious context
+-------------------------------------------
+- The shared ``qdrant_client.py`` (under ``agents/_shared/``) is loaded via
+  ``importlib`` rather than a normal import. This deliberately sidesteps a name
+  collision with the installed ``qdrant-client`` PyPI package, and tolerates two
+  different filesystem layouts (local checkout vs. the Docker image build context).
+- Retrieval output is capped by ``_SECOND_BRAIN_TOKEN_BUDGET`` at the source, so
+  the cap is enforced regardless of which agent/stage invokes the tool.
+"""
 
 from __future__ import annotations
 
@@ -32,6 +58,18 @@ _SECOND_BRAIN_TOKEN_BUDGET = 6000
 
 
 class SecondBrainTool(BaseTool):
+    """CrewAI tool that performs reranked semantic search over the second brain.
+
+    Registered with Hyperion agents so they can retrieve personal notes/knowledge
+    on demand. The ``name`` and ``description`` fields are surfaced to the LLM as
+    the tool's callable signature; the LLM passes a single natural-language query.
+
+    Attributes:
+        name: Tool identifier exposed to the agent/LLM ("search_second_brain").
+        description: Natural-language guidance shown to the LLM on when/how to call.
+        top_k: Number of results to keep after reranking (post-rerank cutoff).
+    """
+
     name: str = "search_second_brain"
     description: str = (
         "Semantic search over the personal Notion second brain. "
@@ -41,6 +79,24 @@ class SecondBrainTool(BaseTool):
     top_k: int = Field(default=5, description="Number of results to return after reranking")
 
     def _run(self, query: str) -> str:
+        """Search the second brain and return formatted, budget-trimmed results.
+
+        Invoked by CrewAI when an agent calls this tool. Over-fetches vector
+        candidates, reranks them, then renders the top results as Markdown.
+
+        Args:
+            query: Natural-language search string supplied by the agent/LLM.
+
+        Returns:
+            A Markdown string with a header and one section per result (title,
+            relevance score, snippet, and Notion source URL when available). If no
+            candidates clear the vector score threshold, returns a short
+            "(No relevant notes found…)" placeholder string instead.
+
+        Side effects:
+            Issues a Qdrant vector query and a call to the reranker service; both
+            are network/IO calls routed through the shared infrastructure.
+        """
         # Fetch more candidates than needed, then rerank to top_k
         candidates = search_second_brain(
             query=query,

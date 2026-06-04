@@ -1,40 +1,75 @@
-# Hyperion container — standalone override (infra services must already be up)
+# =============================================================================
+# Hyperion container — standalone Docker Compose override
+# =============================================================================
 #
-# Hyperion is now part of ~/ai/ai-router/docker-compose.yml.
-# The normal workflow is:
-#   cd ~/ai/ai-router && docker compose up -d
+# PURPOSE
+#   Defines the two Hyperion runtime containers (the FastAPI orchestrator API
+#   and the MCP tool server) as a Compose *override*. An override file is merged
+#   on top of a base compose file: it does NOT start the supporting
+#   infrastructure (LiteLLM, Qdrant, SearXNG, Infinity, Langfuse) itself — those
+#   services are expected to already exist in the base file / be running.
 #
-# To rebuild just Hyperion after a code change:
-#   cd ~/ai/ai-router && docker compose build hyperion hyperion-mcp
-#   docker compose up -d --no-deps hyperion hyperion-mcp
+# WHERE THIS FITS
+#   Hyperion is now part of the canonical stack at
+#   ~/ai/ai-router/docker-compose.yml, so the *normal* workflow does NOT use
+#   this file at all:
+#       cd ~/ai/ai-router && docker compose up -d        # start everything
 #
-# This override is kept for standalone use (infra already up separately):
-#   cd ~/ai/ai-router
-#   docker compose -f docker-compose.yml -f ../agents/hyperion/docker-compose.override.yml \
-#     up hyperion hyperion-mcp
+#   To rebuild just Hyperion after a code change (still via the main stack):
+#       cd ~/ai/ai-router && docker compose build hyperion hyperion-mcp
+#       docker compose up -d --no-deps hyperion hyperion-mcp
+#
+#   This override is kept for STANDALONE use — running only the Hyperion
+#   containers while the infra services are brought up separately. It is layered
+#   on top of the base ai-router compose file so service names like `litellm`,
+#   `qdrant`, etc. resolve on the shared network:
+#       cd ~/ai/ai-router
+#       docker compose -f docker-compose.yml -f ../agents/hyperion/docker-compose.override.yml \
+#         up hyperion hyperion-mcp
+#
+# KEY DESIGN NOTES
+#   - The internal service URLs below use Docker DNS service names + internal
+#     ports (e.g. litellm:4000), NOT the host-published localhost ports. This is
+#     why these values differ from the host-facing ports documented elsewhere
+#     (e.g. Langfuse is host :3001 but :3000 inside the network).
+#   - The `ai-net` network is declared `external` because it is owned/created by
+#     the ai-router stack; this file only joins it.
+#   - Both services build from the same Dockerfile/image and differ only by the
+#     `command` they run (hyperion-api vs hyperion-mcp).
+# =============================================================================
 
 services:
 
+  # ---------------------------------------------------------------------------
+  # hyperion: the FastAPI multi-agent orchestrator (REST API + web console
+  # backend). Published on host :4100.
+  # ---------------------------------------------------------------------------
+
   hyperion:
     build:
-      context: ../
+      context: ../              # build context is agents/ (one level up) so the shared _shared/ utils are visible
       dockerfile: hyperion/Dockerfile
     container_name: hyperion
-    restart: unless-stopped
+    restart: unless-stopped     # auto-restart on crash; only stays down if explicitly stopped
     ports:
-      - "4100:4100"
+      - "4100:4100"             # host:container — exposes the orchestrator REST API on localhost:4100
     volumes:
-      - ./tasks:/app/tasks:rw
+      - ./tasks:/app/tasks:rw   # persist task artifacts/state on the host across container restarts
+      # Mount the host Docker socket read-only so Hyperion can spawn/inspect
+      # sibling containers (e.g. sandboxed tool execution). Read-only limits it
+      # to inspection-style use rather than full daemon control.
       - /var/run/docker.sock:/var/run/docker.sock:ro
     env_file:
-      - .env
+      - .env                    # secrets (API keys, master key) loaded from ai-router/.env; resolved relative to the compose project dir
     environment:
-      LITELLM_BASE_URL: "http://litellm:4000/v1"
-      QDRANT_URL: "http://qdrant:6333"
-      SEARXNG_URL: "http://searxng:8888"
-      INFINITY_URL: "http://infinity:7997"
-      LANGFUSE_HOST: "http://langfuse:3000"
-    depends_on:
+      # Internal service endpoints use Docker DNS names + in-network ports,
+      # NOT the host-published localhost ports (see KEY DESIGN NOTES above).
+      LITELLM_BASE_URL: "http://litellm:4000/v1"   # all LLM calls route through the LiteLLM proxy
+      QDRANT_URL: "http://qdrant:6333"             # vector DB for episodic/context memory
+      SEARXNG_URL: "http://searxng:8888"           # web_search tool backend (internal port 8888)
+      INFINITY_URL: "http://infinity:7997"         # reranker tool backend
+      LANGFUSE_HOST: "http://langfuse:3000"        # LLM tracing; :3000 internally, :3001 on host
+    depends_on:                 # start ordering only (does not wait for healthchecks)
       - litellm
       - qdrant
       - searxng
@@ -42,34 +77,44 @@ services:
       - langfuse
     networks:
       - ai-net
-    command: ["uv", "run", "hyperion-api"]
+    command: ["uv", "run", "hyperion-api"]         # launch the FastAPI orchestrator entrypoint
 
+  # ---------------------------------------------------------------------------
+  # hyperion-mcp: the MCP (Model Context Protocol) tool server. Exposes
+  # Hyperion's tools/capabilities to MCP clients. Same image as `hyperion`,
+  # different entrypoint. Published on host :4101.
+  # ---------------------------------------------------------------------------
   hyperion-mcp:
     build:
-      context: ../
+      context: ../              # same build context/image as the hyperion service
       dockerfile: hyperion/Dockerfile
     container_name: hyperion-mcp
     restart: unless-stopped
     ports:
-      - "4101:4101"
+      - "4101:4101"             # exposes the MCP server on localhost:4101
     volumes:
-      - ./tasks:/app/tasks:rw
+      - ./tasks:/app/tasks:rw   # shares the same tasks dir as the API service
+      # NOTE: no docker.sock mount here — the MCP server does not spawn containers.
     env_file:
       - .env
     environment:
+      # Same internal endpoint convention as the hyperion service above.
       LITELLM_BASE_URL: "http://litellm:4000/v1"
       QDRANT_URL: "http://qdrant:6333"
       SEARXNG_URL: "http://searxng:8888"
       INFINITY_URL: "http://infinity:7997"
       LANGFUSE_HOST: "http://langfuse:3000"
-    depends_on:
+    depends_on:                 # only the dependencies the MCP server actually needs at startup
       - litellm
       - qdrant
     networks:
       - ai-net
-    command: ["uv", "run", "hyperion-mcp"]
+    command: ["uv", "run", "hyperion-mcp"]         # launch the MCP tool server entrypoint
 
+# Join the network created by the ai-router stack rather than creating a new one.
+# `external: true` means Compose will NOT manage this network's lifecycle; it must
+# already exist (created when `ai-router` is brought up).
 networks:
   ai-net:
     external: true
-    name: ai-router_ai-net
+    name: ai-router_ai-net      # actual Docker network name (project-prefixed by the ai-router stack)

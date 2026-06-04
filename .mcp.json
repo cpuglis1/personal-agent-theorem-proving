@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "hyperion": {
+      "type": "http",
+      "url": "http://localhost:4101/mcp",
+      "description": "Hyperion multi-agent orchestrator (CrewAI + LiteLLM)"
+    }
+  }
+}

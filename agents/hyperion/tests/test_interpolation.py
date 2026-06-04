@@ -17,6 +17,12 @@ _INPUTS = {"task_id": "abc123", "request": "do the thing"}
 
 
 def test_esc_survives_format_with_literal_braces():
+    """``_esc`` round-trips literal-brace text through ``str.format`` unchanged.
+
+    Asserts that the raw text breaks ``str.format`` (the historical
+    ``KeyError``), but after ``_esc`` doubles the braces it survives
+    interpolation and equals the original string.
+    """
     raw = "Return a list of mappings: {id, description}"
     # Unescaped text raises the historical KeyError under CrewAI's interpolation.
     try:
@@ -30,6 +36,12 @@ def test_esc_survives_format_with_literal_braces():
 
 
 def test_planner_goal_is_interpolation_safe():
+    """The real planner agent's ``goal`` text is interpolation-safe via ``_esc``.
+
+    Loads ``config/agents/planner.json`` (which contains a literal YAML schema
+    example with braces) and asserts that ``_esc``'ing its ``goal`` lets it pass
+    through ``str.format`` without raising and yields the original goal text.
+    """
     record = json.loads(
         (Path(__file__).resolve().parents[1] / "config/agents/planner.json").read_text()
     )

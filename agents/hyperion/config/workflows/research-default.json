@@ -6,6 +6,7 @@
     {
       "id": "plan",
       "agent": "planner",
+      "kind": "plan",
       "upstream": [],
       "gate_before": false,
       "instruction": null
@@ -13,15 +14,21 @@
     {
       "id": "research",
       "agent": "researcher",
-      "upstream": ["plan"],
+      "kind": "work",
+      "upstream": [
+        "plan"
+      ],
       "gate_before": false,
       "instruction": null
     },
     {
       "id": "synthesize",
       "agent": "synthesizer",
-      "upstream": ["research"],
-      "gate_before": false,
+      "kind": "synthesize",
+      "upstream": [
+        "research"
+      ],
+      "gate_before": true,
       "instruction": null
     }
   ]

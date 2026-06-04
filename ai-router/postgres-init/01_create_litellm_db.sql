@@ -1,0 +1,29 @@
+-- =============================================================================
+-- File: 01_create_litellm_db.sql
+-- Purpose: Bootstrap the dedicated `litellm` database inside the shared Postgres
+--          container used by the ai-router Docker Compose stack.
+--
+-- Role in the system:
+--   The ai-router stack runs a single Postgres instance shared by multiple
+--   services. The container's POSTGRES_DB env var provisions the default
+--   database (used by Langfuse, the LLM tracing service on :3001). LiteLLM
+--   (the OpenAI-compatible proxy on :4000) needs its OWN database for storing
+--   keys, spend/usage logs, and config. This script carves out that second
+--   database so LiteLLM and Langfuse stay isolated within one Postgres server.
+--
+-- Execution model (non-obvious context):
+--   Postgres' official image runs any *.sql / *.sh files placed in
+--   /docker-entrypoint-initdb.d ONLY on FIRST boot of a fresh data volume
+--   (i.e. when the data directory is empty). It will NOT re-run on subsequent
+--   restarts. The numeric "01_" prefix controls ordering — init scripts run in
+--   filename (lexicographic) order, so this runs before any higher-numbered
+--   scripts that may depend on the litellm database existing.
+--
+--   Consequence: to re-trigger this script you must remove the Postgres data
+--   volume (e.g. `docker compose down -v`). Editing the file alone does nothing
+--   to an already-initialized volume.
+-- =============================================================================
+
+-- Create the litellm database alongside the default langfuse database.
+-- Runs automatically on first postgres container boot via /docker-entrypoint-initdb.d.
+CREATE DATABASE litellm;

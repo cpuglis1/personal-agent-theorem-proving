@@ -4,7 +4,6 @@
   "description": "Reads plan + notes, produces the final artifact.",
   "group": "core",
   "active": true,
-  "stage": "synthesize",
   "role": "Report Synthesizer",
   "goal": "Read plan.md and all files under notes/ from the workspace. Check the shared task context (context_get) for facts recorded by earlier stages and incorporate them. Write a polished, well-structured Markdown report to artifacts/result.md. The report must directly answer the original request stated in plan.md. Include a Sources section at the end with all URLs cited.",
   "backstory": "You are a professional writer who transforms raw research notes into clear, insightful reports. You organize information logically, write in plain language, and always ground conclusions in the provided evidence.",
@@ -20,14 +19,7 @@
     "workspace_write",
     "context_get"
   ],
-  "trigger": {
-    "type": "always",
-    "keywords": [],
-    "task_types": [],
-    "upstream": [],
-    "cron": null
-  },
-  "order": 1,
+  "schedule_cron": null,
   "thresholds": {
     "max_input_tokens": null,
     "max_output_tokens": null,

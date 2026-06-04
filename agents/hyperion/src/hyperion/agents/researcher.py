@@ -1,4 +1,34 @@
-"""Researcher agent — web + second brain information gathering."""
+"""Researcher agent — web + second brain information gathering.
+
+This module is the factory for Hyperion's "researcher" agent, one of the
+specialist roles (planner / researcher / developer / critic / synthesizer) that
+make up the multi-agent crew orchestrated by ``hyperion.crews.runner``.
+
+Role in the system
+------------------
+Within a research workflow DAG the planner first emits a ``plan.md`` into the
+per-run workspace. The researcher then reads that plan, fans out across its
+information-gathering tools, and writes one Markdown note per subtask into the
+workspace ``notes/`` directory. Downstream agents (critic, synthesizer) consume
+those notes. The agent therefore communicates with the rest of the crew almost
+entirely through the shared workspace filesystem rather than through return
+values.
+
+Tooling / design decisions
+--------------------------
+- ``SecondBrainTool`` queries Charlie's Qdrant-indexed Obsidian vault; the
+  ``WebSearchTool`` hits the SearXNG instance for real-time results. Combining a
+  private knowledge base with live web search lets the agent ground answers in
+  both personal context and current information.
+- Workspace read/write tools are constructed with ``task_id`` so every file
+  access is scoped (sandboxed) to the current run's workspace directory.
+- The LLM is resolved via ``worker_llm`` with ``agent_role="researcher"`` so the
+  router can apply role-specific model selection and per-agent fallbacks, and so
+  usage/cost is attributed to this role for the given ``task_id``.
+- ``allow_delegation=False`` keeps this agent from spawning sub-agents — it is a
+  leaf worker in the crew. ``max_iter=10`` bounds the tool-use loop to avoid
+  runaway iteration on a single research task.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +41,24 @@ from hyperion.tools.workspace import WorkspaceReadTool, WorkspaceWriteTool
 
 
 def make_researcher(task_id: str) -> Agent:
+    """Construct the CrewAI researcher Agent for a single Hyperion run.
+
+    The returned agent reads ``plan.md`` from the run workspace, executes each
+    research subtask using web + second-brain search, and writes cited findings
+    as Markdown files under ``notes/`` in the same workspace.
+
+    Args:
+        task_id: Identifier of the current Hyperion run. Threaded into the LLM
+            factory (for role/cost attribution and per-run model selection) and
+            into the workspace tools so all file I/O is sandboxed to this run's
+            workspace directory.
+
+    Returns:
+        A configured ``crewai.Agent`` with the "Research Specialist" role,
+        equipped with second-brain search, web search, and workspace
+        read/write tools. Delegation is disabled and the tool-use loop is
+        capped at 10 iterations.
+    """
     return Agent(
         role="Research Specialist",
         goal=(

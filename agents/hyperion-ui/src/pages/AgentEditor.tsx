@@ -1,22 +1,59 @@
-import { useEffect, useMemo, useState } from "react";
+/**
+ * AgentEditor — create / edit / duplicate / delete a single Hyperion agent.
+ *
+ * Role in the system:
+ *   This is the Hyperion UI (React + Vite) page mounted at `/agents/new` and
+ *   `/agents/:id`. It is the human-facing front end for the agent registry that
+ *   the Hyperion orchestrator (FastAPI :4100) persists and uses to assemble its
+ *   multi-agent pipeline. An agent is a pure *persona*: every field on this form
+ *   maps 1:1 onto an `AgentRecord` (see ../api/client) which the backend stores
+ *   and reads when building CrewAI crews: identity/grouping, the prompt triple
+ *   (role/goal/backstory), model routing (alias + optional fallback), tool
+ *   grants, an optional `schedule_cron`, and per-run safety thresholds (token
+ *   caps, activations/day circuit breaker). Ordering and activation are *not*
+ *   here — they live on the workflow that references the agent.
+ *
+ * Data flow / design notes:
+ *   - All server state is fetched and mutated through TanStack Query hooks in
+ *     ../api/client (useAgent, useTools, useModels, useSaveAgent,
+ *     useDeleteAgent, useDuplicateAgent). This component holds only a single
+ *     local draft copy (`rec`) of the record being edited.
+ *   - `isNew` is derived from the absence of a route `:id` param. It drives
+ *     create-vs-update behaviour: the ID field is locked after creation, the
+ *     save hook targets POST vs PUT, and Duplicate/Delete are hidden for new
+ *     records.
+ *   - The draft is seeded from `blankAgent()` and then overwritten once the
+ *     existing record loads (see the useEffect), so the form is editable
+ *     immediately even before the fetch resolves.
+ *   - Model routing convention: an *alias* (smart/worker/cheap/fast) inherits
+ *     the LiteLLM proxy's routing + provider fallback; a concrete model id pins
+ *     one model exactly. See modelChoices for why aliases are listed first and
+ *     deduped against the proxy's model list.
+ *   - Guardrail banner: warns when editing a `core` agent, since its prompt
+ *     shapes the default pipeline.
+ */
+import { useEffect, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import {
   useAgent,
-  useAgents,
   useDeleteAgent,
   useDuplicateAgent,
   useModels,
   useSaveAgent,
   useTools,
   type AgentRecord,
-  type Stage,
-  type TriggerType,
 } from "../api/client";
 import InfoTip from "../components/InfoTip";
 
-const STAGES: Stage[] = ["plan", "work", "synthesize"];
-const TRIGGER_TYPES: TriggerType[] = ["always", "keyword", "task_type", "upstream", "schedule"];
-
+/**
+ * Build a fresh, fully-defaulted AgentRecord for the "new agent" form.
+ *
+ * Every field on the form is initialised here so the inputs are always
+ * controlled (never undefined) from first render. Defaults mirror Hyperion's
+ * conventions: a worker-model agent, low temperature, active, no schedule.
+ *
+ * @returns A blank AgentRecord with sensible defaults and an empty `id`/`name`.
+ */
 function blankAgent(): AgentRecord {
   return {
     id: "",
@@ -24,7 +61,6 @@ function blankAgent(): AgentRecord {
     description: "",
     group: "optional",
     active: true,
-    stage: "work",
     role: "",
     goal: "",
     backstory: "",
@@ -35,8 +71,7 @@ function blankAgent(): AgentRecord {
     max_tokens: null,
     max_iter: 5,
     tools: [],
-    trigger: { type: "always", keywords: [], task_types: [], upstream: [], cron: null },
-    order: 1,
+    schedule_cron: null,
     thresholds: {
       max_input_tokens: null,
       max_output_tokens: null,
@@ -45,45 +80,76 @@ function blankAgent(): AgentRecord {
   };
 }
 
-function csv(v: string): string[] {
-  return v.split(",").map((s) => s.trim()).filter(Boolean);
-}
-
+/**
+ * Page component for creating or editing one Hyperion agent.
+ *
+ * Reads the optional `:id` route param to decide between create (`isNew`) and
+ * edit modes, loads the existing record plus the available tools/models, and
+ * renders a sectioned form (Identity, Prompt, Model, Tools, Schedule, Thresholds)
+ * bound to a local draft. On save/delete it navigates back to the dashboard
+ * ("/"); on duplicate it navigates to the new clone's edit page.
+ *
+ * @returns The agent editor page element.
+ */
 export default function AgentEditor() {
   const { id } = useParams();
+  // No route id => we're creating a new agent rather than editing an existing one.
   const isNew = !id;
   const nav = useNavigate();
 
+  // Server state via TanStack Query: the record under edit, plus the option
+  // lists (tools, models).
   const existing = useAgent(id);
   const { data: tools } = useTools();
   const { data: models } = useModels();
-  const { data: allAgents } = useAgents();
 
+  // Mutations. `useSaveAgent(isNew)` selects create vs update semantics.
   const save = useSaveAgent(isNew);
   const del = useDeleteAgent();
   const dup = useDuplicateAgent();
 
+  // The single editable draft. Starts blank, then is replaced by the fetched
+  // record once it loads (below). All inputs are controlled against this.
   const [rec, setRec] = useState<AgentRecord>(blankAgent());
 
+  // Seed the draft from the server once the existing record arrives. Runs again
+  // if the fetched record reference changes (e.g. after a refetch).
   useEffect(() => {
     if (existing.data) setRec(existing.data);
   }, [existing.data]);
 
-  const dependents = useMemo(
-    () => (allAgents ?? []).filter((a) => a.id !== rec.id && a.trigger.upstream.includes(rec.id)),
-    [allAgents, rec.id],
-  );
-
+  /**
+   * Immutably update a single top-level field of the draft record.
+   *
+   * Generic over the key so the value type is checked against AgentRecord[K].
+   *
+   * @param k Top-level AgentRecord field to set.
+   * @param v New value for that field.
+   */
   function set<K extends keyof AgentRecord>(k: K, v: AgentRecord[K]) {
     setRec((r) => ({ ...r, [k]: v }));
   }
-  function setTrigger<K extends keyof AgentRecord["trigger"]>(k: K, v: AgentRecord["trigger"][K]) {
-    setRec((r) => ({ ...r, trigger: { ...r.trigger, [k]: v } }));
-  }
+  /**
+   * Update a numeric threshold from a raw text input, coercing to number|null.
+   *
+   * An empty string maps to `null` ("inherit global / no limit"); any other
+   * value is parsed with Number(). The threshold object is updated immutably.
+   *
+   * @param k Threshold field to set (max_input_tokens / max_output_tokens / max_activations_per_day).
+   * @param v Raw input string ("" => null).
+   */
   function setThreshold(k: keyof AgentRecord["thresholds"], v: string) {
     const n = v === "" ? null : Number(v);
     setRec((r) => ({ ...r, thresholds: { ...r.thresholds, [k]: n } }));
   }
+  /**
+   * Add or remove a tool grant by name (checkbox toggle).
+   *
+   * Removes the tool if already granted, otherwise appends it. Updates the
+   * draft's `tools` array immutably.
+   *
+   * @param name Tool identifier to toggle.
+   */
   function toggleTool(name: string) {
     setRec((r) => ({
       ...r,
@@ -91,40 +157,53 @@ export default function AgentEditor() {
     }));
   }
 
+  /**
+   * Persist the draft (create or update per `isNew`) and return to the
+   * dashboard on success. Errors surface via `save.isError` in the UI.
+   */
   function onSave() {
     save.mutate(rec, { onSuccess: () => nav("/") });
   }
+  /**
+   * Delete the current agent after a confirm() prompt, then return to the
+   * dashboard. No-op when creating (no `id`).
+   */
   function onDelete() {
     if (!id) return;
     if (!confirm(`Delete agent "${rec.name}"?`)) return;
     del.mutate(id, { onSuccess: () => nav("/") });
   }
+  /**
+   * Duplicate the current agent and navigate to the new clone's edit page.
+   * No-op when creating (no `id`).
+   */
   function onDuplicate() {
     if (!id) return;
     dup.mutate(id, { onSuccess: (clone) => nav(`/agents/${clone.id}`) });
   }
 
+  // Show a spinner only while editing (not creating) and the fetch is in flight,
+  // so the form isn't rendered against the still-blank default record.
   if (!isNew && existing.isLoading) return <p className="text-slate-400">Loading…</p>;
 
+  // Fall back to the canonical alias set if the proxy hasn't reported aliases.
   const aliasList = models?.aliases ?? ["smart", "worker", "cheap", "fast"];
   // Aliases first (recommended), then concrete model ids — deduped, since the
-  // proxy reports the alias groups as models too.
+  // proxy reports the alias groups as models too. Backs the <datalist> below.
   const modelChoices = Array.from(new Set([...aliasList, ...(models?.models ?? [])]));
+  // Whether this agent belongs to the default-pipeline "core" group; gates the
+  // edit-carefully warning banner.
   const editingCore = rec.group === "core";
 
   return (
     <div className="mx-auto max-w-3xl">
       <h2 className="mb-4 text-lg font-semibold">{isNew ? "New agent" : `Edit: ${rec.name}`}</h2>
 
-      {(editingCore || dependents.length > 0) && !isNew && (
+      {/* Guardrail banner: for existing core agents, whose prompt shapes the
+          default pipeline. */}
+      {editingCore && !isNew && (
         <div className="card mb-4 border-amber-500/40 bg-amber-500/10 text-sm text-amber-200">
-          {editingCore && <p>This is a <b>core</b> agent — its prompt shapes the default pipeline. Edit carefully.</p>}
-          {dependents.length > 0 && (
-            <p className="mt-1">
-              Depended on by: {dependents.map((d) => d.id).join(", ")}. Changing its stage/id may
-              break their routing.
-            </p>
-          )}
+          <p>This is a <b>core</b> agent — its prompt shapes the default pipeline. Edit carefully.</p>
         </div>
       )}
 
@@ -167,19 +246,6 @@ export default function AgentEditor() {
               <InfoTip text="Organizational label used to group and filter agents on the dashboard (e.g. core, optional). Agents in the 'core' group form the default pipeline." />
             </label>
             <input className="input" value={rec.group} onChange={(e) => set("group", e.target.value)} />
-          </div>
-          <div>
-            <label className="label">
-              Stage
-              <InfoTip text="Where this agent runs in the pipeline: plan (decompose the task into a plan), work (research/execute the steps), or synthesize (write the final report)." />
-            </label>
-            <select className="input" value={rec.stage} onChange={(e) => set("stage", e.target.value as Stage)}>
-              {STAGES.map((s) => (
-                <option key={s} value={s}>
-                  {s}
-                </option>
-              ))}
-            </select>
           </div>
           <label className="col-span-2 flex items-center gap-2 text-sm">
             <input
@@ -224,7 +290,8 @@ export default function AgentEditor() {
           </div>
         </div>
 
-        {/* Model */}
+        {/* Model — alias-or-concrete-id input backed by the deduped <datalist>
+            (#model-choices), plus optional per-agent fallback and sampling params. */}
         <div className="card grid grid-cols-2 gap-3">
           <div>
             <label className="label">
@@ -303,66 +370,18 @@ export default function AgentEditor() {
           </div>
         </div>
 
-        {/* Trigger */}
-        <div className="card space-y-3">
-          <div>
-            <label className="label">
-              Trigger type
-              <InfoTip text="When this agent activates: always (every run), keyword (request contains a term), task_type (matches a classified type), upstream (after named agents finish), or schedule (on a cron timer)." />
-            </label>
-            <select
-              className="input"
-              value={rec.trigger.type}
-              onChange={(e) => setTrigger("type", e.target.value as TriggerType)}
-            >
-              {TRIGGER_TYPES.map((t) => (
-                <option key={t} value={t}>
-                  {t}
-                </option>
-              ))}
-            </select>
-          </div>
-          {rec.trigger.type === "keyword" && (
-            <div>
-              <label className="label">Keywords (comma-separated)</label>
-              <input
-                className="input"
-                value={rec.trigger.keywords.join(", ")}
-                onChange={(e) => setTrigger("keywords", csv(e.target.value))}
-              />
-            </div>
-          )}
-          {rec.trigger.type === "task_type" && (
-            <div>
-              <label className="label">Task types (comma-separated)</label>
-              <input
-                className="input"
-                value={rec.trigger.task_types.join(", ")}
-                onChange={(e) => setTrigger("task_types", csv(e.target.value))}
-              />
-            </div>
-          )}
-          {rec.trigger.type === "upstream" && (
-            <div>
-              <label className="label">Upstream agent ids (comma-separated)</label>
-              <input
-                className="input"
-                value={rec.trigger.upstream.join(", ")}
-                onChange={(e) => setTrigger("upstream", csv(e.target.value))}
-              />
-            </div>
-          )}
-          {rec.trigger.type === "schedule" && (
-            <div>
-              <label className="label">Cron</label>
-              <input
-                className="input"
-                placeholder="*/5 * * * *"
-                value={rec.trigger.cron ?? ""}
-                onChange={(e) => setTrigger("cron", e.target.value || null)}
-              />
-            </div>
-          )}
+        {/* Schedule */}
+        <div className="card">
+          <label className="label">
+            Run on schedule (cron)
+            <InfoTip text="Optional. A 5-field cron expression (e.g. '*/5 * * * *') that fires this agent as a standalone task on a timer, independent of any workflow. Leave blank for no schedule — the agent then only runs when a workflow uses it." />
+          </label>
+          <input
+            className="input"
+            placeholder="(none — runs only via workflows)"
+            value={rec.schedule_cron ?? ""}
+            onChange={(e) => set("schedule_cron", e.target.value || null)}
+          />
         </div>
 
         {/* Thresholds */}

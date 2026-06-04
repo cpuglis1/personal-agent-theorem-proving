@@ -1,10 +1,34 @@
 """
-Episodic memory — stores completed task summaries in Qdrant hyperion_memory.
+Episodic memory — stores completed task summaries in Qdrant ``hyperion_memory``.
+
+Role in the system
+------------------
+This module is Hyperion's long-term "what have I done before" memory. After each
+completed run, the orchestrator persists a single semantic record summarizing the
+task so that future runs can learn from past work. The Planner agent can call
+:func:`recall_similar_tasks` to look up similar prior tasks before producing a new
+plan, giving the system a lightweight form of experience reuse.
 
 After each completed run, one record is stored:
   {task_id, original_request, final_summary, models_used, cost, duration, success}
 
 The Planner can call recall_similar_tasks() to look up past work before planning.
+
+Key design decisions / non-obvious context
+-------------------------------------------
+- Storage backend is Qdrant (collection ``hyperion_memory``), with embeddings
+  produced via the OpenAI-compatible LiteLLM proxy (``text-embedding-3-small``).
+  Per project convention, all LLM/embedding traffic is routed through the proxy
+  rather than calling provider APIs directly.
+- Heavy clients (``openai``, ``qdrant_client``) are imported lazily inside helper
+  functions so that importing this module is cheap and does not require those
+  packages at import time.
+- Both public functions are intentionally fault-tolerant: any failure (network,
+  missing collection, embedding error) is logged and swallowed. Memory is a
+  best-effort enhancement — it must never break or block a run.
+- Point IDs are deterministic UUID5 values derived from ``task_id`` so that
+  re-storing the same task upserts (replaces) the existing record rather than
+  creating a duplicate.
 """
 
 from __future__ import annotations
