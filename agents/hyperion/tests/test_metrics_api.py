@@ -59,8 +59,9 @@ async def _client():
 async def _seed_db(tmp_path, rows):
     """Point the API at a fresh temp DB and insert (task_id, status, request, routing).
 
-    Mutates the module-level ``api._DB_PATH`` so subsequent API requests in the
-    same test read/write the temp database, then bulk-inserts the given rows into
+    Repoints ``api.settings.tasks_dir`` at ``tmp_path`` so the dynamically
+    resolved DB path (``settings.tasks_dir / state.db``) lands on the temp
+    database for subsequent API requests, then bulk-inserts the given rows into
     the ``tasks`` table and commits.
 
     Args:
@@ -74,10 +75,11 @@ async def _seed_db(tmp_path, rows):
         Path: The path to the created SQLite database file.
 
     Side effects:
-        Reassigns ``api._DB_PATH`` (global state) and writes/closes a SQLite file.
+        Reassigns ``api.settings.tasks_dir`` (global state) and writes/closes a
+        SQLite file.
     """
     db_path = tmp_path / "state.db"
-    api._DB_PATH = db_path
+    api.settings.tasks_dir = tmp_path
     db = await api._get_db()
     for task_id, status, request, routing in rows:
         await db.execute(

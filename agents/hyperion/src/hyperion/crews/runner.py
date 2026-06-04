@@ -342,24 +342,36 @@ def _synthesize_task(record: AgentRecord, agent: Agent, feedback: str | None = N
 
 def _make_callbacks(
     progress_callback: Callable[[str], None] | None,
+    task_id: str = "",
 ) -> tuple[Callable, Callable]:
     """Adapt a simple ``progress_callback(str)`` into CrewAI's step/task callbacks.
 
     Args:
         progress_callback: Sink for human-readable progress lines, or None to disable.
+        task_id: The run id, used to scope the stuck-loop ``ToolCallTracker`` and to
+            attribute its early-warning alerts.
 
     Returns:
-        A (step_callback, task_callback) pair to pass to Crew(). Both are no-ops
-        when ``progress_callback`` is None, and both swallow their own exceptions so
-        a progress-logging hiccup can never abort the crew.
+        A (step_callback, task_callback) pair to pass to Crew(). Progress logging is
+        a no-op when ``progress_callback`` is None and always swallows its own
+        exceptions, but the tool-loop guard runs regardless and is allowed to raise
+        ``CapExceeded`` so a stuck ReAct loop aborts the stage.
     """
+    # One tracker per stage: a stuck loop is N identical tool calls within a single
+    # agent activation, so per-stage scoping is the right granularity.
+    tracker = ToolCallTracker(task_id=task_id)
 
     def _step_cb(step) -> None:
-        """Per-agent-step hook: report the tool being used or the first thought line."""
+        """Per-agent-step hook: feed the tool-loop guard, then report progress."""
+        # Guard first, OUTSIDE the progress try/except, so a CapExceeded propagates
+        # through CrewAI's executor up to the runner's handler instead of being
+        # swallowed as a progress-logging hiccup.
+        tool = getattr(step, "tool", None)
+        if tool:
+            tracker.check(tool, getattr(step, "tool_input", None))
         if progress_callback is None:
             return
         try:
-            tool = getattr(step, "tool", None)
             if tool:
                 label = f"tool: {tool}"
             else:

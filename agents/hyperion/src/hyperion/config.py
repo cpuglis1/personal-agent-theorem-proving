@@ -140,10 +140,12 @@ class Settings(BaseSettings):
     cap_wall_seconds: int = 900         # 15 min
 
     # Workspace root (per-task dirs created here)
-    # Override with HYPERION_TASKS_DIR env var (set to /app/tasks in Docker compose)
+    # Override with HYPERION_TASKS_DIR env var (set to /app/tasks in Docker compose).
+    # Local default resolves to agents/hyperion/tasks (parents[2] == project root),
+    # matching config_dir below and where the seeded task store actually lives.
     tasks_dir: Path = Path(os.getenv(
         "HYPERION_TASKS_DIR",
-        str(Path(__file__).parents[3] / "tasks"),
+        str(Path(__file__).parents[2] / "tasks"),
     ))
 
     # Agent + config records root (config/agents/*.json live here).

@@ -27,10 +27,9 @@ Testing notes / non-obvious context:
 * Async tests are marked ``@pytest.mark.anyio`` and driven over an in-process
   ASGI transport (no real socket), with the backend pinned to asyncio via the
   ``anyio_backend`` fixture.
-* Several tests reach into module-level state (``api._DB_PATH``,
-  ``settings.config_dir``) via ``monkeypatch`` to redirect the SQLite DB and
-  config directory into a per-test ``tmp_path``, keeping tests isolated and
-  side-effect free.
+* Several tests reach into module-level state (``settings.tasks_dir``,
+  ``settings.config_dir``) to redirect the SQLite DB and config directory into a
+  per-test ``tmp_path``, keeping tests isolated and side-effect free.
 """
 
 from __future__ import annotations
@@ -157,7 +156,7 @@ async def test_submit_rejects_bad_schema_version(tmp_path):
     """
     # Point the server at a throwaway DB under tmp_path so the test is isolated;
     # close the freshly-opened connection immediately (we only need the file).
-    api._DB_PATH = tmp_path / "state.db"
+    api.settings.tasks_dir = tmp_path
     await (await api._get_db()).close()
     async with await _client() as client:
         resp = await client.post("/tasks", json={"task": "x", "schema_version": 99})
@@ -172,7 +171,7 @@ async def test_submit_rejects_unsafe_callback(tmp_path, monkeypatch):
     guard fires during task submission and the endpoint returns 422.
     """
     # Isolate state in tmp_path; close the just-opened connection (file only).
-    api._DB_PATH = tmp_path / "state.db"
+    api.settings.tasks_dir = tmp_path
     await (await api._get_db()).close()
     monkeypatch.setattr(
         webhooks.socket,

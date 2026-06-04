@@ -45,6 +45,7 @@ import json
 import logging
 import uuid
 import zipfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, AsyncGenerator, Literal, Optional
 
@@ -87,8 +88,17 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_DB_PATH = settings.tasks_dir / "state.db"
 _PROGRESS: dict[str, list[str]] = {}  # task_id → list of progress lines
+
+
+def _db_path() -> Path:
+    """Resolve the SQLite state DB path from the *current* ``settings.tasks_dir``.
+
+    Computed per call rather than captured at import so that redirecting
+    ``settings.tasks_dir`` (e.g. tests patching it to a tmp dir) also moves the
+    state DB, keeping runs hermetic instead of writing to the real task store.
+    """
+    return settings.tasks_dir / "state.db"
 
 
 # ---------------------------------------------------------------------------
@@ -169,7 +179,7 @@ async def _get_db() -> aiosqlite.Connection:
     Side effects:
         Creates/migrates the SQLite schema and commits.
     """
-    db = await aiosqlite.connect(_DB_PATH)
+    db = await aiosqlite.connect(_db_path())
     await db.execute(
         """CREATE TABLE IF NOT EXISTS tasks (
             task_id TEXT PRIMARY KEY,
@@ -193,6 +203,21 @@ async def _get_db() -> aiosqlite.Connection:
     return db
 
 
+@asynccontextmanager
+async def _db() -> AsyncGenerator[aiosqlite.Connection, None]:
+    """Schema-ensured connection as an async context manager.
+
+    Wraps ``_get_db`` (which creates/migrates the schema) so read-path endpoints
+    never assume a prior write or the startup hook ran — a fresh DB is fully
+    usable on first access. Closes the connection on exit.
+    """
+    db = await _get_db()
+    try:
+        yield db
+    finally:
+        await db.close()
+
+
 async def _update_task(task_id: str, **kwargs: Any) -> None:
     """Patch arbitrary columns of one task row and bump ``updated_at``.
 
@@ -212,7 +237,7 @@ async def _update_task(task_id: str, **kwargs: Any) -> None:
     """
     sets = ", ".join(f"{k}=?" for k in kwargs)
     values = list(kwargs.values()) + [task_id]
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with _db() as db:
         await db.execute(
             f"UPDATE tasks SET {sets}, updated_at=CURRENT_TIMESTAMP WHERE task_id=?",
             values,
@@ -573,7 +598,7 @@ async def _enqueue_scheduled(record: AgentRecord) -> None:
     """
     task_id = str(uuid.uuid4())[:8]
     request = scheduler.scheduled_task_request(record)
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with _db() as db:
         await db.execute(
             "INSERT INTO tasks (task_id, status, request, hitl) VALUES (?,?,?,?)",
             (task_id, "queued", request, "off"),
@@ -782,7 +807,7 @@ async def _maybe_fire_callback(task_id: str, result: dict) -> None:
         Reads the callback URL from SQLite, performs an outbound HTTP POST, and
         appends a progress line.
     """
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT callback_url FROM tasks WHERE task_id=?", (task_id,)
@@ -1024,7 +1049,7 @@ async def get_task(task_id: str) -> TaskResponse:
     Raises:
         HTTPException 404: no task with this id.
     """
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT task_id, status, error, result_path, pending_stage, routing "
@@ -1066,7 +1091,7 @@ async def get_task_trace(task_id: str) -> dict:
     Raises:
         HTTPException 404: no task with this id.
     """
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT request, status, routing FROM tasks WHERE task_id=?", (task_id,)
@@ -1126,7 +1151,7 @@ async def approve_task(task_id: str, body: ApproveRequest) -> TaskResponse:
     Side effects:
         Marks the task running and spawns ``_resume_and_update``.
     """
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT status, request, pending_payload FROM tasks WHERE task_id=?",
@@ -1176,7 +1201,7 @@ async def feedback_task(task_id: str, body: FeedbackRequest) -> TaskResponse:
     """
     from hyperion.feedback import answer_affordance, append_feedback
 
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT status, request, pending_payload FROM tasks WHERE task_id=?",
@@ -1227,7 +1252,7 @@ async def stream_task(task_id: str) -> StreamingResponse:
                 yield f"data: {line}\n\n"
                 seen += 1
             # Check if task is done
-            async with aiosqlite.connect(_DB_PATH) as db:
+            async with _db() as db:
                 async with db.execute(
                     "SELECT status FROM tasks WHERE task_id=?", (task_id,)
                 ) as cur:
@@ -1864,7 +1889,7 @@ async def list_tasks(limit: int = 50, offset: int = 0) -> dict:
     """Paginated run history, newest first, for the monitoring page."""
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT COUNT(*) AS n FROM tasks") as cur:
             total = (await cur.fetchone())["n"]
@@ -1895,7 +1920,7 @@ async def list_tasks(limit: int = 50, offset: int = 0) -> dict:
 async def get_metrics() -> dict:
     """Per-agent activation counts + error rate (from the routing column) and live
     token usage (from the in-process usage accountant). Powers the monitoring tiles."""
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT status, routing FROM tasks") as cur:
             rows = await cur.fetchall()
@@ -2001,7 +2026,7 @@ async def save_task_to_notion(task_id: str, body: SaveToNotionRequest) -> dict:
     """Synthesizer follow-up affordance: write a completed task's result to Notion."""
     from hyperion.tools.notion import create_notion_page
 
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with _db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
             "SELECT status, request, result_path FROM tasks WHERE task_id=?", (task_id,)
