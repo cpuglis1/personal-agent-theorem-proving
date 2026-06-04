@@ -402,7 +402,7 @@ def _run_stage_sync(
     progress_callback: Callable[[str], None] | None,
 ) -> Any:
     """Build a single-stage Crew and kick it off synchronously (runs in executor)."""
-    step_cb, task_cb = _make_callbacks(progress_callback)
+    step_cb, task_cb = _make_callbacks(progress_callback, task_id=task_id)
     crew = Crew(
         agents=agents,
         tasks=tasks,

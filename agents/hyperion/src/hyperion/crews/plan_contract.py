@@ -208,7 +208,11 @@ def update_plan_frontmatter(task_id: str, **fields) -> None:
         text = path.read_text(encoding="utf-8")
         m = _FRONTMATTER_RE.match(text)
         if m:
-            data = yaml.safe_load(m.group(1)) or {}
+            loaded = yaml.safe_load(m.group(1))
+            # Tolerate malformed frontmatter (scalar/list, not a mapping) the same
+            # way parse_plan does: treat it as empty so .update() can't blow up and
+            # the merge still produces a valid block.
+            data = loaded if isinstance(loaded, dict) else {}
             body = text[m.end():]
         else:
             body = text

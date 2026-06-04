@@ -37,7 +37,7 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # ---------------------------------------------------------------------------
 # Load .env files (lowest priority first so hyperion/.env wins over router/.env)
@@ -168,16 +168,11 @@ class Settings(BaseSettings):
     # private/loopback address by default. Set to "off" only on a trusted network.
     hyperion_callback_ssrf_guard: str = "on"
 
-    class Config:
-        """Pydantic settings metadata for the ``Settings`` model.
-
-        - ``env_file_encoding``: encoding used when reading any ``.env`` file.
-        - ``extra = "ignore"``: drop env vars that don't map to a field instead
-          of raising a validation error (the shared ``.env`` files carry many
-          non-Hyperion vars).
-        """
-        env_file_encoding = "utf-8"
-        extra = "ignore"
+    # Pydantic settings metadata (v2 ConfigDict form):
+    #  - env_file_encoding: encoding used when reading any ``.env`` file.
+    #  - extra="ignore": drop env vars that don't map to a field instead of
+    #    raising — the shared ``.env`` files carry many non-Hyperion vars.
+    model_config = SettingsConfigDict(env_file_encoding="utf-8", extra="ignore")
 
     @property
     def llm_api_key(self) -> str:

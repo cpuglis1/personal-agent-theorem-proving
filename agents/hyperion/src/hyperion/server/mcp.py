@@ -23,7 +23,7 @@ Tools exposed (see ``list_tools`` for full schemas):
 
 Design notes
 ------------
-- Task lifecycle state is persisted in a local SQLite database (``_DB_PATH``) so
+- Task lifecycle state is persisted in a local SQLite database (``_db_path()``) so
   that ``hyperion_status`` can report on tasks even though crew execution happens in
   a detached asyncio task. The schema is created lazily on first use (``_ensure_db``).
 - ``hyperion_run`` / ``hyperion_status`` / ``hyperion_artifact`` are handled
@@ -64,7 +64,14 @@ server = Server("hyperion")
 _PROGRESS: dict[str, list[str]] = {}
 
 # SQLite database holding durable task lifecycle state, colocated with task workdirs.
-_DB_PATH = settings.tasks_dir / "state.db"
+def _db_path():
+    """Resolve the state-DB path from the *current* ``settings.tasks_dir``.
+
+    Computed per call (not captured at import) so that redirecting
+    ``settings.tasks_dir`` also moves the DB — matching ``api._db_path`` and
+    keeping the API and MCP entry points pointed at the same file.
+    """
+    return settings.tasks_dir / "state.db"
 
 
 async def _ensure_db() -> None:
@@ -75,13 +82,13 @@ async def _ensure_db() -> None:
 
     Side effects:
         - Creates ``settings.tasks_dir`` (and parents) on disk.
-        - Creates/ensures the ``tasks`` table in the SQLite DB at ``_DB_PATH``.
+        - Creates/ensures the ``tasks`` table in the SQLite DB at ``_db_path()``.
 
     Returns:
         None.
     """
     settings.tasks_dir.mkdir(parents=True, exist_ok=True)
-    async with aiosqlite.connect(_DB_PATH) as db:
+    async with aiosqlite.connect(_db_path()) as db:
         await db.execute(
             """CREATE TABLE IF NOT EXISTS tasks (
                 task_id TEXT PRIMARY KEY,
@@ -256,7 +263,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             except WorkflowCompileError as exc:
                 return [TextContent(type="text", text=f"Could not build a workflow: {exc}")]
 
-        async with aiosqlite.connect(_DB_PATH) as db:
+        async with aiosqlite.connect(_db_path()) as db:
             await db.execute(
                 "INSERT INTO tasks (task_id, status, request) VALUES (?,?,?)",
                 (task_id, "queued", request),
@@ -280,7 +287,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             resulting status/error/result_path back to the DB. Runs as a detached
             asyncio task so ``hyperion_run`` can return the task_id immediately.
             """
-            async with aiosqlite.connect(_DB_PATH) as db:
+            async with aiosqlite.connect(_db_path()) as db:
                 await db.execute(
                     "UPDATE tasks SET status='running', updated_at=CURRENT_TIMESTAMP WHERE task_id=?",
                     (task_id,),
@@ -290,7 +297,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
                 task_id=task_id, request=request, progress_callback=_progress,
                 workflow=workflow,
             )
-            async with aiosqlite.connect(_DB_PATH) as db:
+            async with aiosqlite.connect(_db_path()) as db:
                 await db.execute(
                     "UPDATE tasks SET status=?, error=?, result_path=?, updated_at=CURRENT_TIMESTAMP WHERE task_id=?",
                     (result["status"], result.get("error"), result.get("result_path"), task_id),
@@ -303,7 +310,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
 
     elif name == "hyperion_status":
         task_id = arguments["task_id"]
-        async with aiosqlite.connect(_DB_PATH) as db:
+        async with aiosqlite.connect(_db_path()) as db:
             db.row_factory = aiosqlite.Row
             async with db.execute(
                 "SELECT task_id, status, error, result_path FROM tasks WHERE task_id=?",

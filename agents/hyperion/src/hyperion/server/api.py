@@ -76,7 +76,24 @@ from hyperion.server.webhooks import UnsafeCallbackURL, fire_callback, validate_
 
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Hyperion", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
+    """ASGI lifespan: run startup state-init, then cleanly stop the scheduler.
+
+    Replaces the deprecated ``@app.on_event("startup"/"shutdown")`` hooks with the
+    modern single context manager. The detailed logic lives in ``_startup`` /
+    ``_shutdown`` (defined later in the module) so the ordering rationale stays
+    documented next to the code it governs; both are resolved at call time.
+    """
+    await _startup()
+    try:
+        yield
+    finally:
+        await _shutdown()
+
+
+app = FastAPI(title="Hyperion", version="0.1.0", lifespan=lifespan)
 
 # The Phase 7 web UI is served from a different origin (nginx :4102) and calls this
 # API directly from the browser. Allow the local UI origins only — this is a
@@ -519,9 +536,8 @@ def _apply_threshold_overrides() -> None:
             setattr(settings, field, data[field])
 
 
-@app.on_event("startup")
 async def _startup() -> None:
-    """FastAPI startup hook — initialize all runtime state.
+    """Initialize all runtime state (invoked by the ``lifespan`` context manager).
 
     Ordering matters: the tasks dir and DB schema must exist before anything else,
     progress is rehydrated so paused tasks can stream, persisted config/threshold
@@ -554,9 +570,8 @@ async def _startup() -> None:
     )
 
 
-@app.on_event("shutdown")
 async def _shutdown() -> None:
-    """FastAPI shutdown hook — stop the background scheduler cleanly.
+    """Stop the background scheduler cleanly (invoked by the ``lifespan`` manager).
 
     Signals the scheduler's stop event and waits up to 5 seconds for the loop to
     exit; if it doesn't finish in time (or is already cancelled), the task is
