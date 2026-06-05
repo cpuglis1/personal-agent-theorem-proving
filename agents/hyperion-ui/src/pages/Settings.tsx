@@ -143,20 +143,32 @@ export default function Settings() {
         <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500">
           Role models
         </h3>
-        {ROLES.map((r) => (
-          <div key={r.key} className="grid grid-cols-[1fr_2fr] items-center gap-3">
-            <div>
-              <div className="text-sm font-medium">{r.label}</div>
-              <div className="text-xs text-slate-500">{r.note}</div>
+        {ROLES.map((r) => {
+          const val = draft[r.key] ?? "";
+          // Show the fallback chain when the current value is a known alias.
+          const chain = config?.alias_fallback_order?.[val];
+          return (
+            <div key={r.key} className="grid grid-cols-[1fr_2fr] items-start gap-3">
+              <div>
+                <div className="text-sm font-medium">{r.label}</div>
+                <div className="text-xs text-slate-500">{r.note}</div>
+              </div>
+              <div>
+                <input
+                  className="input"
+                  list="model-choices"
+                  value={val}
+                  onChange={(e) => setDraft((d) => ({ ...d, [r.key]: e.target.value }))}
+                />
+                {chain && (
+                  <div className="mt-1 text-xs text-slate-500">
+                    {val} → {chain.join(" → ")}
+                  </div>
+                )}
+              </div>
             </div>
-            <input
-              className="input"
-              list="model-choices"
-              value={draft[r.key] ?? ""}
-              onChange={(e) => setDraft((d) => ({ ...d, [r.key]: e.target.value }))}
-            />
-          </div>
-        ))}
+          );
+        })}
         <datalist id="model-choices">
           {choices.map((c) => (
             <option key={c} value={c} />

@@ -186,11 +186,8 @@ export default function AgentEditor() {
   // so the form isn't rendered against the still-blank default record.
   if (!isNew && existing.isLoading) return <p className="text-slate-400">Loading…</p>;
 
-  // Fall back to the canonical alias set if the proxy hasn't reported aliases.
+  // Fall back to the canonical alias set if the proxy hasn't reported aliases yet.
   const aliasList = models?.aliases ?? ["smart", "worker", "cheap", "fast"];
-  // Aliases first (recommended), then concrete model ids — deduped, since the
-  // proxy reports the alias groups as models too. Backs the <datalist> below.
-  const modelChoices = Array.from(new Set([...aliasList, ...(models?.models ?? [])]));
   // Whether this agent belongs to the default-pipeline "core" group; gates the
   // edit-carefully warning banner.
   const editingCore = rec.group === "core";
@@ -290,38 +287,72 @@ export default function AgentEditor() {
           </div>
         </div>
 
-        {/* Model — alias-or-concrete-id input backed by the deduped <datalist>
-            (#model-choices), plus optional per-agent fallback and sampling params. */}
+        {/* Model — grouped <select> (aliases first, then concrete model ids).
+            Using <select> rather than <input list> avoids the browser-native
+            datalist filtering that shows only the option matching the current
+            value (e.g. "worker" → only "worker" in the dropdown). The select
+            always shows every option regardless of the current value.
+            When an alias is selected, a fallback-chain hint renders below the
+            control so operators can see what's behind smart/worker/cheap/fast. */}
         <div className="card grid grid-cols-2 gap-3">
           <div>
             <label className="label">
               Model
               <InfoTip text="Which model powers this agent. Pick a role alias (smart/worker/cheap/fast) to inherit the global routing with automatic provider fallback, or choose a concrete model id (e.g. gemini-2.5-pro) to pin one exactly." />
             </label>
-            <input
+            <select
               className="input"
-              list="model-choices"
               value={rec.model_alias}
               onChange={(e) => set("model_alias", e.target.value)}
-            />
-            <datalist id="model-choices">
-              {modelChoices.map((m) => (
-                <option key={m} value={m} />
-              ))}
-            </datalist>
+            >
+              <optgroup label="Aliases (recommended — provider fallback included)">
+                {aliasList.map((a) => (
+                  <option key={a} value={a}>{a}</option>
+                ))}
+              </optgroup>
+              {(models?.models ?? []).length > 0 && (
+                <optgroup label="Concrete model IDs (pins one provider)">
+                  {(models?.models ?? []).map((m) => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+            {models?.alias_details?.[rec.model_alias] && (
+              <div className="mt-1 text-xs text-slate-500">
+                {rec.model_alias} → {models.alias_details[rec.model_alias].join(" → ")}
+              </div>
+            )}
           </div>
           <div>
             <label className="label">
               Fallback model
               <InfoTip text="Optional. If the primary model's call fails, the agent retries once against this model. Pick an alias or a concrete model id. Leave blank for no per-agent fallback (alias routing still applies its own proxy-level fallbacks)." />
             </label>
-            <input
+            <select
               className="input"
-              list="model-choices"
-              placeholder="(none)"
               value={rec.fallback_alias ?? ""}
               onChange={(e) => set("fallback_alias", e.target.value || null)}
-            />
+            >
+              <option value="">(none)</option>
+              <optgroup label="Aliases">
+                {aliasList.map((a) => (
+                  <option key={a} value={a}>{a}</option>
+                ))}
+              </optgroup>
+              {(models?.models ?? []).length > 0 && (
+                <optgroup label="Concrete model IDs">
+                  {(models?.models ?? []).map((m) => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </optgroup>
+              )}
+            </select>
+            {rec.fallback_alias && models?.alias_details?.[rec.fallback_alias] && (
+              <div className="mt-1 text-xs text-slate-500">
+                {rec.fallback_alias} → {models.alias_details[rec.fallback_alias].join(" → ")}
+              </div>
+            )}
           </div>
           <div>
             <label className="label">

@@ -52,6 +52,20 @@ class NodeWhen(BaseModel):
     task_types: list[str] = Field(default_factory=list)
 
 
+class NodePosition(BaseModel):
+    """Canvas coordinates for the graphical workflow builder (UI-only metadata).
+
+    Persisted purely so a hand-arranged layout in the React Flow workflow editor
+    survives reloads. The runner ignores it entirely — execution order comes from
+    the ``upstream`` DAG, never from geometry. Optional: nodes authored before the
+    graphical editor (or via the API) have no position and are auto-laid-out by
+    the UI on first open.
+    """
+
+    x: float
+    y: float
+
+
 class WorkflowNode(BaseModel):
     """A single executable step in a workflow DAG.
 
@@ -73,6 +87,8 @@ class WorkflowNode(BaseModel):
             kind-derived default instruction for this node.
         when: Optional conditional-firing rule; when set, the node runs only for
             the listed task types.
+        position: Optional canvas coordinates for the graphical editor (UI-only;
+            ignored by the runner). Persists hand-arranged layouts.
     """
 
     id: str                                   # node slug, unique within the workflow
@@ -82,6 +98,7 @@ class WorkflowNode(BaseModel):
     gate_before: bool = False                 # pause for human approval before this node (HITL)
     instruction: Optional[str] = None         # overrides the kind-derived task description
     when: Optional[NodeWhen] = None           # conditional firing by task_type
+    position: Optional[NodePosition] = None   # canvas coords for the graphical editor (UI-only)
 
 
 class WorkflowRecord(BaseModel):

@@ -28,7 +28,7 @@ from crewai import Agent, Crew, Process, Task
 from hyperion.agents.registry import AgentRecord, build_tools, load_agent
 from hyperion.config import settings
 from hyperion.crews.plan_contract import parse_plan, update_plan_frontmatter
-from hyperion.crews.workflows import topo_sort
+from hyperion.crews.workflows import WorkflowNode, topo_sort
 from hyperion.llms import make_agent_llm
 
 logger = logging.getLogger(__name__)
@@ -584,6 +584,44 @@ def _implicit_gate_node_id(ordered: list) -> str | None:
     return None
 
 
+def _wave_groups(ordered: list[WorkflowNode]) -> list[list[WorkflowNode]]:
+    """Group topo-sorted nodes into parallel execution waves.
+
+    A "wave" is a maximal set of nodes that can run concurrently: no node in
+    a wave depends on another node in the same wave, and every node's upstream
+    deps are all in earlier waves. The runner fires each wave atomically —
+    nodes within a wave are started together via ``asyncio.gather``, and the
+    next wave only starts once all nodes in the current wave have finished.
+
+    Algorithm: each node's wave index = ``max(upstream wave indices) + 1``,
+    or 0 for root nodes (those with no upstream deps). Because ``ordered`` is
+    already in topo order, every upstream node has already been assigned its
+    wave index when the downstream node is processed.
+
+    Design note: two nodes with ``upstream: ["plan"]`` end up in wave 1 and
+    can run in parallel. A synthesizer that lists both as upstream gets wave 2
+    and only runs after both complete. This matches the standard DAG fan-out
+    / fan-in pattern.
+
+    Args:
+        ordered: Topo-sorted node list from ``topo_sort()``. Must be valid
+            (no cycles, no dangling upstream refs).
+
+    Returns:
+        A list of waves, each a non-empty list of ``WorkflowNode`` objects.
+        ``waves[i]`` may run concurrently; ``waves[i+1]`` waits for ``waves[i]``.
+    """
+    node_to_wave: dict[str, int] = {}
+    waves: list[list[WorkflowNode]] = []
+    for node in ordered:
+        wi = max((node_to_wave[u] + 1 for u in node.upstream), default=0)
+        node_to_wave[node.id] = wi
+        while len(waves) <= wi:
+            waves.append([])
+        waves[wi].append(node)
+    return waves
+
+
 async def _execute_workflow(
     task_id: str,
     request: str,
@@ -599,10 +637,14 @@ async def _execute_workflow(
     wall: int,
     progress_callback: Callable[[str], None] | None,
 ) -> dict[str, Any]:
-    """Run a workflow's nodes in topo order from ``start_index``. Shared by the
-    straight-through path (start 0) and the post-approval resume path. Pauses before
-    any gated node; returns done/failed/awaiting_* dicts the API persists."""
+    """Run a workflow's nodes wave-by-wave from ``start_index``. Shared by the
+    straight-through path (start 0) and the post-approval resume path. Within
+    each wave, nodes that share the same upstream dependencies run concurrently
+    via ``asyncio.gather``; waves execute sequentially (each wave waits for the
+    previous to finish). Pauses before any gated node; returns done/failed/
+    awaiting_* dicts the API persists."""
     ordered = topo_sort(workflow.nodes)
+    waves = _wave_groups(ordered)
     implicit_gate_id = _implicit_gate_node_id(ordered)
 
     routing: dict = {
@@ -619,56 +661,122 @@ async def _execute_workflow(
             "resume_node": node_id,
         }
 
+    # Map start_index (index into the flat topo-sorted list) to a wave index so
+    # already-completed waves can be skipped on resume. In practice, the gated
+    # node is always the first unrun node, which is the start of a wave (gates
+    # fire before the entire wave, so resume always lands at a wave boundary).
+    start_node_id = ordered[start_index].id if start_index < len(ordered) else None
+    start_wave_idx = 0
+    if start_node_id:
+        for wi, wave in enumerate(waves):
+            if any(n.id == start_node_id for n in wave):
+                start_wave_idx = wi
+                break
+
     last_result: Any = None
     try:
-        for idx in range(start_index, len(ordered)):
-            node = ordered[idx]
-            record = load_agent(node.agent)
+        for wi in range(start_wave_idx, len(waves)):
+            wave = waves[wi]
             signals = parse_plan(task_id)
 
-            fires, reason = _node_fires(node, signals)
-            if not fires:
-                routing["skipped"].append({"id": node.id, "reason": reason})
+            # Apply per-node when-conditions to determine which nodes in this
+            # wave actually fire. Skipped nodes are recorded in routing.
+            firing: list[WorkflowNode] = []
+            for node in wave:
+                fires, reason = _node_fires(node, signals)
+                if fires:
+                    firing.append(node)
+                else:
+                    routing["skipped"].append({"id": node.id, "reason": reason})
+
+            if not firing:
                 continue
 
-            # ---- GATE: pause before this node for human approval ----------
-            gate_here = hitl != "off" and (
-                node.gate_before
-                or (implicit_gate_id is not None and node.id == implicit_gate_id
-                    and gate(task_id, "plan", hitl))
-            )
-            if gate_here and not (idx == start_index and skip_first_gate):
-                if progress_callback:
-                    progress_callback(f"[gate] awaiting approval before '{node.id}'")
-                return _pending(task_id, node.id, _payload(node.id))
+            # ---- GATE: pause before the entire wave for human approval ------
+            # All nodes in a wave start together, so a gate on any one of them
+            # gates the whole wave. skip_first_gate applies only to the first
+            # wave processed (the node we resumed from has already been approved).
+            first_wave = wi == start_wave_idx
+            for node in firing:
+                gate_here = hitl != "off" and (
+                    node.gate_before
+                    or (implicit_gate_id is not None and node.id == implicit_gate_id
+                        and gate(task_id, "plan", hitl))
+                )
+                if gate_here and not (first_wave and skip_first_gate):
+                    if progress_callback:
+                        progress_callback(f"[gate] awaiting approval before '{node.id}'")
+                    return _pending(task_id, node.id, _payload(node.id))
 
-            # When proceeding past planning into work, auto-select the first plan
-            # option if a human hasn't chosen one (mirrors the old straight-through).
-            if node.kind != "plan" and signals.options and not signals.selected_option:
+            # Auto-select the first plan option once we hit any non-plan node.
+            # Only needs to happen once per wave (plan signals are shared).
+            if any(n.kind != "plan" for n in firing) and signals.options and not signals.selected_option:
                 update_plan_frontmatter(task_id, selected_option=signals.options[0].id)
 
+            # Drain human feedback once for the whole wave so every node sees
+            # the same block. inject_feedback drains the queue (returns once).
             feedback = inject_feedback(task_id)
             if feedback and progress_callback:
-                progress_callback(f"[feedback] injecting human feedback into '{node.id}'")
+                progress_callback(f"[feedback] injecting human feedback into wave {wi}")
 
-            agent = build_agent(record, task_id, node_id=node.id)
-            tsk = _node_task(node, record, agent, request, context_brief, feedback)
-            last_result = await _run_stage(
-                task_id, request, node.id, [agent], [tsk], progress_callback, deadline
-            )
-            routing["selected_agents"].append(node.id)
-            _check_empty_stage(task_id, node.kind)
+            if len(firing) == 1:
+                # ---- Single node — run with the standard sequential path ----
+                node = firing[0]
+                record = load_agent(node.agent)
+                agent = build_agent(record, task_id, node_id=node.id)
+                tsk = _node_task(node, record, agent, request, context_brief, feedback)
+                last_result = await _run_stage(
+                    task_id, request, node.id, [agent], [tsk], progress_callback, deadline
+                )
+                routing["selected_agents"].append(node.id)
+                # The empty-stage check keys on node.kind (work→notes/,
+                # synthesize→artifacts/). Skip for explicit-instruction nodes
+                # since they can write anywhere.
+                if not node.instruction:
+                    _check_empty_stage(task_id, node.kind)
+            else:
+                # ---- Parallel nodes — fan out with asyncio.gather ----------
+                # Each coroutine is fully isolated (own agent, task, LLM handle).
+                # `feedback` and `context_brief` are passed explicitly so the
+                # inner function doesn't close over a loop variable that changes.
+                async def _run_one(
+                    n: WorkflowNode,
+                    fb: str | None,
+                ) -> tuple[str, Any]:
+                    """Run one parallel node; return (node_id, crew_output)."""
+                    rec = load_agent(n.agent)
+                    agt = build_agent(rec, task_id, node_id=n.id)
+                    tsk = _node_task(n, rec, agt, request, context_brief, fb)
+                    result = await _run_stage(
+                        task_id, request, n.id, [agt], [tsk], progress_callback, deadline
+                    )
+                    return n.id, result
+
+                wave_pairs: list[tuple[str, Any]] = await asyncio.gather(
+                    *[_run_one(n, feedback) for n in firing]
+                )
+                for nid, _ in wave_pairs:
+                    routing["selected_agents"].append(nid)
+                # The synthesize node is always alone in its wave, so
+                # last_result from a parallel work wave doesn't feed anything
+                # critical — but we store it anyway for completeness.
+                last_result = wave_pairs[-1][1]
+                for node in firing:
+                    if not node.instruction:
+                        _check_empty_stage(task_id, node.kind)
 
             # ---- Post-plan checks: affordance pause + record context brief --
-            if node.kind == "plan":
-                if context_brief:
-                    update_plan_frontmatter(task_id, context_brief=context_brief)
-                from hyperion.feedback import latest_pending_affordance
+            for node in firing:
+                if node.kind == "plan":
+                    if context_brief:
+                        update_plan_frontmatter(task_id, context_brief=context_brief)
+                    from hyperion.feedback import latest_pending_affordance
 
-                if latest_pending_affordance(task_id) is not None:
-                    if progress_callback:
-                        progress_callback("[affordance] awaiting human input")
-                    return _pending_input(task_id, node.id, _payload(node.id))
+                    if latest_pending_affordance(task_id) is not None:
+                        if progress_callback:
+                            progress_callback("[affordance] awaiting human input")
+                        return _pending_input(task_id, node.id, _payload(node.id))
+
     except asyncio.TimeoutError:
         return _failed(task_id, f"CapExceeded(wall_clock): task exceeded {wall}s", routing)
     except CapExceeded as exc:

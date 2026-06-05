@@ -93,11 +93,15 @@ export interface ToolInfo {
 /**
  * Available model aliases/IDs plus the currently selected models for each of the
  * three role slots (planner / worker / cheap) the backend resolves at runtime.
+ * `alias_details` maps each alias name to its ordered fallback chain of concrete
+ * models (e.g. `smart → ["claude-opus-4-6 (anthropic)", ...]`), so the UI can
+ * show what's behind an alias without the operator opening litellm_config.yaml.
  */
 export interface ModelsInfo {
   aliases: string[];
   models: string[];
   current: { planner: string; worker: string; cheap: string };
+  alias_details: Record<string, string[]>;
 }
 
 /** A single selectable option in a "choice"-type affordance. */
@@ -172,6 +176,8 @@ export interface TaskResponse {
  * System-wide configuration snapshot: available models, provider key/health
  * status, usage caps, the default workflow id, and the LiteLLM proxy URL all
  * calls are routed through.
+ * `alias_fallback_order` maps each alias to its ordered fallback chain so the
+ * Settings page can show what's behind smart/worker/cheap/fast.
  */
 export interface ConfigResponse {
   models: Record<string, { alias: string; note: string; env_var: string }>;
@@ -179,6 +185,7 @@ export interface ConfigResponse {
   caps: Record<string, number>;
   default_workflow: string;
   litellm_url: string;
+  alias_fallback_order: Record<string, string[]>;
 }
 
 /** Optional conditional-firing rule for a node: run only for these task types. */
@@ -187,10 +194,22 @@ export interface NodeWhen {
 }
 
 /**
+ * Canvas coordinates for the graphical workflow builder (UI-only metadata).
+ * Persisted so a hand-arranged layout survives reloads; ignored by the runner,
+ * which orders nodes by the upstream DAG. Optional — nodes without a position are
+ * auto-laid-out by the editor on first open.
+ */
+export interface NodePosition {
+  x: number;
+  y: number;
+}
+
+/**
  * One node in a workflow DAG: an agent instance playing a `kind` role (plan /
  * work / synthesize), with explicit upstream dependencies, an optional HITL gate
- * before it runs (`gate_before`), an optional per-node instruction override, and
- * an optional `when` conditional-firing rule.
+ * before it runs (`gate_before`), an optional per-node instruction override, an
+ * optional `when` conditional-firing rule, and an optional canvas `position` for
+ * the graphical editor.
  */
 export interface WorkflowNode {
   id: string;
@@ -200,6 +219,7 @@ export interface WorkflowNode {
   gate_before: boolean;
   instruction: string | null;
   when: NodeWhen | null;
+  position?: NodePosition | null;
 }
 
 /** A named, reusable agent DAG selectable when submitting a task. */

@@ -73,6 +73,8 @@ from hyperion.crews.workflows import WorkflowRecord
 from hyperion.memory.episodic import store_episode
 from hyperion.server.affordances import Affordance, AffordanceOption
 from hyperion.server.webhooks import UnsafeCallbackURL, fire_callback, validate_callback_url
+from hyperion.tools.second_brain import SecondBrainTool
+from hyperion.tools.web_search import WebSearchTool
 
 logger = logging.getLogger(__name__)
 
@@ -665,12 +667,7 @@ async def get_config() -> dict:
             name: {"key_present": present, "status": "available" if present else "no key — alias will skip"}
             for name, present in providers.items()
         },
-        "alias_fallback_order": {
-            "smart":  ["claude-opus-4-6 (anthropic)", "gemini-2.5-pro (gemini)", "gpt-4o (openai)"],
-            "worker": ["claude-sonnet-4-6 (anthropic)", "gemini-2.5-pro (gemini)", "gpt-4o (openai)"],
-            "cheap":  ["claude-haiku-4-5 (anthropic)", "gemini-2.5-flash (gemini)", "gpt-4o-mini (openai)"],
-            "fast":   ["gemini-2.5-flash (gemini)", "claude-haiku-4-5 (anthropic)", "gpt-4o-mini (openai)"],
-        },
+        "alias_fallback_order": _ALIAS_DETAILS,
         "caps": {
             "input_tokens": settings.cap_input_tokens,
             "output_tokens": settings.cap_output_tokens,
@@ -1746,6 +1743,72 @@ async def list_tools() -> list[dict]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# Tool endpoints — expose Hyperion's tools over HTTP so OWUI models and other
+# callers can use them without delegating a full orchestration task.
+#
+# This is the canonical implementation for web search and second-brain lookup:
+# all logic lives here in the Hyperion tools layer. OWUI plugins call these
+# endpoints and are intentionally thin HTTP wrappers — updating the tool logic
+# here automatically propagates to every caller.
+# ---------------------------------------------------------------------------
+
+# Canonical alias → fallback-chain mapping, shared by /tools/search (docs),
+# /models (agent editor), and /config (settings page).
+_ALIAS_DETAILS: dict[str, list[str]] = {
+    "smart":  ["claude-opus-4-6 (anthropic)", "gemini-2.5-pro (gemini)", "gpt-4o (openai)"],
+    "worker": ["claude-sonnet-4-6 (anthropic)", "gemini-2.5-pro (gemini)", "gpt-4o (openai)"],
+    "cheap":  ["claude-haiku-4-5 (anthropic)", "gemini-2.5-flash (gemini)", "gpt-4o-mini (openai)"],
+    "fast":   ["gemini-2.5-flash (gemini)", "claude-haiku-4-5 (anthropic)", "gpt-4o-mini (openai)"],
+}
+
+
+@app.get("/tools/search")
+async def tool_web_search(
+    q: str,
+    top_k: int = 10,
+    categories: str = "general,news",
+) -> dict:
+    """Web search via SearXNG + Infinity reranker.
+
+    Delegates to the same WebSearchTool that Hyperion agents use internally, so
+    the prompt-injection defenses, reranking, and snippet sanitization are
+    identical whether the caller is an OWUI model or an in-process CrewAI agent.
+
+    Args:
+        q: Search query string.
+        top_k: Maximum number of results to return after reranking.
+        categories: Comma-separated SearXNG category list.
+
+    Returns:
+        {"query": str, "result": str} — result is Markdown-formatted web results.
+    """
+    tool = WebSearchTool(top_k=top_k, categories=categories)
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, tool._run, q)
+    return {"query": q, "result": result}
+
+
+@app.get("/tools/second-brain")
+async def tool_second_brain(q: str, limit: int = 5) -> dict:
+    """Semantic search over the Qdrant second-brain collection.
+
+    Delegates to the same SecondBrainTool that Hyperion agents use internally,
+    including the Infinity reranker pass and the per-call token-budget trim.
+
+    Args:
+        q: Natural-language search query.
+        limit: Maximum number of results to return after reranking.
+
+    Returns:
+        {"query": str, "result": str} — result is Markdown-formatted excerpts.
+    """
+    tool = SecondBrainTool(top_k=limit)
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, tool._run, q)
+    return {"query": q, "result": result}
+
+
 @app.get("/models")
 async def list_models() -> dict:
     """Role aliases plus the concrete models the proxy currently exposes."""
@@ -1757,6 +1820,10 @@ async def list_models() -> dict:
             "worker": settings.model_worker,
             "cheap": settings.model_cheap,
         },
+        # Fallback chain for each alias — shown in the agent editor and settings
+        # so operators can see what's behind smart/worker/cheap/fast without
+        # having to look at litellm_config.yaml.
+        "alias_details": _ALIAS_DETAILS,
     }
 
 
@@ -1933,12 +2000,26 @@ async def list_tasks(limit: int = 50, offset: int = 0) -> dict:
 
 @app.get("/metrics")
 async def get_metrics() -> dict:
-    """Per-agent activation counts + error rate (from the routing column) and live
-    token usage (from the in-process usage accountant). Powers the monitoring tiles."""
+    """Per-agent activation counts + error rate (from the routing column) and token
+    usage (summed from the persisted trace_events table). Powers the monitoring tiles.
+
+    Token totals come from trace_events rather than the in-memory usage accountant so
+    the bars stay durable across API restarts and consistent with the DB-derived
+    activation counts (the in-memory accountant is reset on every process restart)."""
     async with _db() as db:
         db.row_factory = aiosqlite.Row
         async with db.execute("SELECT status, routing FROM tasks") as cur:
             rows = await cur.fetchall()
+        # Durable per-agent token totals from the trace log (keyed by agent id).
+        async with db.execute(
+            "SELECT agent_role, SUM(input_tokens) AS input, "
+            "SUM(output_tokens) AS output FROM trace_events GROUP BY agent_role"
+        ) as cur:
+            token_rows = await cur.fetchall()
+    tokens = {
+        tr["agent_role"]: {"input": tr["input"] or 0, "output": tr["output"] or 0}
+        for tr in token_rows
+    }
 
     status_counts: dict[str, int] = {}
     per_agent: dict[str, dict[str, int]] = {}
@@ -1961,7 +2042,6 @@ async def get_metrics() -> dict:
             if r["status"] == "failed":
                 bucket["errors"] += 1
 
-    tokens = usage.all_agent_totals()
     caps = {field: getattr(settings, field) for field in _CAP_FIELDS}
     agents = []
     for record in load_all_agents():
