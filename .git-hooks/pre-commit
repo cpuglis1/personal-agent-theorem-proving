@@ -16,7 +16,7 @@ fi
 
 echo "🔍 Scanning staged files for secrets..."
 
-if gitleaks protect --staged --no-banner -q; then
+if gitleaks protect --staged --no-banner; then
   echo "✅ No secrets detected."
 else
   echo ""
