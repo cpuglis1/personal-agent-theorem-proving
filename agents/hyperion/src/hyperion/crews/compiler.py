@@ -72,13 +72,24 @@ def _agent_catalog(agents: list[AgentRecord]) -> str:
     return "\n".join(lines) or "(no agents available)"
 
 
+def _workflow_catalog(workflows: list[WorkflowRecord]) -> str:
+    """Render the reusable workflows (callable as subworkflow nodes) for the prompt."""
+    lines = [f"- {w.id}: {w.name}" + (f" — {w.description}" if w.description else "")
+             for w in workflows]
+    return "\n".join(lines) or "(no reusable sub-workflows available)"
+
+
 _SYSTEM_PROMPT = """\
 You are a workflow compiler for a multi-agent orchestrator. Translate the user's \
 plain-language instruction into a workflow: a directed acyclic graph (DAG) of \
-nodes, where each node runs one agent.
+nodes. Most nodes run one agent; a node may instead run an entire reusable \
+sub-workflow as a single step.
 
 Available agents (use ONLY these ids):
 {catalog}
+
+Reusable sub-workflows you may call as a single node (use ONLY these ids):
+{workflows}
 
 Output STRICT JSON (no prose, no code fences) of the form:
 {{
@@ -94,14 +105,26 @@ Output STRICT JSON (no prose, no code fences) of the form:
   ]
 }}
 
+A node that runs a sub-workflow instead of an agent looks like this (note "kind":
+"subworkflow", a "workflow" field instead of "agent"):
+{{
+  "id": "<slug>",
+  "kind": "subworkflow",
+  "workflow": "<one of the sub-workflow ids above>",
+  "upstream": ["<ids of nodes that must finish first>"],
+  "instruction": "<optional: the request handed to the sub-workflow, or null>"
+}}
+
 Rules:
-- Use only the agent ids listed above. Never invent an agent.
+- Use only the agent ids and sub-workflow ids listed above. Never invent either.
 - Node ids are lowercase slugs (letters, digits, hyphen, underscore), unique within the workflow.
 - "upstream" lists node ids (NOT agent ids) that must complete before this node runs. Use it to express order and fan-in/fan-out. Leave it [] for the first node(s).
 - The graph must be acyclic.
-- "kind" is the node's role: "plan" decomposes the request, "work" researches/executes, "synthesize" writes the final report. Pick the closest fit for each agent's job.
+- "kind" is the node's role: "plan" decomposes the request, "work" researches/executes, "synthesize" writes the final report, "subworkflow" runs a whole reusable workflow. Pick the closest fit for each step.
+- A "subworkflow" node sets "workflow" (a sub-workflow id) and omits "agent"; every other kind sets "agent" and omits "workflow".
+- Only use a sub-workflow node when the user clearly wants a whole reusable pipeline run as one step; otherwise prefer plain agent nodes.
 - Prefer a small, clear graph that follows the user's described order. If the user wants a final written result, end with a synthesize node.
-- Set "instruction" only when the node needs a task beyond the agent's normal behavior; otherwise use null.
+- Set "instruction" only when the node needs a task beyond its normal behavior; otherwise use null.
 """
 
 
@@ -162,20 +185,24 @@ def _build_record(obj: dict, workflow_id: str, prompt: str) -> WorkflowRecord:
             when = NodeWhen(task_types=list(when_obj["task_types"]))
         # Clamp kind to a valid value rather than letting an odd label raise.
         kind = n.get("kind", "work")
-        if kind not in ("plan", "work", "synthesize"):
+        if kind not in ("plan", "work", "synthesize", "subworkflow"):
             kind = "work"
+        # A subworkflow node carries a "workflow" ref and no agent; every other
+        # kind carries an "agent". validate_workflow enforces exactly-one-of.
+        node_kwargs: dict = dict(
+            id=str(n.get("id", "")),
+            kind=kind,
+            upstream=[str(u) for u in (n.get("upstream") or [])],
+            gate_before=bool(n.get("gate_before", False)),
+            instruction=n.get("instruction") or None,
+            when=when,
+        )
+        if kind == "subworkflow":
+            node_kwargs["workflow"] = str(n.get("workflow", "")) or None
+        else:
+            node_kwargs["agent"] = str(n.get("agent", "")) or None
         try:
-            nodes.append(
-                WorkflowNode(
-                    id=str(n.get("id", "")),
-                    agent=str(n.get("agent", "")),
-                    kind=kind,
-                    upstream=[str(u) for u in (n.get("upstream") or [])],
-                    gate_before=bool(n.get("gate_before", False)),
-                    instruction=n.get("instruction") or None,
-                    when=when,
-                )
-            )
+            nodes.append(WorkflowNode(**node_kwargs))
         except ValidationError as exc:
             raise WorkflowCompileError(f"Invalid node shape: {exc}") from exc
     name = str(obj.get("name") or "").strip() or _fallback_name(prompt)
@@ -188,7 +215,11 @@ def _fallback_name(prompt: str) -> str:
     return (" ".join(words[:6]) or "Ad-hoc workflow")[:60]
 
 
-def compile_workflow(prompt: str, agents: list[AgentRecord]) -> WorkflowRecord:
+def compile_workflow(
+    prompt: str,
+    agents: list[AgentRecord],
+    workflows: list[WorkflowRecord] | None = None,
+) -> WorkflowRecord:
     """Compile a natural-language orchestration instruction into a workflow DAG.
 
     Args:
@@ -196,6 +227,9 @@ def compile_workflow(prompt: str, agents: list[AgentRecord]) -> WorkflowRecord:
             together (e.g. "research, then have the critic review, then write it up").
         agents: The available agent records; only the active ones are offered to
             the model and only their ids may appear in the result.
+        workflows: Existing workflows that may be invoked as subworkflow nodes.
+            Only their ids may appear as a node's ``workflow`` ref. When None/empty,
+            the model is told no reusable sub-workflows are available.
 
     Returns:
         A validated ``WorkflowRecord`` with a generated ``adhoc-<hex>`` id. The
@@ -213,16 +247,25 @@ def compile_workflow(prompt: str, agents: list[AgentRecord]) -> WorkflowRecord:
     if not active:
         raise WorkflowCompileError("No active agents to build a workflow from.")
 
+    available_workflows = workflows or []
     known_ids = {a.id for a in active}
+    known_wf_ids = {w.id for w in available_workflows}
+    # Resolver for cross-workflow cycle detection: subworkflow refs point at
+    # existing on-disk workflows, so load them by id.
+    from hyperion.crews.workflows import load_workflow as _resolve_wf
+
     workflow_id = f"{ADHOC_PREFIX}{uuid.uuid4().hex[:8]}"
-    system = _SYSTEM_PROMPT.format(catalog=_agent_catalog(active))
+    system = _SYSTEM_PROMPT.format(
+        catalog=_agent_catalog(active),
+        workflows=_workflow_catalog(available_workflows),
+    )
 
     # First attempt.
     text = _call_llm(system, prompt.strip())
     obj = _extract_json(text)
     record = _build_record(obj, workflow_id, prompt)
     try:
-        validate_workflow(record, known_ids)
+        validate_workflow(record, known_ids, known_wf_ids, _resolve_wf)
         return record
     except ValueError as exc:
         # Bind to an outer name — Python clears the `except ... as` variable when
@@ -240,7 +283,7 @@ def compile_workflow(prompt: str, agents: list[AgentRecord]) -> WorkflowRecord:
     obj2 = _extract_json(text2)
     record2 = _build_record(obj2, workflow_id, prompt)
     try:
-        validate_workflow(record2, known_ids)
+        validate_workflow(record2, known_ids, known_wf_ids, _resolve_wf)
         return record2
     except ValueError as second_err:
         raise WorkflowCompileError(

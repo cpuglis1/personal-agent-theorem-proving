@@ -75,6 +75,7 @@ import {
   useDuplicateWorkflow,
   useSaveWorkflow,
   useWorkflow,
+  useWorkflows,
   type NodeKind,
   type NodeWhen,
   type WorkflowNode,
@@ -86,13 +87,15 @@ import { useToast } from "../components/Toast";
 // The role a node plays in the workflow. Drives the default task instructions
 // (when a node has no explicit override) and the human-in-the-loop gate/revise
 // flow: planning happens in "plan" nodes, the final report in "synthesize" nodes.
-const NODE_KINDS: NodeKind[] = ["plan", "work", "synthesize"];
+// "subworkflow" is special — the node runs a whole other workflow (see WfNodeData).
+const NODE_KINDS: NodeKind[] = ["plan", "work", "synthesize", "subworkflow"];
 
 /** Tailwind accent classes per node kind, for the small role pill (mirrors TraceFlow). */
 const KIND_ACCENT: Record<string, string> = {
   plan: "bg-violet-900/50 text-violet-300",
   work: "bg-sky-900/50 text-sky-300",
   synthesize: "bg-emerald-900/50 text-emerald-300",
+  subworkflow: "bg-amber-900/50 text-amber-300",
 };
 
 // Auto-layout constants (React Flow canvas units), used only for nodes that have
@@ -126,12 +129,24 @@ function uid(): string {
 interface WfNodeData extends Record<string, unknown> {
   slug: string;
   agent: string;
+  /** Child workflow id for a `subworkflow` node; "" for every other kind. */
+  workflow: string;
   kind: NodeKind;
   gate_before: boolean;
   instruction: string | null;
   when: NodeWhen | null;
-  /** True when slug or agent is missing — drives the amber "incomplete" ring. */
+  /**
+   * True when the node is incomplete — drives the amber "incomplete" ring. A node
+   * is incomplete when it has no slug, or (for a subworkflow node) no child
+   * workflow chosen, or (for any other kind) no agent chosen.
+   */
   invalid: boolean;
+}
+
+/** Whether a node's required fields are filled (slug + agent, or slug + workflow). */
+function nodeIncomplete(d: { slug: string; agent: string; workflow: string; kind: NodeKind }): boolean {
+  if (!d.slug) return true;
+  return d.kind === "subworkflow" ? !d.workflow : !d.agent;
 }
 
 /**
@@ -168,10 +183,21 @@ function WfNodeCard({ data, selected }: NodeProps) {
         </span>
       </div>
       <div className="flex items-center gap-1.5 truncate text-xs text-slate-400">
-        <span className="text-sky-400">🤖</span>
-        <span className="truncate">
-          {d.agent || <span className="italic text-amber-400">pick agent</span>}
-        </span>
+        {d.kind === "subworkflow" ? (
+          <>
+            <span className="text-amber-400" title="Runs a whole sub-workflow">↳</span>
+            <span className="truncate">
+              {d.workflow || <span className="italic text-amber-400">pick workflow</span>}
+            </span>
+          </>
+        ) : (
+          <>
+            <span className="text-sky-400">🤖</span>
+            <span className="truncate">
+              {d.agent || <span className="italic text-amber-400">pick agent</span>}
+            </span>
+          </>
+        )}
         {d.gate_before && <span className="ml-auto text-amber-300" title="Pauses for approval">⏸</span>}
       </div>
       <Handle type="source" position={Position.Bottom} className="!h-3 !w-3 !bg-slate-400" />
@@ -263,12 +289,18 @@ function recordToFlow(rec: WorkflowRecord): { nodes: Node[]; edges: Edge[] } {
       position: n.position ?? auto,
       data: {
         slug: n.id,
-        agent: n.agent,
+        agent: n.agent ?? "",
+        workflow: n.workflow ?? "",
         kind: n.kind,
         gate_before: n.gate_before,
         instruction: n.instruction,
         when: n.when,
-        invalid: !n.id || !n.agent,
+        invalid: nodeIncomplete({
+          slug: n.id,
+          agent: n.agent ?? "",
+          workflow: n.workflow ?? "",
+          kind: n.kind,
+        }),
       } satisfies WfNodeData,
     };
   });
@@ -343,6 +375,8 @@ function parseWhen(v: string): NodeWhen | null {
  *
  * @param props.node - The selected React Flow node.
  * @param props.agentIds - Selectable agent ids for the agent dropdown.
+ * @param props.workflowIds - Selectable child-workflow ids for a subworkflow node
+ *   (excludes this workflow itself; the backend rejects any deeper A→B→A cycle on save).
  * @param props.duplicateSlug - True if this node's slug collides with another's.
  * @param props.onChange - Apply a partial patch to the node's data.
  * @param props.onDelete - Remove this node from the graph.
@@ -352,6 +386,7 @@ function parseWhen(v: string): NodeWhen | null {
 function NodePanel({
   node,
   agentIds,
+  workflowIds,
   duplicateSlug,
   onChange,
   onDelete,
@@ -359,12 +394,14 @@ function NodePanel({
 }: {
   node: Node;
   agentIds: string[];
+  workflowIds: string[];
   duplicateSlug: boolean;
   onChange: (patch: Partial<WfNodeData>) => void;
   onDelete: () => void;
   onClose: () => void;
 }) {
   const d = node.data as WfNodeData;
+  const isSub = d.kind === "subworkflow";
   return (
     <aside className="flex h-full w-80 shrink-0 flex-col overflow-y-auto border-l border-edge bg-panel/80 backdrop-blur">
       <div className="flex shrink-0 items-center justify-between border-b border-edge px-4 py-3">
@@ -397,28 +434,8 @@ function NodePanel({
 
         <div>
           <label className="label">
-            Agent
-            <InfoTip text="Which agent record runs at this node." />
-          </label>
-          <select
-            className="input"
-            value={d.agent}
-            onChange={(e) => onChange({ agent: e.target.value })}
-          >
-            <option value="">— pick an agent —</option>
-            {agentIds.map((a) => (
-              <option key={a} value={a}>
-                {a}
-              </option>
-            ))}
-          </select>
-          {!d.agent && <p className="mt-1 text-xs text-amber-400">An agent is required.</p>}
-        </div>
-
-        <div>
-          <label className="label">
             Role
-            <InfoTip text="The role this node plays: plan (decompose the request into plan.md), work (research/execute the steps), or synthesize (write the final report). Drives the default instruction when no override is set, and the human-in-the-loop plan gate." />
+            <InfoTip text="The role this node plays: plan (decompose the request into plan.md), work (research/execute the steps), synthesize (write the final report), or subworkflow (run a whole other workflow as one step). Drives the default instruction when no override is set, and the human-in-the-loop plan gate." />
           </label>
           <select
             className="input"
@@ -432,6 +449,55 @@ function NodePanel({
             ))}
           </select>
         </div>
+
+        {isSub ? (
+          <div>
+            <label className="label">
+              Sub-workflow
+              <InfoTip text="Which workflow this node runs as a single step. Its final report is handed back to this workflow like a normal work output. This list excludes this workflow itself; a deeper cycle (A calls B calls A) is rejected when you save." />
+            </label>
+            <select
+              className="input"
+              value={d.workflow}
+              onChange={(e) => onChange({ workflow: e.target.value })}
+            >
+              <option value="">— pick a workflow —</option>
+              {workflowIds.map((w) => (
+                <option key={w} value={w}>
+                  {w}
+                </option>
+              ))}
+            </select>
+            {!d.workflow && (
+              <p className="mt-1 text-xs text-amber-400">A sub-workflow is required.</p>
+            )}
+            {workflowIds.length === 0 && (
+              <p className="mt-1 text-xs text-slate-500">
+                No other workflows available to call.
+              </p>
+            )}
+          </div>
+        ) : (
+          <div>
+            <label className="label">
+              Agent
+              <InfoTip text="Which agent record runs at this node." />
+            </label>
+            <select
+              className="input"
+              value={d.agent}
+              onChange={(e) => onChange({ agent: e.target.value })}
+            >
+              <option value="">— pick an agent —</option>
+              {agentIds.map((a) => (
+                <option key={a} value={a}>
+                  {a}
+                </option>
+              ))}
+            </select>
+            {!d.agent && <p className="mt-1 text-xs text-amber-400">An agent is required.</p>}
+          </div>
+        )}
 
         <label className="flex items-center gap-2 text-sm">
           <input
@@ -489,6 +555,8 @@ function NodePanel({
  *
  * @param props.initialRecord - Record to seed the canvas (blank in "new" mode).
  * @param props.agentIds - Selectable agent ids for node agent dropdowns.
+ * @param props.allWorkflowIds - Ids of every existing workflow, used to populate
+ *   the sub-workflow picker (the current workflow id is filtered out below).
  * @param props.isNew - Whether we are creating (locks the slug after create,
  *   hides Duplicate/Delete, selects create-vs-update save).
  * @returns The full editor UI.
@@ -496,10 +564,12 @@ function NodePanel({
 function Canvas({
   initialRecord,
   agentIds,
+  allWorkflowIds,
   isNew,
 }: {
   initialRecord: WorkflowRecord;
   agentIds: string[];
+  allWorkflowIds: string[];
   isNew: boolean;
 }) {
   const nav = useNavigate();
@@ -597,6 +667,7 @@ function Canvas({
       data: {
         slug: `node-${nodes.length + 1}`,
         agent: "",
+        workflow: "",
         kind: "work",
         gate_before: false,
         instruction: null,
@@ -614,7 +685,7 @@ function Canvas({
       ns.map((n) => {
         if (n.id !== nodeId) return n;
         const data = { ...(n.data as WfNodeData), ...patch };
-        data.invalid = !data.slug || !data.agent;
+        data.invalid = nodeIncomplete(data);
         return { ...n, data };
       }),
     );
@@ -647,7 +718,11 @@ function Canvas({
       if (!slug) problems.push("Every node needs an id.");
       else if (seen.has(slug)) problems.push(`Duplicate node id "${slug}".`);
       else seen.add(slug);
-      if (!d.agent) problems.push(`Node "${slug || "(unnamed)"}" needs an agent.`);
+      if (d.kind === "subworkflow") {
+        if (!d.workflow) problems.push(`Node "${slug || "(unnamed)"}" needs a sub-workflow.`);
+      } else if (!d.agent) {
+        problems.push(`Node "${slug || "(unnamed)"}" needs an agent.`);
+      }
     }
 
     if (problems.length) {
@@ -662,9 +737,13 @@ function Canvas({
 
     const recNodes: WorkflowNode[] = nodes.map((n) => {
       const d = n.data as WfNodeData;
+      const isSub = d.kind === "subworkflow";
       return {
         id: d.slug.trim(),
-        agent: d.agent,
+        // Exactly one of agent / workflow is set, per the node's kind — the
+        // backend enforces this exclusivity too.
+        agent: isSub ? null : d.agent,
+        workflow: isSub ? d.workflow : null,
         kind: d.kind,
         upstream: (upstreamByUid[n.id] ?? []).filter(Boolean),
         gate_before: d.gate_before,
@@ -701,6 +780,10 @@ function Canvas({
   }
 
   const selectedNode = nodes.find((n) => n.id === selectedId) ?? null;
+
+  // Sub-workflow picker options: every other workflow (exclude self to block the
+  // trivial A→A cycle at the UI; the backend rejects any deeper cycle on save).
+  const childWorkflowIds = allWorkflowIds.filter((w) => w !== wfId.trim());
 
   return (
     <div className="flex flex-col gap-4">
@@ -791,6 +874,7 @@ function Canvas({
           <NodePanel
             node={selectedNode}
             agentIds={agentIds}
+            workflowIds={childWorkflowIds}
             duplicateSlug={(slugCounts[(selectedNode.data as WfNodeData).slug.trim()] ?? 0) > 1}
             onChange={(patch) => patchNode(selectedNode.id, patch)}
             onDelete={() => deleteNode(selectedNode.id)}
@@ -826,6 +910,7 @@ export default function WorkflowEditor() {
   const isNew = !id;
   const existing = useWorkflow(id);
   const { data: agents } = useAgents();
+  const { data: workflows } = useWorkflows();
 
   // In edit mode, wait for the record before mounting the canvas so its initial
   // graph state is seeded correctly (the canvas computes nodes/edges once).
@@ -833,6 +918,7 @@ export default function WorkflowEditor() {
 
   const record = (!isNew && existing.data) || blankWorkflow();
   const agentIds = (agents ?? []).map((a) => a.id);
+  const allWorkflowIds = (workflows ?? []).map((w) => w.id);
 
   return (
     <ReactFlowProvider>
@@ -840,6 +926,7 @@ export default function WorkflowEditor() {
         key={isNew ? "new" : record.id}
         initialRecord={record}
         agentIds={agentIds}
+        allWorkflowIds={allWorkflowIds}
         isNew={isNew}
       />
     </ReactFlowProvider>

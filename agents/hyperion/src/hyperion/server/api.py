@@ -1009,10 +1009,12 @@ async def submit_task(body: TaskRequest) -> TaskResponse:
             raise HTTPException(status_code=422, detail=f"Unknown workflow: {exc}")
     elif body.workflow_prompt:
         from hyperion.crews.compiler import WorkflowCompileError, compile_workflow
-        from hyperion.crews.workflows import save_workflow
+        from hyperion.crews.workflows import load_all_workflows, save_workflow
 
         try:
-            compiled = compile_workflow(body.workflow_prompt, load_all_agents())
+            compiled = compile_workflow(
+                body.workflow_prompt, load_all_agents(), load_all_workflows()
+            )
         except WorkflowCompileError as exc:
             raise HTTPException(
                 status_code=422, detail=f"Could not build a workflow from your prompt: {exc}"
@@ -1560,11 +1562,18 @@ def _validate_workflow_record(record) -> None:
         HTTPException 422: the workflow is structurally invalid or references an
             unknown agent.
     """
-    from hyperion.crews.workflows import validate_workflow
+    from hyperion.crews.workflows import (
+        load_all_workflows,
+        load_workflow,
+        validate_workflow,
+    )
 
     known = {r.id for r in load_all_agents()}
+    known_workflows = {w.id for w in load_all_workflows()}
     try:
-        validate_workflow(record, known)
+        # Pass the workflow registry + a loader so subworkflow refs are checked
+        # for existence and cross-workflow cycles (A -> B -> A), not just structure.
+        validate_workflow(record, known, known_workflows, load_workflow)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 
@@ -2173,7 +2182,11 @@ async def import_config(file: UploadFile = File(...)) -> dict:
     before writing and rejects the whole import if any record is malformed (atomic).
     Entries are routed by path prefix: ``agents/*.json`` and ``workflows/*.json``;
     a flat ``*.json`` (legacy export) is treated as an agent record."""
-    from hyperion.crews.workflows import save_workflow, validate_workflow
+    from hyperion.crews.workflows import (
+        load_all_workflows,
+        save_workflow,
+        validate_workflow,
+    )
 
     raw = await file.read()
     try:
@@ -2203,11 +2216,24 @@ async def import_config(file: UploadFile = File(...)) -> dict:
     if not records:
         raise HTTPException(status_code=422, detail="No agent records found in archive")
 
-    # Validate workflows against the imported agent set (cross-reference must resolve).
+    # Validate workflows against the imported agent set (cross-reference must
+    # resolve). Subworkflow refs may target a workflow elsewhere in this archive or
+    # one already on disk, so the known set + resolver span both.
+    from hyperion.crews.workflows import load_workflow
+
     known_agents = {r.id for r in records}
+    imported_by_id = {wf.id: wf for wf in workflows}
+    known_workflows = set(imported_by_id) | {w.id for w in load_all_workflows()}
+
+    def _resolve_imported(wf_id: str) -> WorkflowRecord:
+        """Prefer a workflow from this import batch, else fall back to disk."""
+        if wf_id in imported_by_id:
+            return imported_by_id[wf_id]
+        return load_workflow(wf_id)
+
     for wf in workflows:
         try:
-            validate_workflow(wf, known_agents)
+            validate_workflow(wf, known_agents, known_workflows, _resolve_imported)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=f"Invalid workflow {wf.id!r}: {exc}")
 

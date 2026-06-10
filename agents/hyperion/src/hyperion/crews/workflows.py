@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Literal, Optional
+from typing import Callable, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -28,7 +28,13 @@ from hyperion.config import settings
 # nodes, everything else is "work". This used to live on the agent record as
 # ``stage``; it now lives on the node so the same agent can play different roles in
 # different workflows.
-NodeKind = Literal["plan", "work", "synthesize"]
+#
+# "subworkflow" is special: instead of running an agent, the node runs another
+# *workflow* (referenced by ``WorkflowNode.workflow``) as a single composable step,
+# handing that child workflow's final report back to the parent like a work output.
+# A subworkflow node sets ``workflow`` and leaves ``agent`` unset; every other kind
+# sets ``agent`` and leaves ``workflow`` unset (enforced by ``validate_workflow``).
+NodeKind = Literal["plan", "work", "synthesize", "subworkflow"]
 
 # Identifier guard for workflow ids and node ids: lowercase alnum start, then
 # alnum / underscore / hyphen. Used both as a filename-safety check (ids become
@@ -69,22 +75,30 @@ class NodePosition(BaseModel):
 class WorkflowNode(BaseModel):
     """A single executable step in a workflow DAG.
 
-    A node binds an agent to a position in the graph. Because ``id`` is distinct
-    from ``agent``, the same agent can appear in multiple nodes (e.g. a critic
-    that reviews two different upstream branches).
+    A node usually binds an agent to a position in the graph. Because ``id`` is
+    distinct from ``agent``, the same agent can appear in multiple nodes (e.g. a
+    critic that reviews two different upstream branches).
+
+    A node with ``kind == "subworkflow"`` is the exception: it runs another whole
+    workflow (named by ``workflow``) as one composable step and leaves ``agent``
+    unset. Exactly one of ``agent`` / ``workflow`` is set; ``validate_workflow``
+    enforces this and that ``kind == "subworkflow"`` iff ``workflow`` is set.
 
     Attributes:
         id: Node slug, unique within the workflow. Used as the topo-sort key and
             as the target of other nodes' ``upstream`` references.
-        agent: Id of the agent record this node runs.
-        kind: The role this node plays (plan / work / synthesize); drives the
-            default task instructions and the HITL gate/revise flow.
+        agent: Id of the agent record this node runs (None for subworkflow nodes).
+        workflow: Id of the child workflow this node runs (set only when
+            ``kind == "subworkflow"``; None otherwise).
+        kind: The role this node plays (plan / work / synthesize / subworkflow);
+            drives the default task instructions and the HITL gate/revise flow.
         upstream: Ids of nodes that must complete before this node may run. An
             empty list means the node is a graph root with no dependencies.
         gate_before: When True, the runner pauses for human approval (HITL)
             before executing this node.
         instruction: Optional explicit task description that overrides the
-            kind-derived default instruction for this node.
+            kind-derived default instruction for this node. For a subworkflow
+            node it becomes the child run's request (parent request when unset).
         when: Optional conditional-firing rule; when set, the node runs only for
             the listed task types.
         position: Optional canvas coordinates for the graphical editor (UI-only;
@@ -92,8 +106,9 @@ class WorkflowNode(BaseModel):
     """
 
     id: str                                   # node slug, unique within the workflow
-    agent: str                                # agent record id this node runs
-    kind: NodeKind = "work"                   # role within the workflow (plan/work/synthesize)
+    agent: Optional[str] = None               # agent record id this node runs (None for subworkflow)
+    workflow: Optional[str] = None            # child workflow id (subworkflow nodes only)
+    kind: NodeKind = "work"                   # role within the workflow (plan/work/synthesize/subworkflow)
     upstream: list[str] = Field(default_factory=list)  # node ids that must finish first
     gate_before: bool = False                 # pause for human approval before this node (HITL)
     instruction: Optional[str] = None         # overrides the kind-derived task description
@@ -301,9 +316,34 @@ def topo_sort(nodes: list[WorkflowNode]) -> list[WorkflowNode]:
     return [by_id[nid] for nid in out]
 
 
-def validate_workflow(record: WorkflowRecord, known_agent_ids: set[str]) -> None:
-    """Structural validation: slug id, >=1 node, unique node ids, every node
-    references a known agent, upstream refs resolve within the workflow, acyclic."""
+def validate_workflow(
+    record: WorkflowRecord,
+    known_agent_ids: set[str],
+    known_workflow_ids: Optional[set[str]] = None,
+    resolve: Optional[Callable[[str], "WorkflowRecord"]] = None,
+) -> None:
+    """Structural validation of a workflow record.
+
+    Checks: slug id, >=1 node, unique node ids, each node is exactly one of an
+    agent node or a subworkflow node (``kind == "subworkflow"`` iff ``workflow``
+    set, ``agent`` unset), every agent ref is known, upstream refs resolve within
+    the workflow, and the node DAG is acyclic.
+
+    Args:
+        record: The workflow to validate.
+        known_agent_ids: Ids of agents that may be referenced by agent nodes.
+        known_workflow_ids: Ids of workflows that may be referenced by subworkflow
+            nodes. When None, subworkflow-reference existence is not checked (only
+            structure) — pass the real set to reject dangling ``workflow`` refs.
+        resolve: Optional loader ``workflow_id -> WorkflowRecord`` used to walk
+            subworkflow references for cross-workflow cycle detection. When None,
+            cross-workflow cycle detection is skipped (single-workflow validation).
+
+    Raises:
+        ValueError: on any structural problem, an unknown agent/workflow
+            reference, a dangling upstream ref, a node-level cycle, or a
+            cross-workflow subworkflow cycle.
+    """
     if not _SLUG_RE.match(record.id):
         raise ValueError(f"Workflow id {record.id!r} must be a slug ([a-z0-9_-])")
     if not record.nodes:
@@ -316,15 +356,71 @@ def validate_workflow(record: WorkflowRecord, known_agent_ids: set[str]) -> None
         if node.id in seen:
             raise ValueError(f"Duplicate node id {node.id!r} in workflow {record.id!r}")
         seen.add(node.id)
-        if node.agent not in known_agent_ids:
-            raise ValueError(
-                f"Node {node.id!r} references unknown agent {node.agent!r}"
-            )
+        # Exactly-one-of: a subworkflow node runs a workflow; every other kind
+        # runs an agent. Mixing the two (or setting neither) is a schema error.
+        if node.kind == "subworkflow":
+            if not node.workflow:
+                raise ValueError(
+                    f"Sub-workflow node {node.id!r} must set 'workflow'"
+                )
+            if node.agent:
+                raise ValueError(
+                    f"Sub-workflow node {node.id!r} must not also set 'agent'"
+                )
+            if known_workflow_ids is not None and node.workflow not in known_workflow_ids:
+                raise ValueError(
+                    f"Node {node.id!r} references unknown workflow {node.workflow!r}"
+                )
+        else:
+            if node.workflow:
+                raise ValueError(
+                    f"Node {node.id!r} sets 'workflow' but kind is {node.kind!r} "
+                    f"(use kind 'subworkflow' to run a workflow)"
+                )
+            if not node.agent:
+                raise ValueError(f"Node {node.id!r} must set 'agent'")
+            if node.agent not in known_agent_ids:
+                raise ValueError(
+                    f"Node {node.id!r} references unknown agent {node.agent!r}"
+                )
     for node in record.nodes:
         for u in node.upstream:
             if u not in seen:
                 raise ValueError(
                     f"Node {node.id!r} lists upstream {u!r} which is not a node in this workflow"
                 )
-    # Raises on a cycle.
+    # Raises on a node-level cycle within this workflow's own DAG.
     topo_sort(record.nodes)
+    # Raises on a cross-workflow cycle (A -> B -> A) reachable via subworkflow refs.
+    if resolve is not None:
+        _check_subworkflow_acyclic(record, resolve)
+
+
+def _check_subworkflow_acyclic(
+    record: WorkflowRecord, resolve: Callable[[str], "WorkflowRecord"]
+) -> None:
+    """Depth-first walk over subworkflow references; raise on any cycle through
+    ``record``. ``record`` itself is used for its own id (it may be unsaved/edited),
+    transitive references are loaded via ``resolve``. References that fail to load
+    are skipped — their own validation is responsible for them, and a missing ref
+    cannot extend a cycle."""
+
+    def children(rec: WorkflowRecord) -> list[str]:
+        return [n.workflow for n in rec.nodes if n.kind == "subworkflow" and n.workflow]
+
+    def walk(wf_id: str, path: tuple[str, ...]) -> None:
+        if wf_id in path:
+            raise ValueError(
+                "Sub-workflow cycle detected: " + " -> ".join((*path, wf_id))
+            )
+        if wf_id == record.id:
+            rec: Optional[WorkflowRecord] = record
+        else:
+            try:
+                rec = resolve(wf_id)
+            except (FileNotFoundError, ValueError):
+                return  # can't recurse into an unresolvable ref; not our cycle to find
+        for child in children(rec):
+            walk(child, (*path, wf_id))
+
+    walk(record.id, ())

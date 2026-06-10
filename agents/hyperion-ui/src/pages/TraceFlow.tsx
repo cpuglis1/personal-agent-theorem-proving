@@ -654,8 +654,10 @@ function buildGraph(
   for (const s of data.routing?.skipped ?? []) skippedReason[s.id] = s.reason;
 
   // Node metadata (agent + kind) from the workflow definition, when available.
+  // A subworkflow node has no agent — label it with the child workflow id instead.
   const wfMeta: Record<string, { agent: string; kind: string }> = {};
-  for (const n of workflow?.nodes ?? []) wfMeta[n.id] = { agent: n.agent, kind: n.kind };
+  for (const n of workflow?.nodes ?? [])
+    wfMeta[n.id] = { agent: n.agent ?? (n.workflow ? `↳ ${n.workflow}` : ""), kind: n.kind };
 
   // Events grouped by the node they ran under.
   const eventsByNode: Record<string, TraceEvent[]> = {};

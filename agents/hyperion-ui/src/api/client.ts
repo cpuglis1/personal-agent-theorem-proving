@@ -48,8 +48,12 @@ export const API_BASE =
 // Types — mirror the Hyperion backend records (registry.py / api.py).
 // ---------------------------------------------------------------------------
 
-/** The role a node plays within a workflow: planning, working, or final synthesis. */
-export type NodeKind = "plan" | "work" | "synthesize";
+/**
+ * The role a node plays within a workflow: planning, working, final synthesis, or
+ * running a whole other workflow as one step (`subworkflow`). A `subworkflow` node
+ * sets `workflow` (a child workflow id) instead of `agent`.
+ */
+export type NodeKind = "plan" | "work" | "synthesize" | "subworkflow";
 
 /** Per-agent usage caps; `null` means "inherit the global cap / no override". */
 export interface Thresholds {
@@ -205,15 +209,19 @@ export interface NodePosition {
 }
 
 /**
- * One node in a workflow DAG: an agent instance playing a `kind` role (plan /
- * work / synthesize), with explicit upstream dependencies, an optional HITL gate
- * before it runs (`gate_before`), an optional per-node instruction override, an
- * optional `when` conditional-firing rule, and an optional canvas `position` for
- * the graphical editor.
+ * One node in a workflow DAG. Usually an agent instance playing a `kind` role
+ * (plan / work / synthesize); a node with `kind === "subworkflow"` instead runs
+ * a whole child workflow (named by `workflow`) as one composable step and leaves
+ * `agent` null. Exactly one of `agent` / `workflow` is set. Each node carries
+ * explicit upstream dependencies, an optional HITL gate before it runs
+ * (`gate_before`), an optional per-node instruction override (for a subworkflow
+ * node this becomes the child run's request), an optional `when` conditional-firing
+ * rule, and an optional canvas `position` for the graphical editor.
  */
 export interface WorkflowNode {
   id: string;
-  agent: string;
+  agent: string | null;
+  workflow?: string | null;
   kind: NodeKind;
   upstream: string[];
   gate_before: boolean;

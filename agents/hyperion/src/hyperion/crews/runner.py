@@ -622,6 +622,124 @@ def _wave_groups(ordered: list[WorkflowNode]) -> list[list[WorkflowNode]]:
     return waves
 
 
+def _handoff_subworkflow_result(parent_task_id: str, child_task_id: str, node_id: str) -> None:
+    """Copy a finished sub-workflow's report into the parent workspace.
+
+    Reads the child run's ``artifacts/result.md`` and writes it as the parent's
+    ``notes/<node_id>.md`` so downstream parent nodes consume it exactly like a
+    normal work-stage output, and mirrors it onto the parent blackboard under
+    ``subworkflow:<node_id>``. Emits an ``empty-subworkflow`` alert (and writes
+    nothing) when the child produced no result.
+
+    Args:
+        parent_task_id: The parent run whose ``notes/`` receives the report.
+        child_task_id: The child run that produced ``artifacts/result.md``.
+        node_id: The parent node that ran the sub-workflow (names the notes file).
+
+    Side effects:
+        Writes ``notes/<node_id>.md`` under the parent workspace and a blackboard
+        entry; or emits an alert when there is nothing to hand off.
+    """
+    child_result = settings.tasks_dir / child_task_id / "artifacts" / "result.md"
+    text = child_result.read_text(encoding="utf-8") if child_result.exists() else ""
+    if not text.strip():
+        from hyperion.alerts import emit_alert
+
+        emit_alert(
+            parent_task_id,
+            "empty-subworkflow",
+            f"Sub-workflow node {node_id!r} finished without producing a result.md.",
+        )
+        return
+    notes_dir = settings.tasks_dir / parent_task_id / "notes"
+    notes_dir.mkdir(parents=True, exist_ok=True)
+    (notes_dir / f"{node_id}.md").write_text(text, encoding="utf-8")
+    try:
+        from hyperion.memory.context_store import context_put
+
+        context_put(parent_task_id, f"subworkflow:{node_id}", text)
+    except Exception as exc:  # blackboard is best-effort; the notes file is the source of truth
+        logger.warning("subworkflow %s: blackboard write failed: %s", node_id, exc)
+
+
+async def _run_subworkflow(
+    parent_task_id: str,
+    node: WorkflowNode,
+    request: str,
+    deadline: float,
+    wall: int,
+    caps: dict,
+    progress_callback: Callable[[str], None] | None,
+    depth: int,
+) -> dict[str, Any]:
+    """Run another workflow as a single node and hand its report back to the parent.
+
+    The child runs under a derived task id (``<parent>__<node>``) so its workspace,
+    trace, and usage stay isolated from the parent's. It shares the parent's
+    wall-clock ``deadline`` (nesting therefore cannot multiply the time budget) and
+    runs with ``hitl="off"`` — gates *inside* a sub-workflow are flattened; to pause
+    around a sub-workflow, gate the parent node instead. On success the child's
+    ``artifacts/result.md`` is folded into the parent's ``notes/`` (see
+    ``_handoff_subworkflow_result``).
+
+    Args:
+        parent_task_id: The enclosing run's id.
+        node: The subworkflow node (``node.workflow`` names the child, ``node.id``
+            names the hand-off notes file, ``node.instruction`` overrides the child
+            request).
+        request: The parent run's request, used as the child request when the node
+            has no explicit ``instruction``.
+        deadline: Shared monotonic wall-clock deadline (passed straight through).
+        wall: The configured wall budget in seconds (for timeout error messages).
+        caps: The parent caps payload (threaded through; unused while hitl is off).
+        progress_callback: Optional progress sink.
+        depth: The parent's nesting depth; the child runs at ``depth + 1``.
+
+    Returns:
+        The child run's result dict (status ``done``).
+
+    Raises:
+        CapExceeded: when the child would exceed ``settings.cap_subworkflow_depth``.
+        FileNotFoundError / ValueError: when ``node.workflow`` does not resolve.
+        RuntimeError: when the child workflow does not complete (failed/paused),
+            so the parent node surfaces as a failure rather than silently skipping.
+    """
+    from hyperion.crews.workflows import resolve_workflow
+
+    child_depth = depth + 1
+    if child_depth > settings.cap_subworkflow_depth:
+        raise CapExceeded(
+            f"Sub-workflow nesting exceeded depth cap "
+            f"({settings.cap_subworkflow_depth}) at node {node.id!r}"
+        )
+
+    child_wf = resolve_workflow(node.workflow)
+    child_request = node.instruction or request
+    child_task_id = f"{parent_task_id}__{node.id}"
+    _prepare_workspace(child_task_id)
+    if progress_callback:
+        progress_callback(
+            f"[subworkflow] {node.id} → {child_wf.id} (depth {child_depth})"
+        )
+
+    result = await _execute_workflow(
+        child_task_id, child_request, child_wf,
+        start_index=0, skip_first_gate=False, hitl="off", revise_count=0,
+        caps=caps, context_brief=None, deadline=deadline, wall=wall,
+        progress_callback=progress_callback, depth=child_depth, run_meta=False,
+    )
+
+    status = result.get("status")
+    if status != "done":
+        raise RuntimeError(
+            f"Sub-workflow {child_wf.id!r} (node {node.id!r}) did not complete "
+            f"(status={status!r}): {result.get('error') or 'no result produced'}"
+        )
+
+    _handoff_subworkflow_result(parent_task_id, child_task_id, node.id)
+    return result
+
+
 async def _execute_workflow(
     task_id: str,
     request: str,
@@ -636,6 +754,8 @@ async def _execute_workflow(
     deadline: float,
     wall: int,
     progress_callback: Callable[[str], None] | None,
+    depth: int = 0,
+    run_meta: bool = True,
 ) -> dict[str, Any]:
     """Run a workflow's nodes wave-by-wave from ``start_index``. Shared by the
     straight-through path (start 0) and the post-approval resume path. Within
@@ -719,51 +839,58 @@ async def _execute_workflow(
             if feedback and progress_callback:
                 progress_callback(f"[feedback] injecting human feedback into wave {wi}")
 
+            # Execute one node — an agent node (single CrewAI crew) or a
+            # subworkflow node (a nested workflow run). Used by both the single-
+            # node and the parallel (asyncio.gather) paths below. `fb` and
+            # `context_brief` are passed/closed-over explicitly so the coroutine
+            # never reads a loop variable that changes between waves.
+            async def _run_one(n: WorkflowNode, fb: str | None) -> tuple[str, Any]:
+                """Run one node; return (node_id, result). Dispatches on kind:
+                a subworkflow node runs a nested workflow, everything else runs
+                its agent."""
+                if n.kind == "subworkflow":
+                    res = await _run_subworkflow(
+                        task_id, n, request, deadline, wall, caps, progress_callback, depth
+                    )
+                    return n.id, res
+                rec = load_agent(n.agent)
+                agt = build_agent(rec, task_id, node_id=n.id)
+                tsk = _node_task(n, rec, agt, request, context_brief, fb)
+                result = await _run_stage(
+                    task_id, request, n.id, [agt], [tsk], progress_callback, deadline
+                )
+                return n.id, result
+
+            def _record_node(n: WorkflowNode) -> None:
+                """Post-run bookkeeping for a fired node: routing + empty checks."""
+                routing["selected_agents"].append(n.id)
+                if n.kind == "subworkflow":
+                    # Record the child run id so the trace UI can drill into it.
+                    routing.setdefault("subworkflows", {})[n.id] = f"{task_id}__{n.id}"
+                elif not n.instruction:
+                    # The empty-stage check keys on node.kind (work→notes/,
+                    # synthesize→artifacts/). Skip explicit-instruction nodes
+                    # since they can write anywhere.
+                    _check_empty_stage(task_id, n.kind)
+
             if len(firing) == 1:
                 # ---- Single node — run with the standard sequential path ----
                 node = firing[0]
-                record = load_agent(node.agent)
-                agent = build_agent(record, task_id, node_id=node.id)
-                tsk = _node_task(node, record, agent, request, context_brief, feedback)
-                last_result = await _run_stage(
-                    task_id, request, node.id, [agent], [tsk], progress_callback, deadline
-                )
-                routing["selected_agents"].append(node.id)
-                # The empty-stage check keys on node.kind (work→notes/,
-                # synthesize→artifacts/). Skip for explicit-instruction nodes
-                # since they can write anywhere.
-                if not node.instruction:
-                    _check_empty_stage(task_id, node.kind)
+                _, last_result = await _run_one(node, feedback)
+                _record_node(node)
             else:
                 # ---- Parallel nodes — fan out with asyncio.gather ----------
-                # Each coroutine is fully isolated (own agent, task, LLM handle).
-                # `feedback` and `context_brief` are passed explicitly so the
-                # inner function doesn't close over a loop variable that changes.
-                async def _run_one(
-                    n: WorkflowNode,
-                    fb: str | None,
-                ) -> tuple[str, Any]:
-                    """Run one parallel node; return (node_id, crew_output)."""
-                    rec = load_agent(n.agent)
-                    agt = build_agent(rec, task_id, node_id=n.id)
-                    tsk = _node_task(n, rec, agt, request, context_brief, fb)
-                    result = await _run_stage(
-                        task_id, request, n.id, [agt], [tsk], progress_callback, deadline
-                    )
-                    return n.id, result
-
+                # Each coroutine is fully isolated (own agent/task/LLM handle, or
+                # its own nested child run).
                 wave_pairs: list[tuple[str, Any]] = await asyncio.gather(
                     *[_run_one(n, feedback) for n in firing]
                 )
-                for nid, _ in wave_pairs:
-                    routing["selected_agents"].append(nid)
                 # The synthesize node is always alone in its wave, so
                 # last_result from a parallel work wave doesn't feed anything
                 # critical — but we store it anyway for completeness.
                 last_result = wave_pairs[-1][1]
                 for node in firing:
-                    if not node.instruction:
-                        _check_empty_stage(task_id, node.kind)
+                    _record_node(node)
 
             # ---- Post-plan checks: affordance pause + record context brief --
             for node in firing:
@@ -797,7 +924,9 @@ async def _execute_workflow(
             result_text = Path(result_path).read_text(encoding="utf-8")
         except Exception:
             pass
-    if result_text:
+    # Sub-workflow (child) runs skip the meta pipeline — it's the top-level run's
+    # job to title/tag the overall result, not each nested step's.
+    if run_meta and result_text:
         try:
             from hyperion.server.meta_tasks import run_meta_tasks
 

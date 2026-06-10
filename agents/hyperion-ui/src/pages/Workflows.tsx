@@ -79,11 +79,17 @@ export default function Workflows() {
             {w.description && (
               <p className="mt-2 text-sm text-slate-400">{w.description}</p>
             )}
-            {/* Node pills: id is shown, agent name on hover (title),
-                "⏸" appended when the node gates for human approval first. */}
+            {/* Node pills: id is shown, agent (or sub-workflow) on hover (title),
+                "↳" marks a sub-workflow node, "⏸" appended when the node gates
+                for human approval first. */}
             <div className="mt-3 flex flex-wrap gap-1.5">
               {w.nodes.map((n) => (
-                <span key={n.id} className="pill border-edge text-slate-400" title={n.agent}>
+                <span
+                  key={n.id}
+                  className="pill border-edge text-slate-400"
+                  title={n.agent ?? (n.workflow ? `sub-workflow: ${n.workflow}` : undefined) ?? undefined}
+                >
+                  {n.kind === "subworkflow" ? "↳ " : ""}
                   {n.id}
                   {n.gate_before ? " ⏸" : ""}
                 </span>

@@ -138,6 +138,12 @@ class Settings(BaseSettings):
     cap_output_tokens: int = 80_000
     cap_tool_loop: int = 3              # consecutive identical calls before abort
     cap_wall_seconds: int = 900         # 15 min
+    # Max nesting depth for subworkflow nodes (a node whose kind is "subworkflow"
+    # runs another workflow). The top-level run is depth 0; a subworkflow node at
+    # depth d runs its child at depth d+1, and the runner aborts (CapExceeded) once
+    # a child would exceed this cap. Backstops the static cross-workflow cycle check
+    # against dynamically-compiled or post-edited workflows.
+    cap_subworkflow_depth: int = 3
 
     # Workspace root (per-task dirs created here)
     # Override with HYPERION_TASKS_DIR env var (set to /app/tasks in Docker compose).
