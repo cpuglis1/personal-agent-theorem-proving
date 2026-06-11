@@ -106,6 +106,41 @@ export interface ModelsInfo {
   models: string[];
   current: { planner: string; worker: string; cheap: string };
   alias_details: Record<string, string[]>;
+  /** Operator-editable role list (planner/worker/cheap built-ins + any custom roles). */
+  roles: Role[];
+  /** Raw `alias name -> ordered concrete model ids` map (the editable form of `alias_details`). */
+  aliases_detail: Record<string, string[]>;
+}
+
+/**
+ * A logical model slot the orchestrator selects by intent. The three built-in roles
+ * (planner/worker/cheap) feed the hard-coded LLM factory functions; operators may add
+ * more. `model` is an alias name or a concrete model id.
+ */
+export interface Role {
+  name: string;
+  note: string;
+  model: string;
+}
+
+/** Live routing state of an alias against the LiteLLM proxy (see /aliases). */
+export type AliasRoutingStatus =
+  | "builtin"
+  | "applied"
+  | "partial"
+  | "pending"
+  | "unknown"
+  | "deleted"
+  | "error";
+
+/**
+ * Response of GET /aliases: each alias's ordered model chain, which names are built-in
+ * (defined in litellm_config.yaml and not deletable), and per-alias routing status.
+ */
+export interface AliasesResponse {
+  aliases: Record<string, string[]>;
+  builtins: string[];
+  status: Record<string, { status: AliasRoutingStatus; detail?: string }>;
 }
 
 /** A single selectable option in a "choice"-type affordance. */
@@ -184,7 +219,9 @@ export interface TaskResponse {
  * Settings page can show what's behind smart/worker/cheap/fast.
  */
 export interface ConfigResponse {
-  models: Record<string, { alias: string; note: string; env_var: string }>;
+  models: Record<string, { alias: string; note: string; env_var: string | null }>;
+  roles: Role[];
+  aliases: Record<string, string[]>;
   providers: Record<string, { key_present: boolean; status: string }>;
   caps: Record<string, number>;
   default_workflow: string;
@@ -397,6 +434,66 @@ export function useUpdateConfig() {
       qc.invalidateQueries({ queryKey: ["config"] });
       qc.invalidateQueries({ queryKey: ["models"] });
     },
+  });
+}
+
+/** Invalidate every query whose data depends on the role/alias registry. */
+function invalidateRegistry(qc: ReturnType<typeof useQueryClient>) {
+  qc.invalidateQueries({ queryKey: ["config"] });
+  qc.invalidateQueries({ queryKey: ["models"] });
+  qc.invalidateQueries({ queryKey: ["roles"] });
+  qc.invalidateQueries({ queryKey: ["aliases"] });
+}
+
+/**
+ * Mutation hook: replace the full roles list (add / rename / remove / re-point).
+ * Invalidates the registry-dependent queries on success.
+ * @returns Mutation whose `mutate(roles: Role[])` persists the new list.
+ */
+export function useUpdateRoles() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (roles: Role[]) =>
+      req<{ roles: Role[] }>("/roles", { method: "PUT", body: JSON.stringify({ roles }) }),
+    onSuccess: () => invalidateRegistry(qc),
+  });
+}
+
+/**
+ * Query hook: fetch alias chains plus each alias's live proxy routing status.
+ * @returns TanStack Query result with `data: AliasesResponse`.
+ */
+export function useAliases() {
+  return useQuery({ queryKey: ["aliases"], queryFn: () => req<AliasesResponse>("/aliases") });
+}
+
+/**
+ * Mutation hook: create or replace one alias's ordered model chain, writing through
+ * to LiteLLM. Invalidates the registry-dependent queries on success.
+ * @returns Mutation whose `mutate({name, models})` upserts the alias.
+ */
+export function useSaveAlias() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ name, models }: { name: string; models: string[] }) =>
+      req<{ name: string; models: string[]; status: { status: AliasRoutingStatus; detail?: string } }>(
+        `/aliases/${name}`,
+        { method: "PUT", body: JSON.stringify({ models }) },
+      ),
+    onSuccess: () => invalidateRegistry(qc),
+  });
+}
+
+/**
+ * Mutation hook: delete a user-defined alias (built-ins / referenced aliases are
+ * refused by the backend). Invalidates the registry-dependent queries on success.
+ * @returns Mutation whose `mutate(name: string)` deletes the alias.
+ */
+export function useDeleteAlias() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => req(`/aliases/${name}`, { method: "DELETE" }),
+    onSuccess: () => invalidateRegistry(qc),
   });
 }
 

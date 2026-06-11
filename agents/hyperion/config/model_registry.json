@@ -1,0 +1,41 @@
+{
+  "roles": [
+    {
+      "name": "planner",
+      "note": "high-stakes planning (Planner agent)",
+      "model": "smart"
+    },
+    {
+      "name": "worker",
+      "note": "research + synthesis (Researcher + Synthesizer agents)",
+      "model": "worker"
+    },
+    {
+      "name": "cheap",
+      "note": "summarization sub-calls (tool compression)",
+      "model": "cheap"
+    }
+  ],
+  "aliases": {
+    "smart": [
+      "claude-opus-4-6",
+      "gemini-2.5-pro",
+      "gpt-4o"
+    ],
+    "worker": [
+      "claude-sonnet-4-6",
+      "gemini-2.5-pro",
+      "gpt-4o"
+    ],
+    "cheap": [
+      "claude-haiku-4-5",
+      "gemini-2.5-flash",
+      "gpt-4o-mini"
+    ],
+    "fast": [
+      "gemini-2.5-flash",
+      "claude-haiku-4-5",
+      "gpt-4o-mini"
+    ]
+  }
+}

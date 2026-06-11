@@ -56,7 +56,6 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
 from hyperion.agents.registry import (
-    MODEL_ALIASES,
     TOOL_REGISTRY,
     AgentRecord,
     delete_agent,
@@ -65,7 +64,7 @@ from hyperion.agents.registry import (
     save_agent,
     validate_agent,
 )
-from hyperion import scheduler, usage
+from hyperion import models_registry, scheduler, usage
 from hyperion.config import settings
 from hyperion.crews.plan_contract import parse_plan
 from hyperion.crews.runner import resume_task, run_task
@@ -562,6 +561,11 @@ async def _startup() -> None:
     _rehydrate_progress()
     # Re-apply any persisted model assignments (PUT /config) and caps (PUT /thresholds).
     _apply_model_overrides()
+    # Seed the role/alias registry from settings on first run (lossless migration of
+    # legacy env / models.json role choices), then make the registry authoritative for
+    # the built-in role -> model fields used by the LLM factory functions.
+    models_registry.seed_from_settings_if_missing()
+    models_registry.apply_roles_to_settings()
     _apply_threshold_overrides()
     # Install per-agent token-cap enforcement + usage accounting (Phase 8).
     usage.register()
@@ -645,29 +649,25 @@ async def get_config() -> dict:
         workflow, and the LiteLLM base URL.
     """
     providers = settings.provider_keys_present()
+    # Roles are now operator-editable (models_registry); the three built-ins still map to
+    # the MODEL_* env vars for back-compat, user-added roles report env_var=None.
+    _env_by_role = {"planner": "MODEL_PLANNER", "worker": "MODEL_WORKER", "cheap": "MODEL_CHEAP"}
     return {
         "models": {
-            "planner": {
-                "alias": settings.model_planner,
-                "note": "high-stakes planning (Planner agent)",
-                "env_var": "MODEL_PLANNER",
-            },
-            "worker": {
-                "alias": settings.model_worker,
-                "note": "research + synthesis (Researcher + Synthesizer agents)",
-                "env_var": "MODEL_WORKER",
-            },
-            "cheap": {
-                "alias": settings.model_cheap,
-                "note": "summarization sub-calls (tool compression)",
-                "env_var": "MODEL_CHEAP",
-            },
+            r["name"]: {
+                "alias": r["model"],
+                "note": r.get("note", ""),
+                "env_var": _env_by_role.get(r["name"]),
+            }
+            for r in models_registry.roles()
         },
+        "roles": models_registry.roles(),
+        "aliases": models_registry.aliases(),
         "providers": {
             name: {"key_present": present, "status": "available" if present else "no key — alias will skip"}
             for name, present in providers.items()
         },
-        "alias_fallback_order": _ALIAS_DETAILS,
+        "alias_fallback_order": models_registry.alias_details(),
         "caps": {
             "input_tokens": settings.cap_input_tokens,
             "output_tokens": settings.cap_output_tokens,
@@ -1359,14 +1359,15 @@ async def _assert_model_alias_valid(record: AgentRecord) -> None:
         HTTPException 422: the alias is neither a known role alias nor a concrete
             model id reported by the (reachable) proxy.
     """
-    if record.model_alias in MODEL_ALIASES:
+    known_aliases = models_registry.alias_names()
+    if record.model_alias in known_aliases:
         return
     known = await _litellm_model_ids()
     if known and record.model_alias not in known:
         raise HTTPException(
             status_code=422,
             detail=f"Unknown model_alias {record.model_alias!r}. "
-                   f"Use one of {MODEL_ALIASES} or a concrete model id.",
+                   f"Use one of {list(known_aliases)} or a concrete model id.",
         )
 
 
@@ -1762,14 +1763,9 @@ async def list_tools() -> list[dict]:
 # here automatically propagates to every caller.
 # ---------------------------------------------------------------------------
 
-# Canonical alias → fallback-chain mapping, shared by /tools/search (docs),
-# /models (agent editor), and /config (settings page).
-_ALIAS_DETAILS: dict[str, list[str]] = {
-    "smart":  ["claude-opus-4-6 (anthropic)", "gemini-2.5-pro (gemini)", "gpt-4o (openai)"],
-    "worker": ["claude-sonnet-4-6 (anthropic)", "gemini-2.5-pro (gemini)", "gpt-4o (openai)"],
-    "cheap":  ["claude-haiku-4-5 (anthropic)", "gemini-2.5-flash (gemini)", "gpt-4o-mini (openai)"],
-    "fast":   ["gemini-2.5-flash (gemini)", "claude-haiku-4-5 (anthropic)", "gpt-4o-mini (openai)"],
-}
+# NOTE: the alias → fallback-chain mapping that the agent editor and settings page
+# render now lives in the operator-editable registry (``models_registry.alias_details()``),
+# not a hard-coded constant. Callers below derive it from there.
 
 
 @app.get("/tools/search")
@@ -1822,17 +1818,19 @@ async def tool_second_brain(q: str, limit: int = 5) -> dict:
 async def list_models() -> dict:
     """Role aliases plus the concrete models the proxy currently exposes."""
     return {
-        "aliases": list(MODEL_ALIASES),
+        "aliases": list(models_registry.alias_names()),
         "models": await _litellm_model_ids(),
         "current": {
             "planner": settings.model_planner,
             "worker": settings.model_worker,
             "cheap": settings.model_cheap,
         },
-        # Fallback chain for each alias — shown in the agent editor and settings
-        # so operators can see what's behind smart/worker/cheap/fast without
-        # having to look at litellm_config.yaml.
-        "alias_details": _ALIAS_DETAILS,
+        # Full operator-editable registry (roles + alias chains), so the settings page
+        # and agent editor can render and edit everything without reading litellm_config.yaml.
+        "roles": models_registry.roles(),
+        "aliases_detail": models_registry.aliases(),
+        # Annotated fallback chain for each alias — shown in the agent editor and settings.
+        "alias_details": models_registry.alias_details(),
     }
 
 
@@ -1852,11 +1850,11 @@ async def update_config(body: ConfigUpdate) -> dict:
         value = getattr(body, field)
         if not value:
             continue
-        if value not in MODEL_ALIASES and known and value not in known:
+        if value not in models_registry.alias_names() and known and value not in known:
             raise HTTPException(
                 status_code=422,
                 detail=f"Unknown model {value!r} for {field}. "
-                       f"Use one of {MODEL_ALIASES} or a concrete model id.",
+                       f"Use one of {list(models_registry.alias_names())} or a concrete model id.",
             )
         updates[field] = value
 
@@ -1884,7 +1882,165 @@ async def update_config(body: ConfigUpdate) -> dict:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(existing, indent=2), encoding="utf-8")
 
+        # Keep the registry (the canonical source of role models) in sync so the new
+        # Roles UI and a future reboot reflect changes made through this legacy endpoint.
+        role_field_models = {
+            "planner": updates.get("model_planner"),
+            "worker": updates.get("model_worker"),
+            "cheap": updates.get("model_cheap"),
+        }
+        if any(role_field_models.values()):
+            reg = models_registry.load_registry()
+            for role in reg["roles"]:
+                new_model = role_field_models.get(role.get("name"))
+                if new_model:
+                    role["model"] = new_model
+            models_registry.save_registry(reg)
+
     return await get_config()
+
+
+# ---------------------------------------------------------------------------
+# Role + alias registry (operator-editable model roles and alias fallback chains)
+# ---------------------------------------------------------------------------
+
+
+class RoleIn(BaseModel):
+    """One role row in a ``PUT /roles`` request body."""
+
+    name: str
+    note: str = ""
+    model: str
+
+
+class RolesUpdate(BaseModel):
+    """``PUT /roles`` body — the full, ordered roles list (replaces the current set)."""
+
+    roles: list[RoleIn]
+
+
+class AliasUpdate(BaseModel):
+    """``PUT /aliases/{name}`` body — the alias's ordered list of concrete model ids."""
+
+    models: list[str]
+
+
+async def _save_registry_validated(reg: dict) -> None:
+    """Validate a candidate registry against the live proxy model list and persist it.
+
+    Args:
+        reg: ``{"roles": [...], "aliases": {...}}`` candidate document.
+
+    Raises:
+        HTTPException 422: if :func:`models_registry.validate_registry` rejects it.
+
+    Side effects:
+        Writes ``model_registry.json`` and re-applies role models to ``settings``.
+    """
+    known = await _litellm_model_ids()
+    try:
+        models_registry.validate_registry(reg, known)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    models_registry.save_registry(reg)
+    models_registry.apply_roles_to_settings()
+
+
+async def _reconcile_alias_safe(name: str, models: list[str] | None) -> dict:
+    """Best-effort LiteLLM write-through for one alias; never raises.
+
+    Calls the admin reconcile (``tools.litellm_admin``) so a new/edited alias actually
+    routes through the proxy. Returns a status dict the UI can surface. ``models=None``
+    means "delete this alias's deployments". Failures are captured as
+    ``{"status": "error", ...}`` rather than failing the whole request — the registry
+    edit still succeeds and can be re-reconciled later.
+    """
+    try:
+        from hyperion.tools.litellm_admin import reconcile_alias
+
+        return await reconcile_alias(name, models)
+    except Exception as exc:  # pragma: no cover - defensive; admin API optional
+        logger.warning("LiteLLM reconcile for alias %r failed: %s", name, exc)
+        return {"status": "error", "detail": str(exc)}
+
+
+@app.get("/roles")
+async def list_roles() -> dict:
+    """Return the operator-editable roles list."""
+    return {"roles": models_registry.roles()}
+
+
+@app.put("/roles")
+async def update_roles(body: RolesUpdate) -> dict:
+    """Replace the roles list (add / rename / remove / re-point), validated + persisted.
+
+    The three built-in roles (planner/worker/cheap) must remain present; their chosen
+    model flows back onto ``settings`` so the LLM factory functions pick it up live.
+    """
+    reg = models_registry.load_registry()
+    reg["roles"] = [r.model_dump() for r in body.roles]
+    await _save_registry_validated(reg)
+    return {"roles": models_registry.roles()}
+
+
+@app.get("/aliases")
+async def list_aliases() -> dict:
+    """Return alias chains plus each alias's live routing status from the proxy."""
+    aliases = models_registry.aliases()
+    try:
+        from hyperion.tools.litellm_admin import alias_routing_status
+
+        statuses = await alias_routing_status(aliases)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.warning("Could not fetch alias routing status: %s", exc)
+        statuses = {}
+    return {
+        "aliases": aliases,
+        "builtins": list(models_registry.BUILTIN_ALIASES),
+        "status": statuses,
+    }
+
+
+@app.put("/aliases/{name}")
+async def upsert_alias(name: str, body: AliasUpdate) -> dict:
+    """Create or replace an alias's ordered model chain, then write through to LiteLLM."""
+    reg = models_registry.load_registry()
+    reg["aliases"][name] = list(body.models)
+    await _save_registry_validated(reg)
+    status = await _reconcile_alias_safe(name, body.models)
+    return {"name": name, "models": body.models, "status": status}
+
+
+@app.delete("/aliases/{name}")
+async def delete_alias(name: str) -> dict:
+    """Delete a user-defined alias (refused for built-ins or referenced aliases)."""
+    if name in models_registry.BUILTIN_ALIASES:
+        raise HTTPException(status_code=422, detail=f"Built-in alias {name!r} cannot be deleted")
+    reg = models_registry.load_registry()
+    if name not in reg["aliases"]:
+        raise HTTPException(status_code=404, detail=f"Unknown alias {name!r}")
+
+    # Refuse deletion while any role or agent still references the alias.
+    referencing_roles = [r["name"] for r in reg["roles"] if r.get("model") == name]
+    if referencing_roles:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Alias {name!r} is used by role(s): {', '.join(referencing_roles)}",
+        )
+    referencing_agents = [
+        a.id for a in load_all_agents()
+        if a.model_alias == name or a.fallback_alias == name
+    ]
+    if referencing_agents:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Alias {name!r} is used by agent(s): {', '.join(referencing_agents)}",
+        )
+
+    del reg["aliases"][name]
+    await _save_registry_validated(reg)
+    status = await _reconcile_alias_safe(name, None)  # remove deployments from proxy
+    return {"name": name, "deleted": True, "status": status}
 
 
 # ---------------------------------------------------------------------------

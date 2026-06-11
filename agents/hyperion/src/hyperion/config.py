@@ -25,6 +25,14 @@ Override any role by setting the env var in agents/hyperion/.env:
   MODEL_WORKER=worker          # default — Claude Sonnet → Gemini Pro → GPT-4o
   MODEL_CHEAP=cheap            # default — Claude Haiku → Gemini Flash → GPT-4o-mini
 
+Runtime override (preferred): roles and aliases are also operator-editable at runtime via
+the Hyperion UI Settings page, which writes a registry at
+``{config_dir}/model_registry.json`` (see ``hyperion.models_registry``). On boot the
+registry's built-in role models are re-applied onto the ``model_*`` fields below, so the
+registry is the source of truth and these env vars act as the first-run seed. New aliases
+defined in the UI are written through to the LiteLLM proxy so they actually route (see
+``hyperion.tools.litellm_admin``).
+
 Examples:
   MODEL_PLANNER=gemini-2.5-pro     # always use Gemini Pro for planning
   MODEL_WORKER=gpt-4o              # always use GPT-4o for research/synthesis

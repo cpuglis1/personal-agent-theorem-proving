@@ -46,7 +46,11 @@
 # Proxy-wide auth and persistence settings.
 general_settings:
   master_key: os.environ/LITELLM_MASTER_KEY   # admin key; also the default bearer token clients present
-  store_model_in_db: false                    # model_list below is the source of truth (not the DB / admin UI)
+  # YAML model_list below is the bootstrap base; Hyperion layers operator-defined aliases
+  # on top at runtime via the admin API (/model/new), persisted in the Postgres `litellm`
+  # DB. Enabling this is what makes UI-defined aliases (models_registry) actually route —
+  # see agents/hyperion/src/hyperion/tools/litellm_admin.py. Additive: YAML models still load.
+  store_model_in_db: true
   # DATABASE_URL is injected via env for virtual key budget tracking (Phase 0.2)
   database_url: os.environ/LITELLM_DATABASE_URL
 

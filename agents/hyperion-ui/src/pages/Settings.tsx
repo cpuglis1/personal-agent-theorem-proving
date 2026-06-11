@@ -9,24 +9,27 @@
  *   cached and writes invalidate the relevant query keys to keep the UI in sync.
  *
  * What it lets the operator do:
- *   1. Role models   — map each logical agent role (planner / worker / cheap) to a
- *      concrete model alias served by the LiteLLM proxy (:4000). Edited in a local
- *      `draft` and committed via `useUpdateConfig`.
- *   2. Default workflow — choose which workflow DAG runs when a request doesn't pick
+ *   1. Roles         — the editable list of logical model slots (planner / worker /
+ *      cheap built-ins + any custom roles). Each role maps to an alias or concrete
+ *      model. Saved as a batch via `useUpdateRoles`.
+ *   2. Aliases       — define/edit/delete model aliases and their ordered provider
+ *      fallback chains. New aliases are written through to LiteLLM so they actually
+ *      route (see `tools/litellm_admin`); a per-alias status badge shows that state.
+ *      Built-in aliases (smart/worker/cheap/fast) come from litellm_config.yaml and
+ *      can be re-pointed but not deleted.
+ *   3. Default workflow — choose which workflow DAG runs when a request doesn't pick
  *      one. The actual DAGs are authored on the separate "Workflows" tab.
- *   3. Caps          — read-only display of token/cost caps (configured via env or
- *      per-request; per-agent overrides live in the agent editor, not here).
- *   4. Agent store   — export the full agent config as a zip, or import one (server
- *      validates the whole set before writing).
- *   5. Providers     — read-only badges showing whether each provider has an API key.
+ *   4. Caps          — read-only display of token/cost caps.
+ *   5. Agent store   — export/import the full agent config as a zip.
+ *   6. Providers     — read-only badges showing whether each provider has an API key.
  *
  * Key design decisions / non-obvious context:
- *   - `draft` holds the in-progress model selections so typing doesn't fire a save on
- *     every keystroke; `useUpdateConfig().mutate(draft)` commits the batch.
- *   - Model autocomplete (`<datalist>`) is de-duplicated because the LiteLLM proxy
- *     reports alias groups as models too (see comment at `choices`).
- *   - The bottom config cards (default workflow / caps / agent store / providers) only
- *     render once `config` has loaded, hence the `{config && (...)}` guard.
+ *   - Model pickers use a grouped `<select>` (aliases vs concrete ids), NOT
+ *     `<input list=datalist>`: the native datalist filters options to the current
+ *     value, which makes it look like only one model exists (same fix as AgentEditor).
+ *   - Roles edit a local `roleDraft` array and commit the whole list at once; aliases
+ *     edit a local `aliasRows` array and commit one alias at a time (the backend upserts
+ *     per name and reconciles only that alias's proxy deployments).
  *
  * @module pages/Settings
  */
@@ -35,66 +38,202 @@ import { useQueryClient } from "@tanstack/react-query";
 import {
   exportConfigUrl,
   importConfig,
+  useAliases,
   useConfig,
+  useDeleteAlias,
   useModels,
+  useSaveAlias,
   useUpdateConfig,
+  useUpdateRoles,
   useWorkflows,
+  type AliasRoutingStatus,
+  type Role,
 } from "../api/client";
 import { useToast } from "../components/Toast";
 
-/**
- * Static descriptor for the three editable "role -> model" rows.
- *
- * - `key`   maps to the config field name sent to the backend (and the `draft` key).
- * - `label` is the human-readable role name shown in the row.
- * - `note`  is a short hint describing what that role is used for.
- *
- * Declared `as const` so `key` is narrowed to a string-literal union rather than
- * widened to `string`, keeping the `draft` indexing type-safe.
- */
-const ROLES = [
-  { key: "model_planner", label: "Planner", note: "high-stakes planning" },
-  { key: "model_worker", label: "Worker", note: "research + synthesis" },
-  { key: "model_cheap", label: "Cheap", note: "summarization sub-calls" },
-] as const;
+/** Built-in role names that cannot be removed (they feed hard-coded LLM factories). */
+const BUILTIN_ROLE_NAMES = ["planner", "worker", "cheap"];
+
+/** Tailwind classes for each alias routing-status badge. */
+const STATUS_STYLE: Record<AliasRoutingStatus, string> = {
+  applied: "border-emerald-500/40 text-emerald-300",
+  builtin: "border-sky-500/40 text-sky-300",
+  partial: "border-amber-500/40 text-amber-300",
+  pending: "border-edge text-slate-400",
+  unknown: "border-edge text-slate-500",
+  deleted: "border-edge text-slate-500",
+  error: "border-rose-500/40 text-rose-300",
+};
 
 /**
- * Settings page component (default route export).
- *
- * Composes the global-configuration UI for Hyperion: role-model mapping, default
- * workflow selection, read-only caps, agent-store import/export, and provider key
- * status. Takes no props — it sources everything from the API hooks
- * (`useConfig`, `useModels`, `useWorkflows`, `useUpdateConfig`).
- *
- * Side effects:
- *   - Issues backend mutations via `useUpdateConfig().mutate(...)` (save models,
- *     change default workflow) and `importConfig(...)` (zip upload).
- *   - Invalidates the "agents", "groups", and "workflows" query caches after a
- *     successful import so dependent views refetch.
- *   - Surfaces toast notifications for import/workflow success and errors.
- *
- * @returns The Settings page JSX.
+ * A grouped model `<select>`: aliases first (optionally), then concrete model ids.
+ * Used for role targets (aliases + concrete) and alias chain entries (concrete only).
+ */
+function ModelSelect({
+  value,
+  onChange,
+  aliases,
+  models,
+  includeAliases,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  aliases: string[];
+  models: string[];
+  includeAliases: boolean;
+}) {
+  return (
+    <select className="input" value={value} onChange={(e) => onChange(e.target.value)}>
+      {/* An empty placeholder so a not-yet-chosen value doesn't silently bind to the first option. */}
+      {!value && <option value="" />}
+      {includeAliases && aliases.length > 0 && (
+        <optgroup label="Aliases (provider fallback included)">
+          {aliases.map((a) => (
+            <option key={a} value={a}>{a}</option>
+          ))}
+        </optgroup>
+      )}
+      {models.length > 0 && (
+        <optgroup label="Concrete model IDs (pins one provider)">
+          {models.map((m) => (
+            <option key={m} value={m}>{m}</option>
+          ))}
+        </optgroup>
+      )}
+    </select>
+  );
+}
+
+/** Local editable shape for one alias row. `isNew` rows aren't persisted yet. */
+interface AliasRow {
+  name: string;
+  models: string[];
+  isBuiltin: boolean;
+  isNew: boolean;
+}
+
+/**
+ * Settings page component (default route export). Sources everything from the API hooks
+ * and holds local drafts for the roles list and alias rows until the operator saves.
  */
 export default function Settings() {
   const { data: config } = useConfig();
   const { data: models } = useModels();
+  const { data: aliasInfo } = useAliases();
   const { data: workflows } = useWorkflows();
   const update = useUpdateConfig();
+  const updateRoles = useUpdateRoles();
+  const saveAlias = useSaveAlias();
+  const deleteAlias = useDeleteAlias();
   const toast = useToast();
   const qc = useQueryClient();
   const fileRef = useRef<HTMLInputElement>(null);
   const [importing, setImporting] = useState(false);
 
+  const aliasNames = models?.aliases ?? [];
+  const concreteModels = models?.models ?? [];
+
+  // ----- Roles draft (whole-list edit, committed by "Save roles") -----------
+  const [roleDraft, setRoleDraft] = useState<Role[]>([]);
+  useEffect(() => {
+    if (models?.roles) setRoleDraft(models.roles.map((r) => ({ ...r })));
+  }, [models?.roles]);
+
+  function setRole(idx: number, patch: Partial<Role>) {
+    setRoleDraft((rs) => rs.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
+  }
+  function addRole() {
+    setRoleDraft((rs) => [...rs, { name: "", note: "", model: "" }]);
+  }
+  function removeRole(idx: number) {
+    setRoleDraft((rs) => rs.filter((_, i) => i !== idx));
+  }
+  function saveRoles() {
+    updateRoles.mutate(roleDraft, {
+      onSuccess: () => toast.push("Roles saved", "success"),
+      onError: (e) => toast.push((e as Error).message, "error"),
+    });
+  }
+
+  // ----- Alias rows draft (per-alias save / delete) -------------------------
+  const [aliasRows, setAliasRows] = useState<AliasRow[]>([]);
+  useEffect(() => {
+    if (!aliasInfo) return;
+    const builtins = new Set(aliasInfo.builtins);
+    setAliasRows(
+      Object.entries(aliasInfo.aliases).map(([name, ms]) => ({
+        name,
+        models: [...ms],
+        isBuiltin: builtins.has(name),
+        isNew: false,
+      })),
+    );
+  }, [aliasInfo]);
+
+  function setAliasRow(idx: number, patch: Partial<AliasRow>) {
+    setAliasRows((rows) => rows.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
+  }
+  function setAliasModel(rowIdx: number, modelIdx: number, value: string) {
+    setAliasRows((rows) =>
+      rows.map((r, i) =>
+        i === rowIdx ? { ...r, models: r.models.map((m, j) => (j === modelIdx ? value : m)) } : r,
+      ),
+    );
+  }
+  function moveAliasModel(rowIdx: number, modelIdx: number, dir: -1 | 1) {
+    setAliasRows((rows) =>
+      rows.map((r, i) => {
+        if (i !== rowIdx) return r;
+        const j = modelIdx + dir;
+        if (j < 0 || j >= r.models.length) return r;
+        const ms = [...r.models];
+        [ms[modelIdx], ms[j]] = [ms[j], ms[modelIdx]];
+        return { ...r, models: ms };
+      }),
+    );
+  }
+  function addAliasModel(rowIdx: number) {
+    setAliasRows((rows) =>
+      rows.map((r, i) => (i === rowIdx ? { ...r, models: [...r.models, ""] } : r)),
+    );
+  }
+  function removeAliasModel(rowIdx: number, modelIdx: number) {
+    setAliasRows((rows) =>
+      rows.map((r, i) =>
+        i === rowIdx ? { ...r, models: r.models.filter((_, j) => j !== modelIdx) } : r,
+      ),
+    );
+  }
+  function addAlias() {
+    setAliasRows((rows) => [...rows, { name: "", models: [""], isBuiltin: false, isNew: true }]);
+  }
+  function saveAliasRow(row: AliasRow) {
+    const cleaned = row.models.filter((m) => m);
+    if (!row.name || cleaned.length === 0) {
+      toast.push("Alias needs a name and at least one model", "error");
+      return;
+    }
+    saveAlias.mutate(
+      { name: row.name, models: cleaned },
+      {
+        onSuccess: (res) => toast.push(`Alias ${res.name} saved (${res.status.status})`, "success"),
+        onError: (e) => toast.push((e as Error).message, "error"),
+      },
+    );
+  }
+  function deleteAliasRow(row: AliasRow, idx: number) {
+    if (row.isNew) {
+      setAliasRows((rows) => rows.filter((_, i) => i !== idx));
+      return;
+    }
+    deleteAlias.mutate(row.name, {
+      onSuccess: () => toast.push(`Alias ${row.name} deleted`, "success"),
+      onError: (e) => toast.push((e as Error).message, "error"),
+    });
+  }
+
   /**
    * Upload an agent-config zip to the backend and reconcile the UI on success.
-   *
-   * Flow: flips the `importing` flag (drives button disabled/label), POSTs the file
-   * via `importConfig`, then toasts a summary (agents imported, plus optional
-   * workflow count) and invalidates the agents/groups/workflows query caches so the
-   * rest of the app refetches. Errors are caught and shown as an error toast.
-   * The `finally` block always clears `importing` and resets the file input value so
-   * selecting the same file again re-triggers `onChange`.
-   *
    * @param file - The `.zip` config archive chosen by the operator.
    */
   async function onImportFile(file: File) {
@@ -114,79 +253,143 @@ export default function Settings() {
     }
   }
 
-  // Local, uncommitted edits for the role-model inputs, keyed by ROLES[].key.
-  // Seeded from the server's current mapping by the effect below and only pushed
-  // to the backend when "Save models" is clicked.
-  const [draft, setDraft] = useState<Record<string, string>>({});
-
-  // Hydrate `draft` from the server's current model mapping once `models.current`
-  // is available (and re-sync if it changes), so the inputs reflect saved state.
-  useEffect(() => {
-    if (models?.current) {
-      setDraft({
-        model_planner: models.current.planner,
-        model_worker: models.current.worker,
-        model_cheap: models.current.cheap,
-      });
-    }
-  }, [models?.current]);
-
-  // Dedupe: the proxy reports the alias groups (smart/worker/cheap) as models too,
-  // so a naive concat shows each twice in the autocomplete.
-  const choices = Array.from(new Set([...(models?.aliases ?? []), ...(models?.models ?? [])]));
-
   return (
     <div className="mx-auto max-w-2xl">
       <h2 className="mb-4 text-lg font-semibold">Settings</h2>
 
+      {/* ── Roles ──────────────────────────────────────────────────────────── */}
       <div className="card mb-4 space-y-3">
-        <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500">
-          Role models
-        </h3>
-        {ROLES.map((r) => {
-          const val = draft[r.key] ?? "";
-          // Show the fallback chain when the current value is a known alias.
-          const chain = config?.alias_fallback_order?.[val];
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Roles</h3>
+          <button className="btn btn-sm" onClick={addRole}>+ Add role</button>
+        </div>
+        <p className="text-xs text-slate-500">
+          Logical model slots the orchestrator selects by intent. Each maps to an alias or a
+          concrete model. The built-in roles (planner / worker / cheap) can be re-pointed but
+          not removed.
+        </p>
+        {roleDraft.map((r, idx) => {
+          const isBuiltin = BUILTIN_ROLE_NAMES.includes(r.name);
+          const chain = models?.alias_details?.[r.model];
           return (
-            <div key={r.key} className="grid grid-cols-[1fr_2fr] items-start gap-3">
-              <div>
-                <div className="text-sm font-medium">{r.label}</div>
-                <div className="text-xs text-slate-500">{r.note}</div>
-              </div>
+            <div key={idx} className="grid grid-cols-[1fr_1fr_auto] items-start gap-2">
               <div>
                 <input
                   className="input"
-                  list="model-choices"
-                  value={val}
-                  onChange={(e) => setDraft((d) => ({ ...d, [r.key]: e.target.value }))}
+                  placeholder="role name"
+                  value={r.name}
+                  disabled={isBuiltin}
+                  onChange={(e) => setRole(idx, { name: e.target.value })}
+                />
+                <input
+                  className="input mt-1 text-xs"
+                  placeholder="note (what it's used for)"
+                  value={r.note}
+                  onChange={(e) => setRole(idx, { note: e.target.value })}
+                />
+              </div>
+              <div>
+                <ModelSelect
+                  value={r.model}
+                  onChange={(v) => setRole(idx, { model: v })}
+                  aliases={aliasNames}
+                  models={concreteModels}
+                  includeAliases
                 />
                 {chain && (
-                  <div className="mt-1 text-xs text-slate-500">
-                    {val} → {chain.join(" → ")}
-                  </div>
+                  <div className="mt-1 text-xs text-slate-500">{r.model} → {chain.join(" → ")}</div>
                 )}
               </div>
+              <button
+                className="btn btn-sm"
+                disabled={isBuiltin}
+                title={isBuiltin ? "Built-in role" : "Remove role"}
+                onClick={() => removeRole(idx)}
+              >
+                ✕
+              </button>
             </div>
           );
         })}
-        <datalist id="model-choices">
-          {choices.map((c) => (
-            <option key={c} value={c} />
-          ))}
-        </datalist>
         <div className="flex items-center gap-3">
-          <button
-            className="btn btn-primary"
-            onClick={() => update.mutate(draft)}
-            disabled={update.isPending}
-          >
-            {update.isPending ? "Saving…" : "Save models"}
+          <button className="btn btn-primary" onClick={saveRoles} disabled={updateRoles.isPending}>
+            {updateRoles.isPending ? "Saving…" : "Save roles"}
           </button>
-          {update.isError && (
-            <span className="text-sm text-rose-300">{(update.error as Error).message}</span>
-          )}
-          {update.isSuccess && <span className="text-sm text-emerald-300">Saved</span>}
         </div>
+      </div>
+
+      {/* ── Aliases ────────────────────────────────────────────────────────── */}
+      <div className="card mb-4 space-y-3">
+        <div className="flex items-center justify-between">
+          <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Aliases</h3>
+          <button className="btn btn-sm" onClick={addAlias}>+ New alias</button>
+        </div>
+        <p className="text-xs text-slate-500">
+          A model alias is a multi-provider group with an ordered fallback chain. New aliases
+          are registered with the LiteLLM proxy so they route across providers; built-in aliases
+          (smart / worker / cheap / fast) are defined in litellm_config.yaml and can't be deleted.
+        </p>
+        {aliasRows.map((row, idx) => {
+          const status = aliasInfo?.status?.[row.name]?.status as AliasRoutingStatus | undefined;
+          return (
+            <div key={idx} className="rounded border border-edge p-3 space-y-2">
+              <div className="flex items-center gap-2">
+                <input
+                  className="input max-w-[12rem]"
+                  placeholder="alias name"
+                  value={row.name}
+                  disabled={row.isBuiltin || !row.isNew}
+                  onChange={(e) => setAliasRow(idx, { name: e.target.value })}
+                />
+                {status && (
+                  <span className={`pill ${STATUS_STYLE[status]}`}>{status}</span>
+                )}
+                <div className="ml-auto flex gap-2">
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => saveAliasRow(row)}
+                    disabled={saveAlias.isPending}
+                  >
+                    Save
+                  </button>
+                  <button
+                    className="btn btn-sm"
+                    disabled={row.isBuiltin || deleteAlias.isPending}
+                    title={row.isBuiltin ? "Built-in alias" : "Delete alias"}
+                    onClick={() => deleteAliasRow(row, idx)}
+                  >
+                    Delete
+                  </button>
+                </div>
+              </div>
+              {/* Ordered fallback chain — concrete model ids, reorderable. */}
+              <div className="space-y-1">
+                {row.models.map((m, j) => (
+                  <div key={j} className="flex items-center gap-1">
+                    <span className="w-4 text-right text-xs text-slate-500">{j + 1}.</span>
+                    <ModelSelect
+                      value={m}
+                      onChange={(v) => setAliasModel(idx, j, v)}
+                      aliases={aliasNames}
+                      models={concreteModels}
+                      includeAliases={false}
+                    />
+                    <button className="btn btn-sm" title="Move up" disabled={j === 0}
+                      onClick={() => moveAliasModel(idx, j, -1)}>↑</button>
+                    <button className="btn btn-sm" title="Move down" disabled={j === row.models.length - 1}
+                      onClick={() => moveAliasModel(idx, j, 1)}>↓</button>
+                    <button className="btn btn-sm" title="Remove" disabled={row.models.length === 1}
+                      onClick={() => removeAliasModel(idx, j)}>✕</button>
+                  </div>
+                ))}
+                <button className="btn btn-sm" onClick={() => addAliasModel(idx)}>+ Add model</button>
+              </div>
+              {aliasInfo?.status?.[row.name]?.detail && (
+                <div className="text-xs text-amber-300">{aliasInfo.status[row.name].detail}</div>
+              )}
+            </div>
+          );
+        })}
       </div>
 
       {config && (
