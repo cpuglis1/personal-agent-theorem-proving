@@ -1,4 +1,4 @@
-"""Feedback / alerts / affordance tests (PLAN_UNIFIED.md Phase 6).
+"""Feedback / alerts / affordance tests (Phase 6).
 
 File-backed channels (feedback queue, affordances, alerts) are exercised against a
 patched ``tasks_dir``. The crew stages are mocked so the awaiting_input pause/resume

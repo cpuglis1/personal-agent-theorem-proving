@@ -1,4 +1,4 @@
-"""HITL (human-in-the-loop) plan-gate tests (PLAN_UNIFIED.md Phase 3).
+"""HITL (human-in-the-loop) plan-gate tests (Phase 3).
 
 This suite verifies Hyperion's human-in-the-loop control flow around the *plan*
 stage of a crew run: the orchestrator can pause after planning and wait for a

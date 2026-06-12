@@ -1,5 +1,5 @@
 """
-Seed config/agents/*.json from the original factory literals (PLAN_UNIFIED.md Phase 0).
+Seed config/agents/*.json from the original factory literals (Phase 0).
 
 Run once to materialize the data-driven agent store byte-identically with the
 hardcoded factories in src/hyperion/agents/*.py:
@@ -20,7 +20,7 @@ checkout has a working default crew. After seeding, agents are edited/created
 at runtime via the API/UI and persisted back to the same JSON store.
 
 Each ``AgentRecord`` below mirrors the agent definitions described in
-PLAN_UNIFIED.md Phase 0 and is intended to be byte-identical to the original
+Phase 0 and is intended to be byte-identical to the original
 hardcoded factories so behavior is unchanged by the migration to a JSON store.
 
 Key design notes

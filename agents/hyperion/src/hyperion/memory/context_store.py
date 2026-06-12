@@ -1,5 +1,5 @@
 """
-Task-scoped context blackboard (PLAN_UNIFIED.md Phase 4).
+Task-scoped context blackboard (Phase 4).
 
 A per-task ``tasks/{id}/context.json`` key/value store that every stage can read
 and write. It is the cross-stage channel for facts that aren't notes or artifacts —

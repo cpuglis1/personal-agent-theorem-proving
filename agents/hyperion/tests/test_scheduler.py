@@ -1,4 +1,4 @@
-"""Unit tests for Hyperion's agent scheduler (PLAN_UNIFIED.md Phase 8).
+"""Unit tests for Hyperion's agent scheduler (Phase 8).
 
 The scheduler (``hyperion.scheduler``) is responsible for triggering agent runs
 on a recurring basis using standard 5-field cron expressions. This suite covers

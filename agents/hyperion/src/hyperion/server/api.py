@@ -124,7 +124,7 @@ def _db_path() -> Path:
 # ---------------------------------------------------------------------------
 
 
-# All columns added in Phase 0 (PLAN_UNIFIED.md §4.4); later phases only populate them.
+# All columns added in Phase 0 (the implementation plan §4.4); later phases only populate them.
 _NEW_COLUMNS = {
     "hitl": "TEXT",
     "pending_stage": "TEXT",

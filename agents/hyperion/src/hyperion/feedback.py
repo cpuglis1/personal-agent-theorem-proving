@@ -1,5 +1,5 @@
 """
-Human-in-the-loop feedback queue + affordances (PLAN_UNIFIED.md Phase 6).
+Human-in-the-loop feedback queue + affordances (Phase 6).
 
 Two related channels, both file-backed under ``tasks/{id}/`` so they survive an API
 restart and are visible to every surface (API, MCP, OWUI, web UI):

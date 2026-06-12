@@ -6,7 +6,7 @@ so UI edits survive container rebuilds). Tools are a named registry; agent recor
 reference tools by name and the runner resolves them per-task.
 
 Every later-phase capability plugs in here as a registry entry or a record edit —
-never as a code edit to a hardcoded agent factory. See PLAN_UNIFIED.md §4.1/§4.6.
+never as a code edit to a hardcoded agent factory. See the implementation plan §4.1/§4.6.
 """
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ def build_tools(names: list[str], task_id: str) -> list[BaseTool]:
 
 
 # ---------------------------------------------------------------------------
-# Agent record schema (PLAN_UNIFIED.md §4.1)
+# Agent record schema (the implementation plan §4.1)
 # ---------------------------------------------------------------------------
 
 

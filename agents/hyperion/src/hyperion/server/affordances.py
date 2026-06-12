@@ -1,5 +1,5 @@
 """
-Affordance schema (PLAN_UNIFIED.md §4.5) — defined in Phase 0, populated in Phase 6.
+Affordance schema (the implementation plan §4.5) — defined in Phase 0, populated in Phase 6.
 
 An affordance is a structured request from an agent for human input, rendered by all
 three surfaces (OWUI, Claude Code, web UI). Answers route through ``/approve`` (choices)

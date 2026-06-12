@@ -1,5 +1,5 @@
 """
-The single planner output contract (PLAN_UNIFIED.md §4.2).
+The single planner output contract (the implementation plan §4.2).
 
 This module is the one canonical place in Hyperion that defines, parses, and
 mutates the planner agent's structured output. The planner writes a markdown

@@ -1,5 +1,5 @@
 """
-Deviation alerts (PLAN_UNIFIED.md Phase 6).
+Deviation alerts (Phase 6).
 
 Soft-threshold warnings emitted at most once per (task, kind): a tool-loop nearing the
 hard cap, elapsed time past 70% of the wall budget, or a stage that produced no artifact.

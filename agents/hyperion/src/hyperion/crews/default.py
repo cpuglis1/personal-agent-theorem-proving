@@ -4,7 +4,7 @@ Purpose
 -------
 This module used to hold the crew-execution engine. That engine has since been
 consolidated into ``hyperion.crews.runner`` (the unified stage-runner introduced
-in PLAN_UNIFIED.md Phase 1). This file is now a thin compatibility layer that
+in Phase 1). This file is now a thin compatibility layer that
 re-exports the runner's public names so historical import paths keep resolving.
 
 Role in the system

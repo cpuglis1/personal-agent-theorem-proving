@@ -1,4 +1,4 @@
-"""Test suite for per-agent token accounting and cap enforcement (PLAN_UNIFIED.md Phase 8).
+"""Test suite for per-agent token accounting and cap enforcement (Phase 8).
 
 This module exercises ``hyperion.usage``, the subsystem that tracks how many input
 and output tokens each agent role consumes during a Hyperion task run and that

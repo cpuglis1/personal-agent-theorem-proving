@@ -25,7 +25,7 @@ Key design decisions / non-obvious context
   still make progress. :func:`rerank` therefore degrades gracefully by returning
   the original ordering (with zero scores) instead of raising.
 - Token-budget trimming: :func:`prioritize` enforces the deferred per-stage
-  input-token cap (PLAN_UNIFIED.md Phase 4) by dropping the lowest-ranked
+  input-token cap (Phase 4) by dropping the lowest-ranked
   candidates rather than aborting when retrieval is too large to fit.
 """
 
@@ -121,7 +121,7 @@ def prioritize(
     top_n: int | None = None,
     token_budget: int | None = None,
 ) -> list[str]:
-    """Shared retrieval-prioritization primitive (PLAN_UNIFIED.md Phase 4).
+    """Shared retrieval-prioritization primitive (Phase 4).
 
     Reranks ``candidates`` by relevance to ``query`` (highest first), then trims the
     lowest-scored items so the running token estimate fits ``token_budget``. This is

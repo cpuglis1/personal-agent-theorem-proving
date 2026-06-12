@@ -1,5 +1,5 @@
 """
-Unified stage-runner (PLAN_UNIFIED.md §1.2) — the single execution engine.
+Unified stage-runner (the implementation plan §1.2) — the single execution engine.
 
 It is simultaneously data-driven (agents from records), workflow-DAG-driven
 (nodes topo-sorted on their upstream edges), and resumable between nodes.

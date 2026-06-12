@@ -1,4 +1,4 @@
-"""Context-layer tests (PLAN_UNIFIED.md Phase 4): blackboard + prioritize budget.
+"""Context-layer tests (Phase 4): blackboard + prioritize budget.
 
 Purpose
 -------

@@ -1,4 +1,4 @@
-"""Integration tests for Hyperion's agent-management HTTP API (PLAN_UNIFIED.md Phase 5).
+"""Integration tests for Hyperion's agent-management HTTP API (Phase 5).
 
 Exercises the FastAPI app exposed by ``hyperion.server.api`` end-to-end via an
 in-process ASGI transport (no network sockets), covering the agent CRUD surface
