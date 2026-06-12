@@ -57,7 +57,12 @@ services:
   # LiteLLM — OpenAI-compatible proxy routing to GPT-4o, Gemini, Claude
   # ---------------------------------------------------------------------------
   litellm:
-    image: ghcr.io/berriai/litellm:main-latest
+    # Pinned at v1.82.6 — CrewAI callback hooks (P3 set_callbacks overwrite,
+    # P4 pre_call swallow) are version-sensitive; see CLAUDE.md.
+    # To upgrade: docker pull ghcr.io/berriai/litellm:main-latest, run
+    # `docker inspect <id> --format '{{.Id}}'` for the new digest, then update
+    # this line and smoke-test a Hyperion run before committing.
+    image: ghcr.io/berriai/litellm:main-latest@sha256:7c311546c25e7bb6e8cafede9fcd3d0d622ac636b5c9418befaa32e85dfb0186
     container_name: litellm
     restart: unless-stopped
     ports:
@@ -322,6 +327,10 @@ services:
     environment:
       LITELLM_BASE_URL: "http://litellm:4000/v1"
       LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"
+      # Budget-capped virtual key ($10/day, 60 rpm) — config.llm_api_key prefers
+      # this over the master key for all LLM calls, falling back to master only if
+      # it's unset/placeholder. Master key stays available for admin (alias reconcile).
+      LITELLM_HYPERION_KEY: "${LITELLM_HYPERION_KEY:-}"
       QDRANT_URL: "http://qdrant:6333"
       SEARXNG_URL: "http://searxng:8080"
       INFINITY_URL: "http://infinity:7997"
@@ -366,6 +375,10 @@ services:
     environment:
       LITELLM_BASE_URL: "http://litellm:4000/v1"
       LITELLM_MASTER_KEY: "${LITELLM_MASTER_KEY}"
+      # Budget-capped virtual key ($10/day, 60 rpm) — config.llm_api_key prefers
+      # this over the master key for all LLM calls, falling back to master only if
+      # it's unset/placeholder. Master key stays available for admin (alias reconcile).
+      LITELLM_HYPERION_KEY: "${LITELLM_HYPERION_KEY:-}"
       QDRANT_URL: "http://qdrant:6333"
       SEARXNG_URL: "http://searxng:8080"
       INFINITY_URL: "http://infinity:7997"
