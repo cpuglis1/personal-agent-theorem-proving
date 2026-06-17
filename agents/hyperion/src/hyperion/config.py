@@ -162,6 +162,14 @@ class Settings(BaseSettings):
     # trades proof quality against LLM spend (Post-work re-tunes it against measured
     # sidecar latency). Parallel to cap_tool_loop; default 3 mirrors it.
     cap_repair_iters: int = 3
+    # Prover RESEARCH vs DEPLOY policy (build plan §Phase 5 decision b; full `when`-based
+    # knob is Post-work). False (DEPLOY, default) ⇒ `verify` is exploit-first: it
+    # short-circuits on the first path that closes the goal — the historical behavior.
+    # True (RESEARCH) ⇒ `verify` does NOT short-circuit: it kernel-verifies BOTH Path A
+    # and Path B so `compare` has a genuine A-vs-B contest and `abstract` can fire on a
+    # fresh Path-B lemma even when Path A also closed (anti-starvation). The comparison
+    # IS the experiment, so the thesis runs are RESEARCH; deployments are DEPLOY.
+    prover_research_mode: bool = False
     # Max nesting depth for subworkflow nodes (a node whose kind is "subworkflow"
     # runs another workflow). The top-level run is depth 0; a subworkflow node at
     # depth d runs its child at depth d+1, and the runner aborts (CapExceeded) once

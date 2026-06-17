@@ -39,6 +39,7 @@ import logging
 from typing import Any, Optional
 
 from hyperion.config import settings
+from hyperion.crews.lemma_compare import build_triple, choose_winner, generality_score
 from hyperion.crews.native import NativeNodeCtx, register_native_handler
 from hyperion.crews.plan_contract import Subtask, parse_plan
 from hyperion.memory import lemma_bank
@@ -185,6 +186,68 @@ async def propose_repair(goal: str, candidate_source: str, errors: list[str]) ->
 
 
 # ---------------------------------------------------------------------------
+# abstraction proposal — the one generative sub-step of `abstract` (§Phase 5 (a))
+# ---------------------------------------------------------------------------
+
+
+async def propose_abstraction(
+    statement: str, proof_term: str, lean_type: str
+) -> list[dict[str, Any]]:
+    """Ask the ``abstractor`` agent for lifted lemmas, ORDERED most-general first.
+
+    The :func:`propose_repair` twin (build plan §Phase 5 decision a): a scoped, structured
+    LLM call that reads its model/persona from the ``abstractor`` agent record, so the
+    generalization model/prompt stay operator-configurable in JSON without a CrewAI crew or
+    a DAG back-edge. The :func:`abstract_handler` controller owns the re-verify + fallback
+    loop; this only proposes.
+
+    Returns a list of candidate dicts (``{source, statement, proof_term, lean_type}``)
+    ordered from boldest generalization to most conservative — the controller keeps the
+    first that still type-checks (the most-general form that re-verifies). Returns ``[]``
+    on any error so the controller falls back to the concrete verified lemma; the kernel
+    re-verifies every proposal, so an over-abstraction can never sneak into the bank.
+    """
+    from hyperion.agents.registry import load_agent
+
+    try:
+        record = load_agent("abstractor")
+    except Exception as exc:  # missing record must not crash the controller
+        logger.warning("propose_abstraction: could not load 'abstractor' agent (%s)", exc)
+        return []
+
+    system = f"{record.role}\n\n{record.goal}\n\n{record.backstory}"
+    user = (
+        f"Goal type the lemma was derived for:\n{lean_type}\n\n"
+        f"Verified lemma statement:\n{statement}\n\n"
+        f"Proof term that closed it:\n{proof_term}\n\n"
+        "Return ONLY a JSON array of candidate lemmas, MOST GENERAL FIRST, each "
+        '{"source", "statement", "proof_term", "lean_type"}.'
+    )
+    try:
+        import json
+
+        from openai import OpenAI
+
+        client = OpenAI(base_url=settings.litellm_base_url, api_key=settings.llm_api_key)
+        resp = client.chat.completions.create(
+            model=record.model_alias,
+            temperature=record.temperature,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        data = json.loads(text)
+        if isinstance(data, list):
+            return [d for d in data if isinstance(d, dict) and d.get("source")]
+        return []
+    except Exception as exc:
+        logger.warning("propose_abstraction: LLM call failed (%s) — no proposals", exc)
+        return []
+
+
+# ---------------------------------------------------------------------------
 # retrieve — Path A
 # ---------------------------------------------------------------------------
 
@@ -263,30 +326,41 @@ def _full_verdict(source: str) -> tuple[bool, list[str]]:
 async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     """The native controller: kernel verdict + deterministic routing + bounded repair.
 
-    Exploit-first routing (build plan §1a):
-      1. Try each Path-A candidate (top, then next-best) in ranked order — first that
-         closes wins.
-      2. Else Path B: check the synthesized candidate; on failure, run the repair loop —
-         delegate ONE proposal per iteration to the ``repair`` agent (:func:`propose_repair`)
-         and re-check it with the kernel, up to ``settings.cap_repair_iters``.
-      3. Exhausted ⇒ raise :class:`ProofFailed` (fail the run cleanly; never report a
-         discharge that didn't happen).
+    Routing (build plan §1a; RESEARCH/DEPLOY per §Phase 5 decision b):
+      1. Try each Path-A candidate (top, then next-best) in ranked order — the first that
+         closes is the verified Path-A lemma (``verified_a``).
+      2. Path B (always in RESEARCH mode; in DEPLOY only when Path A did not verify):
+         check the synthesized candidate; on failure run the repair loop — delegate ONE
+         proposal per iteration to the ``repair`` agent (:func:`propose_repair`) and re-check
+         it, up to ``settings.cap_repair_iters`` — yielding the verified Path-B lemma
+         (``verified_b``).
+      3. Nothing verifies ⇒ raise :class:`ProofFailed` (fail the run cleanly; never report
+         a discharge that didn't happen).
+
+    DEPLOY (``prover_research_mode`` False, default) is exploit-first: it short-circuits
+    once Path A closes and never pays to verify Path B — the historical behavior. RESEARCH
+    verifies BOTH so ``compare`` has a genuine A-vs-B contest and ``abstract`` can fire on a
+    fresh Path-B lemma even when Path A also closed (anti-starvation, decision e).
 
     The verdict is ALWAYS the kernel's: an LLM repair can be arbitrarily creative and
     still cannot hallucinate a pass, because every proposal is checked on the next line.
-    Writes the winner + the full routing trace to the blackboard for the thesis log.
+    Writes ``verified_a``/``verified_b`` (the compare inputs), a provisional ``discharged``
+    (exploit-first pick — its single-winner contract, finalized later by ``compare``), and
+    the full routing trace to the blackboard for the thesis log.
     """
     sg_id = _subgoal_id(ctx)
     goal = _goal_type(ctx, sg_id)
+    research = settings.prover_research_mode
     decision: dict[str, Any] = {
         "subgoal": sg_id, "winner_path": None, "a_attempts": 0,
-        "repair_iters": 0, "verdicts": [],
+        "repair_iters": 0, "verdicts": [], "mode": "research" if research else "deploy",
     }
 
     def _record(path: str, closed: bool) -> None:
         decision["verdicts"].append({"path": path, "ok": closed})
 
-    winner: Optional[dict[str, Any]] = None
+    verified_a: Optional[dict[str, Any]] = None
+    verified_b: Optional[dict[str, Any]] = None
 
     # ---- Path A: top candidate, then next-best, in ranked order ----
     a_list: list[dict[str, Any]] = []
@@ -301,19 +375,19 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
         closed, _errors = _full_verdict(cand["source"])
         _record("A", closed)
         if closed:
-            winner = {**cand, "path": "A"}
-            decision["winner_path"] = "A"
+            verified_a = {**cand, "path": "A"}
             break
 
     # ---- Path B: synthesized candidate, then the bounded repair loop ----
-    if winner is None:
+    # RESEARCH: always verify B (the comparison is the experiment). DEPLOY: only when
+    # Path A failed to close (exploit-first — don't pay for B once A has won).
+    if research or verified_a is None:
         cb = ctx.get(_bb_key("candidate_b", sg_id))
         if cb:
             closed, errors = _full_verdict(cb["source"])
             _record("B", closed)
             if closed:
-                winner = {**cb, "path": "B"}
-                decision["winner_path"] = "B"
+                verified_b = {**cb, "path": "B"}
             else:
                 cur_source = cb["source"]
                 for _ in range(settings.cap_repair_iters):
@@ -322,7 +396,7 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
                     closed, errors = _full_verdict(cur_source)
                     _record("B-repair", closed)
                     if closed:
-                        winner = {
+                        verified_b = {
                             "source": cur_source,
                             "statement": cb.get("statement", ""),
                             "proof_term": cur_source,
@@ -330,8 +404,16 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
                             "lean_type": cb.get("lean_type") or goal,
                             "path": "B",
                         }
-                        decision["winner_path"] = "B"
                         break
+
+    # verified_a/verified_b are the compare inputs (anti-starvation reads verified_b).
+    ctx.put(_bb_key("verified_a", sg_id), verified_a)
+    ctx.put(_bb_key("verified_b", sg_id), verified_b)
+
+    # Provisional winner — exploit-first prefers A; compare finalizes when both verified.
+    winner: Optional[dict[str, Any]] = verified_a or verified_b
+    if winner is not None:
+        decision["winner_path"] = winner["path"]
 
     ctx.put(_bb_key("verify_decision", sg_id), decision)
     if winner is None:
@@ -353,6 +435,137 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
         "ok": True,
         "winner_path": winner["path"],
         "decision": decision,
+    }
+
+
+# ---------------------------------------------------------------------------
+# compare — finalize the winner + write the thesis triple log (§Phase 5 (c)/(d))
+# ---------------------------------------------------------------------------
+
+
+async def compare_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
+    """Pick the preferred verified candidate and log the ``(retrieved, synthesized,
+    winner)`` triple — the experiment's core measurement (build plan §Phase 5 (c)/(d)).
+
+    Reads the considered candidates (``candidate_a``/``candidate_b``) and what actually
+    verified (``verified_a``/``verified_b``, written by :func:`verify_handler`). Delegates
+    the choice to the pure, deterministic :func:`lemma_compare.choose_winner` (more general
+    / shorter / reuse-first), finalizes ``discharged:<sg>`` to that winner (carrying its
+    ``generality_score`` for the bank), and writes the fixed :class:`lemma_compare.TripleLog`
+    to ``triple_log:<sg>`` for Post-work's thesis-curve harness. Pure logic lives in
+    ``lemma_compare``; this handler is just the blackboard plumbing around it.
+    """
+    sg_id = _subgoal_id(ctx)
+    goal = _goal_type(ctx, sg_id)
+    retrieved = ctx.get(_bb_key("candidate_a", sg_id))
+    synthesized = ctx.get(_bb_key("candidate_b", sg_id))
+    verified_a = ctx.get(_bb_key("verified_a", sg_id))
+    verified_b = ctx.get(_bb_key("verified_b", sg_id))
+
+    winner = choose_winner(verified_a, verified_b)
+    if winner is not None:
+        winner["lean_type"] = winner.get("lean_type") or goal
+        winner["generality_score"] = generality_score(winner)
+        ctx.put(_bb_key("discharged", sg_id), winner)  # finalize the verify provisional
+
+    mode = "research" if settings.prover_research_mode else "deploy"
+    triple = build_triple(
+        subgoal=sg_id, goal_type=goal,
+        retrieved=retrieved, synthesized=synthesized,
+        verified_a=verified_a, verified_b=verified_b,
+        winner=winner, mode=mode,
+    )
+    ctx.put(_bb_key("triple_log", sg_id), triple)
+    ctx.progress(
+        f"[compare] {sg_id}: winner Path {triple['winner_path']} "
+        f"(compared={triple['compared']})"
+    )
+    return {
+        "handler": "compare",
+        "subgoal": sg_id,
+        "winner_path": triple["winner_path"],
+        "compared": triple["compared"],
+        "scores": triple["scores"],
+    }
+
+
+# ---------------------------------------------------------------------------
+# abstract — the anti-unification abstractor (§Phase 5 (a)/(e); baseline §5/§6.6)
+# ---------------------------------------------------------------------------
+
+
+async def abstract_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
+    """Generalize a fresh verified Path-B lemma, re-verify, keep the most-general form.
+
+    The novel module (build plan §Phase 5), built as a native CONTROLLER mirroring
+    verify/repair: the deterministic re-verify + most-general-that-type-checks selection +
+    over-abstraction rejection/fallback live here; only the generative lift is delegated to
+    the ``abstractor`` agent (:func:`propose_abstraction`).
+
+    Anti-starvation trigger (decision e): fires iff ``verified_b:<sg>`` is set — i.e. Path B
+    produced a kernel-verified lemma — read INDEPENDENTLY of who won the compare. So when
+    RESEARCH mode verified both and compare picked Path A, the bespoke Path-B lemma is still
+    generalized into the bank rather than starved. In DEPLOY mode Path B isn't verified once
+    A wins ⇒ ``verified_b`` is None ⇒ this cleanly no-ops (nothing fresh to generalize).
+
+    Selection: :func:`propose_abstraction` returns proposals most-general-first; the kernel
+    (``full`` mode) re-verifies each in order and the FIRST that type-checks is kept. An
+    over-abstraction that no longer type-checks is rejected; if none type-check, fall back
+    to the concrete verified lemma. The chosen form is written to ``abstracted:<sg>`` so the
+    bank stores the generalized (or fallback) lemma.
+    """
+    sg_id = _subgoal_id(ctx)
+    goal = _goal_type(ctx, sg_id)
+    fresh_b = ctx.get(_bb_key("verified_b", sg_id))
+    if not fresh_b:
+        ctx.put(_bb_key("abstracted", sg_id), None)
+        ctx.progress(f"[abstract] {sg_id}: no fresh Path-B lemma — skipped")
+        return {"handler": "abstract", "subgoal": sg_id, "fired": False,
+                "reason": "no fresh Path-B lemma (verified_b unset)"}
+
+    statement = fresh_b.get("statement", "")
+    proof_term = fresh_b.get("proof_term", "")
+    lean_type = fresh_b.get("lean_type") or goal
+    proposals = await propose_abstraction(statement, proof_term, lean_type)
+
+    chosen: Optional[dict[str, Any]] = None
+    n_rejected = 0
+    for p in proposals:  # most-general first
+        src = p.get("source", "")
+        if not src:
+            continue
+        closed, _errors = _full_verdict(src)
+        if closed:
+            chosen = {
+                "source": src,
+                "statement": p.get("statement", statement),
+                "proof_term": p.get("proof_term", src),
+                "origin": "abstract",
+                "lean_type": p.get("lean_type") or lean_type,
+                "path": fresh_b.get("path", "B"),
+            }
+            break
+        n_rejected += 1  # over-abstraction rejected — try the next, more conservative one
+
+    if chosen is None:
+        # No proposal type-checked (or none offered) → fall back to the concrete lemma.
+        chosen = {**fresh_b, "origin": "abstract-fallback"}
+        abstracted = False
+    else:
+        abstracted = True
+    chosen["generality_score"] = generality_score(chosen)
+    ctx.put(_bb_key("abstracted", sg_id), chosen)
+    ctx.progress(
+        f"[abstract] {sg_id}: {'abstracted' if abstracted else 'fell back'} "
+        f"({n_rejected} over-abstraction(s) rejected)"
+    )
+    return {
+        "handler": "abstract",
+        "subgoal": sg_id,
+        "fired": True,
+        "abstracted": abstracted,
+        "n_rejected": n_rejected,
+        "origin": chosen["origin"],
     }
 
 
@@ -408,17 +621,23 @@ async def bank_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
         result_path.parent.mkdir(parents=True, exist_ok=True)
         result_path.write_text(assembled, encoding="utf-8")
 
-    # Store each winning lemma (loud writes — surface failures).
+    # Store each winning lemma (loud writes — surface failures). Prefer the ABSTRACTED
+    # form (§Phase 5): the abstractor's most-general type-checking generalization is what
+    # grows the bank's reuse, so store it instead of the concrete winner when present.
+    # (result.lean above is still assembled from the concrete ``discharged`` proof that
+    # fits the scaffold hole — only the banked lemma is the generalized one.)
     bank_failures: list[dict[str, str]] = []
     banked = 0
     for sg_id, win in discharged.items():
         sub = next((s for s in subtasks if s.id == sg_id), None)
+        to_bank = ctx.get(_bb_key("abstracted", sg_id)) or win
         store = lemma_bank.store_lemma(
-            win.get("statement", "") or sg_id,
-            win.get("proof_term", ""),
+            to_bank.get("statement", "") or sg_id,
+            to_bank.get("proof_term", ""),
             source_goal=ctx.request,
             verification_mode="full",
-            lean_type=(sub.lean_type if sub else None) or win.get("lean_type"),
+            generality_score=float(to_bank.get("generality_score", 0.0) or 0.0),
+            lean_type=(sub.lean_type if sub else None) or to_bank.get("lean_type"),
         )
         if store["ok"]:
             banked += 1
@@ -446,4 +665,6 @@ async def bank_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
 register_native_handler("retrieve", retrieve_handler)
 register_native_handler("skeleton_check", skeleton_check_handler)
 register_native_handler("verify", verify_handler)
+register_native_handler("compare", compare_handler)
+register_native_handler("abstract", abstract_handler)
 register_native_handler("bank", bank_handler)

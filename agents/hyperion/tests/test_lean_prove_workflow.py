@@ -28,7 +28,13 @@ from lean_mock import mock_lean
 
 from hyperion.config import settings
 from hyperion.crews import lean_handlers, runner
-from hyperion.crews.lean_handlers import ProofFailed, verify_handler
+from hyperion.crews.lean_handlers import (
+    ProofFailed,
+    abstract_handler,
+    bank_handler,
+    compare_handler,
+    verify_handler,
+)
 from hyperion.crews.native import NativeNodeCtx
 from hyperion.crews.workflows import (
     WorkflowNode,
@@ -178,13 +184,14 @@ options:
 
 
 def _two_sorry_workflow() -> WorkflowRecord:
-    """decompose → skeleton_check → (retrieve‖synth per sub-goal) → verify per sub-goal → bank.
+    """decompose → skeleton_check → (retrieve‖synth → verify → compare → abstract) per
+    sub-goal → bank.
 
-    Multi-sorry fan-out as one (retrieve‖synthesize→verify) triple per sub-goal over the
-    shared, sub-goal-namespaced blackboard — each prover native node carries its sub-goal
-    id in ``instruction``.
+    Multi-sorry fan-out as one (retrieve‖synthesize→verify→compare→abstract) chain per
+    sub-goal over the shared, sub-goal-namespaced blackboard — each prover native node
+    carries its sub-goal id in ``instruction``.
     """
-    def triple(sg: str) -> list[WorkflowNode]:
+    def chain(sg: str) -> list[WorkflowNode]:
         return [
             WorkflowNode(id=f"retrieve_{sg}", kind="native", handler="retrieve",
                          instruction=sg, upstream=["skeleton_check"]),
@@ -192,16 +199,20 @@ def _two_sorry_workflow() -> WorkflowRecord:
                          instruction=sg, upstream=["skeleton_check"]),
             WorkflowNode(id=f"verify_{sg}", kind="native", handler="verify",
                          instruction=sg, upstream=[f"retrieve_{sg}", f"synth_{sg}"]),
+            WorkflowNode(id=f"compare_{sg}", kind="native", handler="compare",
+                         instruction=sg, upstream=[f"verify_{sg}"]),
+            WorkflowNode(id=f"abstract_{sg}", kind="native", handler="abstract",
+                         instruction=sg, upstream=[f"compare_{sg}"]),
         ]
 
     nodes = [
         WorkflowNode(id="decompose", kind="plan", agent="decomposer", upstream=[]),
         WorkflowNode(id="skeleton_check", kind="native", handler="skeleton_check",
                      upstream=["decompose"]),
-        *triple("h1"),
-        *triple("h2"),
+        *chain("h1"),
+        *chain("h2"),
         WorkflowNode(id="bank", kind="native", handler="bank",
-                     upstream=["verify_h1", "verify_h2"]),
+                     upstream=["abstract_h1", "abstract_h2"]),
     ]
     return WorkflowRecord(id="lean-prove-2sorry", name="2-sorry", nodes=nodes)
 
@@ -236,6 +247,12 @@ def _mock_prover_run(tasks_dir):
     registry = {"lean-prove-2sorry": _two_sorry_workflow()}
     store = MagicMock(return_value={"ok": True, "id": "pt", "error": None})
 
+    # The generative lift is delegated; patch it so abstract runs LLM-free (the kernel,
+    # mocked ok below, still judges the proposal — propose_abstraction can't fake a pass).
+    abstraction = AsyncMock(return_value=[{
+        "source": "theorem gen : G := by trivial", "statement": "theorem gen : G",
+        "proof_term": "by trivial", "lean_type": "∀ x, G"}])
+
     with patch.object(settings, "tasks_dir", tasks_dir), \
          patch.object(runner, "build_agent", MagicMock()), \
          patch.object(runner, "load_agent", MagicMock()), \
@@ -245,6 +262,7 @@ def _mock_prover_run(tasks_dir):
          patch("hyperion.crews.workflows.resolve_workflow",
                new=MagicMock(side_effect=lambda wid: registry[wid])), \
          patch.object(lean_handlers, "retrieve_applicable_lemmas", _fake_retrieve), \
+         patch.object(lean_handlers, "propose_abstraction", abstraction), \
          patch("hyperion.memory.lemma_bank.store_lemma", store), \
          patch("hyperion.server.meta_tasks.run_meta_tasks", new=AsyncMock()), \
          mock_lean(ok=True, targets=_VERIFY_TARGET):
@@ -297,6 +315,79 @@ async def test_bank_surfaces_a_failed_write(tmp_path):
         assert res["n_banked"] == 0
         assert all(f["error"] == "qdrant down" for f in res["bank_failures"])
         assert (tmp_path / "prove2" / "artifacts" / "result.lean").exists()
+
+
+# ---------------------------------------------------------------------------
+# Phase 5 — compare/abstract wiring (after verify, before bank) + anti-starvation
+# ---------------------------------------------------------------------------
+
+
+def _native_ctx(task_id: str, node_id: str, handler: str, sg: str = "h1",
+                request: str = "prove P ∧ Q") -> NativeNodeCtx:
+    node = WorkflowNode(id=node_id, kind="native", handler=handler,
+                        instruction=sg, upstream=[])
+    return NativeNodeCtx(task_id=task_id, node=node, request=request, progress_callback=None)
+
+
+def test_compare_and_abstract_run_between_verify_and_bank():
+    """In the shipped ``lean-prove`` workflow, ``compare`` runs after ``verify``,
+    ``abstract`` after ``compare``, and ``bank`` after ``abstract`` (bank receives the
+    abstracted form)."""
+    wf = load_workflow("lean-prove")
+    waves = runner._wave_groups(topo_sort(wf.nodes))
+    wave_of = {n.id: wi for wi, wave in enumerate(waves) for n in wave}
+
+    assert wave_of["compare"] > wave_of["verify"]
+    assert wave_of["abstract"] > wave_of["compare"]
+    assert wave_of["bank"] > wave_of["abstract"]
+    bank = next(n for n in wf.nodes if n.id == "bank")
+    assert bank.upstream == ["abstract"]
+
+
+@pytest.mark.anyio
+async def test_research_mode_abstracts_path_b_even_when_path_a_wins_and_bank_stores_it(tmp_path):
+    """RESEARCH mode end-to-end over verify→compare→abstract→bank for one sub-goal:
+      - verify kernel-verifies BOTH paths (verified_a AND verified_b set);
+      - compare logs a genuine A-vs-B contest (``compared``) and Path A wins;
+      - abstract STILL fires on the fresh Path-B lemma (anti-starvation, decision e);
+      - bank stores the ABSTRACTED (generalized) form, not the concrete winner.
+    """
+    with patch.object(settings, "tasks_dir", tmp_path), \
+         patch.object(settings, "prover_research_mode", True):
+        (tmp_path / "r1").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "r1" / "plan.md").write_text(_PLAN_MD, encoding="utf-8")
+        context_put("r1", "candidate_a:h1",
+                    {"source": "a_src", "statement": "lem_P", "proof_term": "pa", "lean_type": "P"})
+        context_put("r1", "candidate_b:h1",
+                    {"source": "b_src", "statement": "synth_P", "proof_term": "pb", "lean_type": "P"})
+
+        proposal = [{"source": "theorem g {α} (x : α) : x = x := rfl",
+                     "statement": "theorem g {α} (x : α) : x = x",
+                     "proof_term": "rfl", "lean_type": "∀ {α} (x : α), x = x"}]
+        store = MagicMock(return_value={"ok": True, "id": "pt", "error": None})
+
+        with patch.object(lean_handlers, "propose_abstraction", AsyncMock(return_value=proposal)), \
+             patch("hyperion.memory.lemma_bank.store_lemma", store), \
+             mock_lean(ok=True, targets=_VERIFY_TARGET):
+            await verify_handler(_native_ctx("r1", "verify", "verify"))
+            # RESEARCH: both paths were kernel-verified.
+            assert context_get("r1", "verified_a:h1") is not None
+            assert context_get("r1", "verified_b:h1") is not None
+
+            compare_res = await compare_handler(_native_ctx("r1", "compare", "compare"))
+            assert compare_res["compared"] is True       # genuine A-vs-B contest
+            assert compare_res["winner_path"] == "A"      # reuse-first tie → Path A wins
+
+            abstract_res = await abstract_handler(_native_ctx("r1", "abstract", "abstract"))
+            assert abstract_res["fired"] is True          # fired despite Path A winning
+            assert abstract_res["abstracted"] is True
+
+            await bank_handler(_native_ctx("r1", "bank", "bank"))
+
+        # The bank received the generalized lemma (the abstracted form), not "lem_P".
+        assert store.call_count == 1
+        banked_statement = store.call_args_list[0].args[0]
+        assert banked_statement == "theorem g {α} (x : α) : x = x"
 
 
 # ---------------------------------------------------------------------------
