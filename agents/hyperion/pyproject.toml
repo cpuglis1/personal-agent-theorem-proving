@@ -9,18 +9,16 @@ authors = [
 requires-python = ">=3.12"
 dependencies = [
     "aiosqlite>=0.20",
-    "crewai==0.86.0",  # exact pin: P3/P4 callback workarounds are version-sensitive; test before bumping
-    "crewai-tools>=0.20.0",
     "fastapi>=0.115",
     "httpx>=0.27",
     "langfuse>=2.53",
+    "litellm>=1.40",  # the owned agent loop calls litellm.completion directly (Phase 2)
     "mcp>=1.6",
     "openai>=1.30",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
     "python-dotenv>=1.0",
     "qdrant-client>=1.9",
-    "setuptools<70",  # crewai 0.86.0 imports pkg_resources; setuptools>=70 removes it
     "uvicorn[standard]>=0.30",
 ]
 

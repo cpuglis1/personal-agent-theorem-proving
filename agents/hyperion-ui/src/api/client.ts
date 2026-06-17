@@ -193,7 +193,8 @@ export type TaskStatus =
   | "awaiting_approval"
   | "awaiting_input"
   | "done"
-  | "failed";
+  | "failed"
+  | "cancelled";
 
 /**
  * Live state of a single task as returned by submit / poll / approve endpoints.
@@ -658,6 +659,21 @@ export function useFeedbackTask(id: string) {
         method: "POST",
         body: JSON.stringify({ message }),
       }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["task", id] }),
+  });
+}
+
+/**
+ * Mutation hook: cancel a non-terminal run. The backend marks it `cancelled`
+ * immediately; invalidates that task's query on success so the UI reflects the
+ * stop without waiting for the next poll.
+ * @param id - The task id to stop.
+ * @returns Mutation whose `mutate()` returns the updated TaskResponse.
+ */
+export function useStopTask(id: string) {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => req<TaskResponse>(`/tasks/${id}/stop`, { method: "POST" }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["task", id] }),
   });
 }

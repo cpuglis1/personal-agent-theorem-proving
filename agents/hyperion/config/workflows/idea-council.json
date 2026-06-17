@@ -10,7 +10,7 @@
       "kind": "work",
       "upstream": [],
       "gate_before": false,
-      "instruction": null,
+      "instruction": "Objective: Estimate the market scope and size for the idea's domain.\n\nInstructions:\n\nDefine the Market: Identify the overall market relevant to the idea. Specify the segment(s) of the market the idea targets.\nQuantify the Market Size: Use industry reports, financial analyses, and statistical data to estimate the total revenue potential of the market.\nSegment the Market: Break down the market into smaller segments based on characteristics like geography, demographics, and customer needs.\nAssess Growth Potential: Identify trends that could impact growth, including socio-economic factors and technological advancements.\nOutput Format:\n\nSummary of total market size and key segments.\nSupporting data and references to sources.\nCharts or graphs illustrating market segments and growth trends.",
       "when": null,
       "position": {
         "x": 461.0,
@@ -24,7 +24,7 @@
       "kind": "work",
       "upstream": [],
       "gate_before": false,
-      "instruction": null,
+      "instruction": "Objective: Develop expertise in the domain, understand current operations, gaps, and pitfalls.\n\nInstructions:\n\nIndustry Overview: Describe how the industry operates, including key processes, stakeholders, and technologies.\nIdentify Knowledge Gaps: Analyze where industry information or processes are lacking and highlight potential areas of innovation.\nUnderstand Pitfalls: Research common challenges and failures within the industry.\nProfile Key Players: Identify leading companies or influencers and summarize their impact or contributions.\nOutput Format:\n\nDetailed industry operational summary.\nIdentification of gaps and opportunities for innovation.\nList of common pitfalls with explanations.\nProfiles of key industry players.",
       "when": null,
       "position": {
         "x": 696.0,
@@ -32,13 +32,13 @@
       }
     },
     {
-      "id": "feasibility",
-      "agent": "developer",
+      "id": "legal-expert",
+      "agent": "researcher",
       "workflow": null,
       "kind": "work",
       "upstream": [],
       "gate_before": false,
-      "instruction": null,
+      "instruction": "Objective: Understand the legal requirements and pitfalls in the domain of the idea.\n\nInstructions:\n\nIdentify Relevant Regulations: Research laws and regulations applicable to the industry.\nAnalyze Compliance Requirements: Summarize what companies must do to comply with laws.\nIdentify Legal Pitfalls: Highlight common legal challenges businesses face in this domain.\nBest Practices: Collect industry best practices for navigating legal requirements.\nOutput Format:\n\nComprehensive list of applicable laws and regulations.\nSummary of compliance obligations.\nList of potential legal pitfalls and best practices.",
       "when": null,
       "position": {
         "x": 935.0,
@@ -52,7 +52,7 @@
       "kind": "work",
       "upstream": [],
       "gate_before": false,
-      "instruction": null,
+      "instruction": "Objective: Observes broader market trends to understand current demand, practices, and public interest.\n\nInstructions:\n\nIdentify Current Trends: Research current consumer and market trends using reports, surveys, and data analysis.\nAnalyze Historical Data: Compare past trends to determine how market dynamics have changed.\nForecast Future Trends: Use predictive analytics and expert opinions to forecast future changes in the market.\nPublic Interest and Sentiment: Gauge public sentiment and interest using social media, forums, and news analysis.\nOutput Format:\n\nSummary of current and historical market trends.\nForecast of future trends with supporting analysis.\nInsights into public sentiment and interest areas.",
       "when": null,
       "position": {
         "x": 1158.0,
@@ -66,7 +66,7 @@
       "kind": "work",
       "upstream": [],
       "gate_before": false,
-      "instruction": null,
+      "instruction": "Objective: Analyze competitors, their strengths, weaknesses, and market presence.\n\nInstructions:\n\nIdentify Competitors: List direct and indirect competitors in the market.\nAnalyze Market Share: Research competitors' market penetration and customer base.\nEvaluate Strengths and Weaknesses: Compare competitors based on various factors such as offerings, pricing, customer satisfaction, and innovation.\nIdentify Differentiators: Highlight what the idea can do differently or better than existing players.\nOutput Format:\n\nList of competitors with market share and penetration data.\nSWOT analysis (Strengths, Weaknesses, Opportunities, Threats) for key competitors.\nSuggestions for differentiation opportunities.",
       "when": null,
       "position": {
         "x": 1387.0,
@@ -79,14 +79,14 @@
       "workflow": null,
       "kind": "synthesize",
       "upstream": [
-        "feasibility",
+        "legal-expert",
         "domain-expert",
         "market-sizing",
         "market-trends",
         "competitive-landscape"
       ],
       "gate_before": false,
-      "instruction": null,
+      "instruction": "Objective: Combine findings from multiple research agents into a cohesive summary.\n\nPrompt:\n\nGather Research Inputs: Collect all reports from different research agents.\nIdentify Key Insights: Extract the most significant insights, highlighting similarities and differences across reports.\nIntegrate Data: Synthesize numerical data and qualitative insights into a unified narrative.\nHighlight Gaps: Identify any gaps or conflicting information within the research.\nOutput Format:\n\nExecutive summary of key insights from all research reports.\nHarmonized analysis with supporting data.\nHighlighted areas requiring further investigation.",
       "when": null,
       "position": {
         "x": 935.0,
@@ -102,7 +102,7 @@
         "research-synthesizer"
       ],
       "gate_before": false,
-      "instruction": null,
+      "instruction": "Objective: Highlight potential drawbacks and risks of the idea based on research.\n\nPrompt:\n\nIdentify Weaknesses: Point out weaknesses and threats identified in the research.\nHighlight Pitfalls: Bring attention to any legal, market, or operational risks.\nCompare Competitors: Discuss areas where competitors may have an advantage.\nUse Evidence: Back up critiques with data and examples from the research.\nOutput Format:\n\nAnalytical argument focused on potential issues and risks.\nList of weaknesses, threats, and competitive disadvantages.\nEvidence-backed supporting points.",
       "when": null,
       "position": {
         "x": 1071.0,
@@ -118,7 +118,7 @@
         "research-synthesizer"
       ],
       "gate_before": false,
-      "instruction": null,
+      "instruction": "Objective: Emphasize positive aspects of the idea based on research.\n\nPrompt:\n\nIdentify Strengths: Highlight the strengths and opportunities found in the research.\nAlign with Trends: Illustrate how the idea aligns with current market trends and future forecasts.\nEmphasize Unique Value Proposition: Focus on what makes the idea stand out and potential benefits to stakeholders.\nCite Successes: Reference any positive data or case studies supporting the idea's success.\nOutput Format:\n\nPersuasive argument emphasizing the idea’s potential and benefits.\nList of strengths, opportunities, and alignment with market trends.\nEvidence-backed supporting points.",
       "when": null,
       "position": {
         "x": 812.0,
@@ -135,7 +135,7 @@
         "advocate"
       ],
       "gate_before": false,
-      "instruction": null,
+      "instruction": "Objective: Develop an implementation and go-to-market plan, balancing advocate and critic perspectives.\n\nPrompt:\n\nSet Objectives: Define clear objectives and goals for the implementation.\nCreate Strategy: Develop strategies that leverage strengths and mitigate weaknesses highlighted by the advocate and critic.\nOutline Steps: Provide a step-by-step implementation roadmap, including timelines and key milestones.\nRisk Management: Address potential risks with mitigation strategies.\nOutput Format:\n\nDetailed implementation and go-to-market plan with objectives and timelines.\nStrategies for leveraging strengths and managing risks.\nRisk mitigation plans.",
       "when": null,
       "position": {
         "x": 812.0,
@@ -152,7 +152,7 @@
         "advocate"
       ],
       "gate_before": false,
-      "instruction": null,
+      "instruction": "Objective: Provide an objective evaluation of whether to pursue the idea.\n\nPrompt:\n\nAnalyze Research Findings: Review synthesized research along with advocate and critic perspectives.\nEvaluate Feasibility: Assess the viability and potential return on investment for the idea.\nBalance Perspectives: Objectively weigh strengths against weaknesses and risks.\nMake Recommendation: Provide a clear recommendation on whether to proceed with the idea.\nOutput Format:\n\nObjective evaluation with consideration of all perspectives.\nFeasibility assessment and potential ROI analysis.\nFinal recommendation with rationale.",
       "when": null,
       "position": {
         "x": 1071.0,
@@ -169,7 +169,7 @@
         "assessor"
       ],
       "gate_before": false,
-      "instruction": null,
+      "instruction": "Objective: Deliver a final summary and outline the go-to-market plan if the idea is recommended.\n\nPrompt:\n\nSummarize Assessor’s Verdict: Clearly state the assessor’s conclusion and recommendation.\nOutline Planner’s Plan: Summarize the key points from the planner’s implementation and go-to-market plan.\nIntegrate Feedback: Ensure all recommendations and plans are in line with assessed results.\nOutput Format:\n\nConcise summary of the assessor's verdict and rationale.\nA comprehensive, yet focused brief that serves as a guide for of the go-to-market plan from the planner.\nFinal action items or next steps based on assessment.",
       "when": null,
       "position": {
         "x": 945.0,

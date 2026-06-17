@@ -29,12 +29,7 @@ Key design decisions / non-obvious context
 from __future__ import annotations
 
 import importlib.util
-import sys
 from pathlib import Path
-from typing import Any
-
-from crewai.tools import BaseTool
-from pydantic import Field
 
 # Load agents/_shared/qdrant_client.py via importlib to avoid name collision
 # with the installed `qdrant-client` package.
@@ -57,8 +52,8 @@ from hyperion.tools.reranker import rerank
 _SECOND_BRAIN_TOKEN_BUDGET = 6000
 
 
-class SecondBrainTool(BaseTool):
-    """CrewAI tool that performs reranked semantic search over the second brain.
+class SecondBrainTool:
+    """Tool that performs reranked semantic search over the second brain.
 
     Registered with Hyperion agents so they can retrieve personal notes/knowledge
     on demand. The ``name`` and ``description`` fields are surfaced to the LLM as
@@ -67,16 +62,26 @@ class SecondBrainTool(BaseTool):
     Attributes:
         name: Tool identifier exposed to the agent/LLM ("search_second_brain").
         description: Natural-language guidance shown to the LLM on when/how to call.
+        parameters: JSON schema for the tool's arguments.
         top_k: Number of results to keep after reranking (post-rerank cutoff).
     """
 
-    name: str = "search_second_brain"
-    description: str = (
+    name = "search_second_brain"
+    description = (
         "Semantic search over the personal Notion second brain. "
         "Use for background knowledge, past notes, career goals, projects, and investments. "
         "Input: a natural-language query string."
     )
-    top_k: int = Field(default=5, description="Number of results to return after reranking")
+    parameters = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Natural-language search query."}
+        },
+        "required": ["query"],
+    }
+
+    def __init__(self, top_k: int = 5):
+        self.top_k = top_k
 
     def _run(self, query: str) -> str:
         """Search the second brain and return formatted, budget-trimmed results.
