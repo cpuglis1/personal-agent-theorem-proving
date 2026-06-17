@@ -108,6 +108,11 @@ class Settings(BaseSettings):
 
     # Qdrant
     qdrant_url: str = "http://localhost:6333"
+    # Collection names are config-driven (not hardcoded literals) so the store can
+    # be re-namespaced per deployment/domain. ``qdrant_memory_collection`` backs the
+    # episodic memory; ``qdrant_lemma_collection`` backs the prover's lemma bank.
+    qdrant_memory_collection: str = "hyperion_memory"
+    qdrant_lemma_collection: str = "lemma_bank"
 
     # SearXNG
     searxng_url: str = "http://localhost:8888"

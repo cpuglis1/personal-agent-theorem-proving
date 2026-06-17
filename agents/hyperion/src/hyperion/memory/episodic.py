@@ -42,7 +42,15 @@ from hyperion.config import settings
 
 logger = logging.getLogger(__name__)
 
-_COLLECTION = "hyperion_memory"
+
+def _collection() -> str:
+    """Qdrant collection backing episodic memory.
+
+    Config-driven (``settings.qdrant_memory_collection``) rather than a hardcoded
+    literal so the store can be re-namespaced per deployment/domain. Read on each
+    call so a test patching ``settings`` takes effect without reimport.
+    """
+    return settings.qdrant_memory_collection
 
 
 def _get_clients():
@@ -87,8 +95,9 @@ def store_episode(
                 **(metadata or {}),
             },
         )
-        qdrant.upsert(collection_name=_COLLECTION, points=[point])
-        logger.info("Stored episode for task %s in %s", task_id, _COLLECTION)
+        collection = _collection()
+        qdrant.upsert(collection_name=collection, points=[point])
+        logger.info("Stored episode for task %s in %s", task_id, collection)
     except Exception as exc:
         logger.warning("Failed to store episode: %s", exc)
 
@@ -98,7 +107,7 @@ def recall_similar_tasks(query: str, limit: int = 5) -> list[dict[str, Any]]:
         oai, qdrant = _get_clients()
         vector = _embed(oai, query)
         response = qdrant.query_points(
-            collection_name=_COLLECTION,
+            collection_name=_collection(),
             query=vector,
             limit=limit,
             score_threshold=0.3,
