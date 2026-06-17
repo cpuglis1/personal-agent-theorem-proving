@@ -108,12 +108,21 @@ class Settings(BaseSettings):
 
     # Qdrant
     qdrant_url: str = "http://localhost:6333"
+    # Collection names are config-driven (not hardcoded literals) so the store can
+    # be re-namespaced per deployment/domain. ``qdrant_memory_collection`` backs the
+    # episodic memory; ``qdrant_lemma_collection`` backs the prover's lemma bank.
+    qdrant_memory_collection: str = "hyperion_memory"
+    qdrant_lemma_collection: str = "lemma_bank"
 
     # SearXNG
     searxng_url: str = "http://localhost:8888"
 
     # Infinity reranker
     infinity_url: str = "http://localhost:7997"
+
+    # Lean verifier sidecar (the prover's oracle). A long-lived service on ai-net
+    # with a warm Mathlib cache; the lean_verify tool POSTs candidate sources here.
+    lean_url: str = "http://localhost:8900"
 
     # Langfuse
     langfuse_public_key: str = ""
@@ -146,6 +155,13 @@ class Settings(BaseSettings):
     cap_output_tokens: int = 80_000
     cap_tool_loop: int = 3              # consecutive identical calls before abort
     cap_wall_seconds: int = 900         # 15 min
+    # Per-request timeout (seconds) passed to litellm.completion. This is the ONLY
+    # mechanism that can interrupt a stalled upstream LLM call from *inside* the
+    # executor thread — the wall budget (cap_wall_seconds) is enforced by asyncio
+    # between stages and cannot cancel an already-running thread. Each call is
+    # bounded by min(remaining wall budget, cap_per_call_seconds); a breach raises
+    # litellm.Timeout, which propagates up and fails the run instead of hanging.
+    cap_per_call_seconds: int = 180     # 3 min
     # Max nesting depth for subworkflow nodes (a node whose kind is "subworkflow"
     # runs another workflow). The top-level run is depth 0; a subworkflow node at
     # depth d runs its child at depth d+1, and the runner aborts (CapExceeded) once

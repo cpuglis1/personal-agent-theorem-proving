@@ -16,9 +16,6 @@ import json
 import logging
 from typing import Any
 
-from crewai.tools import BaseTool
-from pydantic import Field
-
 from hyperion.config import settings
 
 logger = logging.getLogger(__name__)
@@ -89,30 +86,48 @@ def context_get(task_id: str, key: str | None = None) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# CrewAI tool wrappers (task-scoped via the registry factory)
+# Tool wrappers (task-scoped via the registry factory)
 # ---------------------------------------------------------------------------
 
 
-class ContextPutTool(BaseTool):
-    name: str = "context_put"
-    description: str = (
+class ContextPutTool:
+    name = "context_put"
+    description = (
         "Save a fact to the shared task context so later stages can read it. "
-        "Input: JSON with keys 'key' (string) and 'value' (string)."
+        "Input: a 'key' (string) and a 'value' (string)."
     )
-    task_id: str = Field(...)
+    parameters = {
+        "type": "object",
+        "properties": {
+            "key": {"type": "string", "description": "The context key to set."},
+            "value": {"type": "string", "description": "The value to store."},
+        },
+        "required": ["key", "value"],
+    }
+
+    def __init__(self, task_id: str):
+        self.task_id = task_id
 
     def _run(self, key: str, value: str = "") -> str:
         context_put(self.task_id, key, value)
         return f"Saved context key {key!r}."
 
 
-class ContextGetTool(BaseTool):
-    name: str = "context_get"
-    description: str = (
+class ContextGetTool:
+    name = "context_get"
+    description = (
         "Read shared task context written by earlier stages. "
         "Input: a key name, or empty to list all keys."
     )
-    task_id: str = Field(...)
+    parameters = {
+        "type": "object",
+        "properties": {
+            "key": {"type": "string", "description": "The key to read, or empty for all keys."}
+        },
+    }
+
+    def __init__(self, task_id: str):
+        self.task_id = task_id
 
     def _run(self, key: str = "") -> str:
         if not key.strip():
@@ -122,13 +137,22 @@ class ContextGetTool(BaseTool):
         return "(not set)" if value is None else json.dumps(value, ensure_ascii=False)
 
 
-class RecallSimilarTasksTool(BaseTool):
-    name: str = "recall_similar_tasks"
-    description: str = (
+class RecallSimilarTasksTool:
+    name = "recall_similar_tasks"
+    description = (
         "Search memory of past completed tasks for ones similar to a query. "
         "Use before planning to reuse prior work. Input: a natural-language query."
     )
-    task_id: str = Field(default="")
+    parameters = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Natural-language query."}
+        },
+        "required": ["query"],
+    }
+
+    def __init__(self, task_id: str = ""):
+        self.task_id = task_id
 
     def _run(self, query: str) -> str:
         from hyperion.memory.episodic import recall_similar_tasks

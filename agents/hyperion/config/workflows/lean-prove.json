@@ -1,0 +1,126 @@
+{
+  "id": "lean-prove",
+  "name": "Lean Prove (decompose → retrieve‖synthesize → verify → compare → abstract → bank)",
+  "description": "The full Phase-5 prover loop. The decomposer writes a have-chain scaffold of typed sub-goals; skeleton_check type-checks it in skeleton mode; then for the sub-goal, retrieve (Path A) and synthesize (Path B) run in ONE wave (they share skeleton_check as their only upstream, so _wave_groups runs them concurrently = Path A ‖ Path B for free); verify lists BOTH as upstream and acts as the native controller — the kernel is the verdict, the handler owns Path-A-next-best vs Path-B-repair routing and the bounded repair loop (delegating only the proposal to the repair agent), and (in RESEARCH mode) verifies both paths so compare has a genuine contest; compare picks the more-general/shorter winner deterministically and logs the (retrieved, synthesized, winner) thesis triple; abstract is a native controller that — whenever Path B produced a fresh verified lemma (anti-starvation, even when Path A won) — lifts its constants to variables via the abstractor agent, re-verifies, and keeps the most-general form that type-checks (falling back on over-abstraction); bank assembles the sorry-free result.lean from the concrete winner and stores the abstracted (generalized) lemma. Multi-sorry theorems fan out as one (retrieve‖synthesize→verify→compare→abstract) chain per sub-goal over the shared, sub-goal-namespaced blackboard.",
+  "nodes": [
+    {
+      "id": "decompose",
+      "agent": "decomposer",
+      "kind": "plan",
+      "upstream": [],
+      "gate_before": false,
+      "instruction": null,
+      "when": null,
+      "position": {
+        "x": 40.0,
+        "y": 40.0
+      }
+    },
+    {
+      "id": "skeleton_check",
+      "handler": "skeleton_check",
+      "kind": "native",
+      "upstream": [
+        "decompose"
+      ],
+      "gate_before": false,
+      "instruction": null,
+      "when": null,
+      "position": {
+        "x": 40.0,
+        "y": 170.0
+      }
+    },
+    {
+      "id": "retrieve",
+      "handler": "retrieve",
+      "kind": "native",
+      "upstream": [
+        "skeleton_check"
+      ],
+      "gate_before": false,
+      "instruction": null,
+      "when": null,
+      "position": {
+        "x": 40.0,
+        "y": 300.0
+      }
+    },
+    {
+      "id": "synthesize",
+      "agent": "lemma_synthesizer",
+      "kind": "work",
+      "upstream": [
+        "skeleton_check"
+      ],
+      "gate_before": false,
+      "instruction": "Read plan.md from the workspace. Take the first active sub-goal's lean_type as your goal. Write a complete, self-contained Lean 4 proof of exactly that proposition with NO sorry, and save it to the shared task context under the key 'candidate_b' as a JSON object {\"source\", \"statement\", \"proof_term\", \"origin\": \"synthesize\"} via the context_put tool.",
+      "when": null,
+      "position": {
+        "x": 300.0,
+        "y": 300.0
+      }
+    },
+    {
+      "id": "verify",
+      "handler": "verify",
+      "kind": "native",
+      "upstream": [
+        "retrieve",
+        "synthesize"
+      ],
+      "gate_before": false,
+      "instruction": null,
+      "when": null,
+      "position": {
+        "x": 170.0,
+        "y": 430.0
+      }
+    },
+    {
+      "id": "compare",
+      "handler": "compare",
+      "kind": "native",
+      "upstream": [
+        "verify"
+      ],
+      "gate_before": false,
+      "instruction": null,
+      "when": null,
+      "position": {
+        "x": 170.0,
+        "y": 560.0
+      }
+    },
+    {
+      "id": "abstract",
+      "handler": "abstract",
+      "kind": "native",
+      "upstream": [
+        "compare"
+      ],
+      "gate_before": false,
+      "instruction": null,
+      "when": null,
+      "position": {
+        "x": 170.0,
+        "y": 690.0
+      }
+    },
+    {
+      "id": "bank",
+      "handler": "bank",
+      "kind": "native",
+      "upstream": [
+        "abstract"
+      ],
+      "gate_before": false,
+      "instruction": null,
+      "when": null,
+      "position": {
+        "x": 170.0,
+        "y": 820.0
+      }
+    }
+  ]
+}

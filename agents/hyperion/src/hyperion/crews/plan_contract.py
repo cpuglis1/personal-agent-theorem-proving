@@ -51,10 +51,16 @@ class Subtask(BaseModel):
         id: Stable identifier for the subtask (planner-assigned).
         description: Human-readable description of what the subtask entails.
             Defaults to empty so older/looser planner output still validates.
+        lean_type: The Lean 4 type of this sub-goal — the proposition a
+            ``have <id> : <lean_type> := sorry`` in the scaffold must close
+            (the prover's Path-A retrieval query and Path-B synthesis target).
+            Defaults to empty so non-prover plans (and older prover plans the
+            decomposer hasn't fully learned) still validate.
     """
 
     id: str
     description: str = ""
+    lean_type: str = ""
 
 
 class PlanOption(BaseModel):
@@ -98,6 +104,11 @@ class PlanFrontmatter(BaseModel):
             from the richer :class:`Subtask` objects nested under options).
         options: Candidate :class:`PlanOption` approaches (Phase 3 HITL).
         selected_option: ``id`` of the chosen option, if one has been selected.
+        scaffold: The prover's have-chain proof text (one
+            ``have <id> : <lean_type> := sorry`` per sub-goal, composed to the
+            target theorem) that the Phase-1 skeleton check type-checks in
+            ``skeleton`` mode. ``None`` for non-prover plans (and prover plans
+            the decomposer hasn't fully learned), so the contract stays tolerant.
     """
 
     task_id: Optional[str] = None
@@ -109,6 +120,7 @@ class PlanFrontmatter(BaseModel):
     subtasks: list[str] = Field(default_factory=list)
     options: list[PlanOption] = Field(default_factory=list)
     selected_option: Optional[str] = None
+    scaffold: Optional[str] = None                 # have-chain proof text (prover)
 
     def active_subtasks(self) -> list[Subtask]:
         """Return the subtasks of whichever option is currently in effect.
@@ -190,11 +202,13 @@ def parse_plan(task_id: str) -> PlanFrontmatter:
         # Tolerate option shapes the planner hasn't learned yet: salvage the
         # fields we can validate cheaply (coercing types defensively) and drop
         # the parts that failed validation rather than losing the whole plan.
+        scaffold = data.get("scaffold")
         return PlanFrontmatter(
             task_type=tt,
             keywords=list(data.get("keywords") or []),
             needs_review=bool(data.get("needs_review", False)),
             subtasks=[str(s) for s in (data.get("subtasks") or [])],
+            scaffold=str(scaffold) if scaffold is not None else None,
         )
 
 

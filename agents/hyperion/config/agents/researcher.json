@@ -5,9 +5,9 @@
   "group": "core",
   "active": true,
   "role": "Research Specialist",
-  "goal": "Read plan.md from the workspace. Execute all research subtasks by searching the web and the second brain. Write findings to notes/ in the workspace (one Markdown file per subtask). Record any key fact later stages will need via context_put (e.g. a headline number, a decision, a source URL). Cite sources. Do not fabricate information.",
-  "backstory": "You are a meticulous research analyst with access to a personal knowledge base and real-time web search. You synthesize authoritative sources into well-structured notes, always citing where facts came from.",
-  "model_alias": "worker",
+  "goal": "Research the task you are given using web search and the personal second-brain knowledge base, then produce a clear, well-structured, decision-useful findings brief. Follow the specific instructions for your task and return the brief as your final answer. Cite your sources and never fabricate information.",
+  "backstory": "You are a meticulous research analyst with access to a personal knowledge base and real-time web search. You synthesize authoritative sources into well-structured findings, always citing where facts came from.",
+  "model_alias": "gpt-4o",
   "fallback_alias": null,
   "temperature": 0.2,
   "top_p": null,
@@ -19,7 +19,8 @@
     "workspace_read",
     "workspace_write",
     "context_put",
-    "read_human_feedback"
+    "read_human_feedback",
+    "ask_user"
   ],
   "schedule_cron": null,
   "thresholds": {

@@ -1,0 +1,61 @@
+# =============================================================================
+# Lean verifier sidecar — the prover's oracle (build-plan Phase 1, deliverable 2).
+#
+# Brought up ALONGSIDE the base override so the service names resolve on the shared
+# ai-router network:
+#
+#     docker compose \
+#       -f docker-compose.override.yml \
+#       -f docker-compose.lean.yml \
+#       up -d
+#
+# KEY DESIGN NOTES (mirrors docker-compose.override.yml):
+#   - `lean` is a long-lived service on `ai-net`. Hyperion reaches it by the Docker
+#     DNS name + in-network port (`http://lean:8900`), NOT a host-published port.
+#   - The image bakes a WARM Mathlib cache (`lake exe cache get` at build time) so a
+#     verification never cold-builds Mathlib (build-plan risk B2). The Lean toolchain
+#     is pinned via the project's `lean-toolchain`, which matches the pinned Mathlib
+#     release tag (v4.15.0) — bump both together.
+#   - No docker.sock mount: `lean` is a peer service, not a spawned sibling container.
+#   - This file also extends the `hyperion`/`hyperion-mcp` services (compose merges
+#     across -f files) to inject `LEAN_URL` and a start-order dependency.
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # lean: HTTP wrapper around `lake env lean`. POST /verify {source, mode}
+  # -> {ok, errors, elaborated_term}. Published on host :8900 for the
+  # `@pytest.mark.lean` integration tier to hit directly.
+  # ---------------------------------------------------------------------------
+  lean:
+    build:
+      context: ./lean-sidecar
+      dockerfile: Dockerfile
+    container_name: lean
+    restart: unless-stopped
+    ports:
+      - "8900:8900"             # host:container — lets the lean integration tests reach it
+    networks:
+      - ai-net
+    # The image entrypoint launches uvicorn on 0.0.0.0:8900 (see lean-sidecar/Dockerfile).
+
+  # --- Extend the orchestrator services with the verifier endpoint ------------
+  # These blocks are merged into the definitions in docker-compose.override.yml.
+  hyperion:
+    environment:
+      LEAN_URL: "http://lean:8900"   # the lean_verify tool POSTs candidate sources here
+    depends_on:
+      - lean
+
+  hyperion-mcp:
+    environment:
+      LEAN_URL: "http://lean:8900"
+    depends_on:
+      - lean
+
+# Join the externally-managed ai-router network (same as the base override).
+networks:
+  ai-net:
+    external: true
+    name: ai-router_ai-net
