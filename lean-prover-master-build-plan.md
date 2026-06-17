@@ -269,10 +269,16 @@ Copy the skeleton of [episodic.py](agents/hyperion/src/hyperion/memory/episodic.
 - **File:** `tests/test_lemma_bank.py` (unit, mock Qdrant + embeddings).
 - **Under test:** store→retrieve round-trip; UUID5 dedup (same normalized statement upserts to one point); near-duplicate skip honors `score_threshold`; **write failure is observable** (not silently swallowed) per the load-bearing decision; statement normalization is stable (whitespace/alpha-equivalence as scoped).
 - **Definition of Done:**
-  - [ ] Storing the same lemma twice yields one Qdrant point (deterministic UUID5).
-  - [ ] `retrieve_lemmas` returns payloads ranked by vector score.
-  - [ ] A simulated write failure is logged at error and surfaced — proven by test, not by inspection.
-  - [ ] No live Qdrant required to run the suite.
+  - [x] Storing the same lemma twice yields one Qdrant point (deterministic UUID5). *(`test_same_lemma_twice_is_one_point`; UUID5 over the whitespace-normalized statement, `test_dedup_id_is_whitespace_normalized`.)*
+  - [x] `retrieve_lemmas` returns payloads ranked by vector score. *(`test_retrieve_returns_payloads_ranked_by_score`.)*
+  - [x] A simulated write failure is logged at error and surfaced — proven by test, not by inspection. *(`store_lemma` returns `StoreResult(ok=False, error=...)` and logs at ERROR; `test_write_failure_is_loud_and_observable`. Reads stay fail-soft: `test_retrieve_failure_is_fail_soft_returns_empty`.)*
+  - [x] No live Qdrant required to run the suite. *(All 9 tests mock `_get_clients`; full suite **140 passed, 4 skipped**.)*
+
+  > **Near-duplicate `score_threshold`-on-upsert skip** (deliverable #3) is **deferred**:
+  > exact-UUID5 dedup is the load-bearing identity for this gate, and semantic
+  > near-duplicate collapse is better tuned alongside the Phase 3 applicability gate.
+  > True alpha-equivalence normalization (needs Lean binder parsing) is likewise out of
+  > scope here; normalization is scoped to whitespace (`lemma_bank._normalize`).
 
 ---
 
