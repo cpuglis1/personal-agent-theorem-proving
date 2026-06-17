@@ -31,12 +31,7 @@ hand to a crew/agent for a given task.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
-from typing import Literal
-
-from crewai.tools import BaseTool
-from pydantic import Field
 
 from hyperion.config import settings
 
@@ -76,24 +71,34 @@ def _safe_path(task_id: str, rel_path: str) -> Path:
     return full
 
 
-class WorkspaceReadTool(BaseTool):
-    """CrewAI tool that reads a single file from the bound task's workspace.
+class WorkspaceReadTool:
+    """Tool that reads a single file from the bound task's workspace.
 
-    The instance is pinned to one ``task_id`` (a required field), so the agent
-    can only ever read within that task's sandbox.
+    The instance is pinned to one ``task_id``, so the agent can only ever read
+    within that task's sandbox.
 
     Attributes:
         name: Tool name surfaced to the LLM/agent ("workspace_read").
         description: Natural-language usage hint shown to the agent.
+        parameters: JSON schema for the tool's arguments.
         task_id: The task whose workspace this tool reads from.
     """
 
-    name: str = "workspace_read"
-    description: str = (
+    name = "workspace_read"
+    description = (
         "Read a file from the current task's workspace. "
         "Input: relative file path within the task workspace."
     )
-    task_id: str = Field(...)
+    parameters = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Relative file path within the workspace."}
+        },
+        "required": ["path"],
+    }
+
+    def __init__(self, task_id: str):
+        self.task_id = task_id
 
     def _run(self, path: str) -> str:
         """Read and return the UTF-8 contents of ``path`` in the workspace.
@@ -115,8 +120,8 @@ class WorkspaceReadTool(BaseTool):
         return target.read_text(encoding="utf-8")
 
 
-class WorkspaceWriteTool(BaseTool):
-    """CrewAI tool that writes a file into the bound task's workspace.
+class WorkspaceWriteTool:
+    """Tool that writes a file into the bound task's workspace.
 
     Writes are confined to the task sandbox and create any missing parent
     directories. Existing files are overwritten (truncated).
@@ -124,15 +129,26 @@ class WorkspaceWriteTool(BaseTool):
     Attributes:
         name: Tool name surfaced to the LLM/agent ("workspace_write").
         description: Natural-language usage hint shown to the agent.
+        parameters: JSON schema for the tool's arguments.
         task_id: The task whose workspace this tool writes to.
     """
 
-    name: str = "workspace_write"
-    description: str = (
+    name = "workspace_write"
+    description = (
         "Write content to a file in the current task's workspace. "
-        "Input: JSON with keys 'path' (relative file path) and 'content' (string to write)."
+        "Input: a 'path' (relative file path) and 'content' (string to write)."
     )
-    task_id: str = Field(...)
+    parameters = {
+        "type": "object",
+        "properties": {
+            "path": {"type": "string", "description": "Relative file path within the workspace."},
+            "content": {"type": "string", "description": "Text content to write."},
+        },
+        "required": ["path", "content"],
+    }
+
+    def __init__(self, task_id: str):
+        self.task_id = task_id
 
     def _run(self, path: str, content: str = "") -> str:
         """Write ``content`` to ``path`` within the task workspace.
@@ -159,18 +175,22 @@ class WorkspaceWriteTool(BaseTool):
         return f"Written {len(content)} chars to {path}"
 
 
-class WorkspaceListTool(BaseTool):
-    """CrewAI tool that lists every file in the bound task's workspace.
+class WorkspaceListTool:
+    """Tool that lists every file in the bound task's workspace.
 
     Attributes:
         name: Tool name surfaced to the LLM/agent ("workspace_list").
         description: Natural-language usage hint shown to the agent.
+        parameters: JSON schema for the tool's arguments (none needed).
         task_id: The task whose workspace this tool enumerates.
     """
 
-    name: str = "workspace_list"
-    description: str = "List all files in the current task's workspace. No input needed."
-    task_id: str = Field(...)
+    name = "workspace_list"
+    description = "List all files in the current task's workspace. No input needed."
+    parameters = {"type": "object", "properties": {}}
+
+    def __init__(self, task_id: str):
+        self.task_id = task_id
 
     def _run(self, _: str = "") -> str:
         """Recursively list the workspace's files as newline-joined relative paths.

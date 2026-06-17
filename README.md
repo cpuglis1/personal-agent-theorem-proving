@@ -138,9 +138,10 @@ curl -X POST http://localhost:4100/tasks \
 ```
 
 ### Ingest the second brain
+The vault lives at `~/secondbrain` (outside this repo); its ingest runtime/venv stays here in `secondbrain-pipeline/`.
 ```bash
-cd secondbrain
-source .venv/bin/activate
+cd ~/secondbrain
+source ~/ai/secondbrain-pipeline/.venv/bin/activate
 python ingest_obsidian.py --incremental
 ```
 
@@ -183,7 +184,7 @@ agents/
     tests/          pytest suite
   hyperion-ui/      React/Vite web console (:4102)
   _shared/          Shared utilities (Qdrant client, Notion client, web search)
-secondbrain/        Obsidian vault + ingest pipeline → Qdrant
+secondbrain-pipeline/  Vault ingest runtime (.venv, .env, state) → Qdrant; vault itself at ~/secondbrain
 skills/
   commands/         Claude Code slash commands
   tools/            Open WebUI tool plugins

@@ -207,7 +207,7 @@ src/hyperion/
 ## Phases
 
 All 10 phases complete. (Phase summaries below; the living architecture
-reference is `secondbrain/Projects/AgentArchitecture/architecture.md`.)
+reference is `~/secondbrain/Projects/AgentArchitecture/architecture.md`.)
 
 - **Phase 0** Contracts & substrate (LiteLLM, Langfuse, SearXNG, Infinity, Qdrant collection)
 - **Phase 1** Unified stage-runner (tools, crew, FastAPI, MCP, OWUI tool, Claude Code surface)

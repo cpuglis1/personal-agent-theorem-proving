@@ -30,7 +30,6 @@ logs/
 # ── Personal / local-only (not part of the installable architecture) ──────────
 # These live in ~/ai/ locally but are NOT pushed to the remote repo.
 # The remote only contains agents/ and ai-router/.
-secondbrain/
 secondbrain-pipeline/
 skills/
 CLAUDE.md

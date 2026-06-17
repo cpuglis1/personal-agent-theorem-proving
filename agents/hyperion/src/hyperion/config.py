@@ -146,6 +146,13 @@ class Settings(BaseSettings):
     cap_output_tokens: int = 80_000
     cap_tool_loop: int = 3              # consecutive identical calls before abort
     cap_wall_seconds: int = 900         # 15 min
+    # Per-request timeout (seconds) passed to litellm.completion. This is the ONLY
+    # mechanism that can interrupt a stalled upstream LLM call from *inside* the
+    # executor thread — the wall budget (cap_wall_seconds) is enforced by asyncio
+    # between stages and cannot cancel an already-running thread. Each call is
+    # bounded by min(remaining wall budget, cap_per_call_seconds); a breach raises
+    # litellm.Timeout, which propagates up and fails the run instead of hanging.
+    cap_per_call_seconds: int = 180     # 3 min
     # Max nesting depth for subworkflow nodes (a node whose kind is "subworkflow"
     # runs another workflow). The top-level run is depth 0; a subworkflow node at
     # depth d runs its child at depth d+1, and the runner aborts (CapExceeded) once

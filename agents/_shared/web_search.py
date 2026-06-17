@@ -17,5 +17,5 @@ The same pattern applies to second-brain search:
     HTTP endpoint:  GET http://localhost:4100/tools/second-brain?q=<query>[&limit=5]
     OWUI plugin:    skills/tools/second_brain_search.py
 
-See secondbrain/CLAUDE.md for the pinned reminder.
+See ~/secondbrain/CLAUDE.md for the pinned reminder.
 """

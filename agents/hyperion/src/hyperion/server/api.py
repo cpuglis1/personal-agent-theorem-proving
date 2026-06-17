@@ -108,6 +108,36 @@ app.add_middleware(
 
 _PROGRESS: dict[str, list[str]] = {}  # task_id → list of progress lines
 
+# task_id → the in-flight background asyncio.Task running it. Populated at every
+# spawn site (via ``_spawn_tracked``) so ``POST /tasks/{id}/stop`` has a handle to
+# cancel. NOTE: cancelling the asyncio task does NOT kill a blocking LLM call
+# already running in an executor thread (a running thread can't be cancelled) — so
+# the stop endpoint also writes status=cancelled to the DB directly for an
+# immediate, responsive UI; the orphaned thread, if any, drains in the background.
+_RUNNING: dict[str, "asyncio.Task[Any]"] = {}
+
+# Statuses that mean a run has finished and will not change further.
+_TERMINAL: tuple[str, ...] = ("done", "failed", "cancelled")
+
+
+def _spawn_tracked(task_id: str, coro: Any) -> None:
+    """Spawn a background run coroutine and register it for cancellation.
+
+    Stores the created ``asyncio.Task`` in ``_RUNNING`` keyed by ``task_id`` and
+    attaches a done-callback that removes it once the run finishes (or is
+    cancelled), so the registry never leaks completed tasks.
+
+    Args:
+        task_id: The task id this coroutine runs (the registry key).
+        coro: The ``_run_and_update`` / ``_resume_and_update`` coroutine to run.
+
+    Returns:
+        None.
+    """
+    t = asyncio.create_task(coro)
+    _RUNNING[task_id] = t
+    t.add_done_callback(lambda _t: _RUNNING.pop(task_id, None))
+
 
 def _db_path() -> Path:
     """Resolve the SQLite state DB path from the *current* ``settings.tasks_dir``.
@@ -537,6 +567,27 @@ def _apply_threshold_overrides() -> None:
             setattr(settings, field, data[field])
 
 
+async def _reconcile_orphaned_runs() -> None:
+    """Mark runs left ``running``/``queued`` by a restart as ``failed``.
+
+    A fire-and-forget background coroutine does not survive an API restart, so any
+    row still in an active (non-paused, non-terminal) state on boot is orphaned and
+    can never finish. Flip those to ``failed`` with a clear error so they stop
+    polling as live. ``awaiting_approval``/``awaiting_input`` are left untouched —
+    those are genuine HITL pauses that ``resume_task`` can pick back up.
+
+    Returns:
+        None.
+    """
+    async with _db() as db:
+        await db.execute(
+            "UPDATE tasks SET status='failed', "
+            "error='interrupted by server restart', updated_at=CURRENT_TIMESTAMP "
+            "WHERE status IN ('running','queued')",
+        )
+        await db.commit()
+
+
 async def _startup() -> None:
     """Initialize all runtime state (invoked by the ``lifespan`` context manager).
 
@@ -557,6 +608,11 @@ async def _startup() -> None:
     # Ensure DB schema exists
     db = await _get_db()
     await db.close()
+    # Finalize runs orphaned by this restart. A ``running``/``queued`` row has no
+    # surviving background coroutine after a restart, so it would otherwise poll as
+    # "running" forever; mark it failed. ``awaiting_*`` rows are deliberately left
+    # alone — they are legitimately paused and resumable.
+    await _reconcile_orphaned_runs()
     # Reload progress for tasks that were running/paused before this restart.
     _rehydrate_progress()
     # Re-apply any persisted model assignments (PUT /config) and caps (PUT /thresholds).
@@ -625,7 +681,9 @@ async def _enqueue_scheduled(record: AgentRecord) -> None:
             (task_id, "queued", request, "off"),
         )
         await db.commit()
-    asyncio.create_task(_run_and_update(task_id, request, False, None, None, None, "off"))
+    _spawn_tracked(
+        task_id, _run_and_update(task_id, request, False, None, None, None, "off")
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -757,6 +815,26 @@ class FeedbackRequest(BaseModel):
             used to answer an ``ask_user`` question on a paused task.
     """
     message: str
+
+
+class ChatRequest(BaseModel):
+    """Input body for ``POST /tasks/{id}/chat`` (post-run follow-up conversation).
+
+    Fields:
+        message: The user's follow-up message about a completed run's result.
+    """
+    message: str
+
+
+class ChatResponse(BaseModel):
+    """Output body for ``POST /tasks/{id}/chat``.
+
+    Fields:
+        task_id: The run being discussed.
+        reply: The assistant's grounded answer for this turn.
+    """
+    task_id: str
+    reply: str
 
 
 # ---------------------------------------------------------------------------
@@ -1036,7 +1114,8 @@ async def submit_task(body: TaskRequest) -> TaskResponse:
     finally:
         await db.close()
 
-    asyncio.create_task(
+    _spawn_tracked(
+        task_id,
         _run_and_update(
             task_id,
             body.task,
@@ -1045,9 +1124,56 @@ async def submit_task(body: TaskRequest) -> TaskResponse:
             body.cap_output_tokens,
             body.hitl,
             workflow_id,
-        )
+        ),
     )
     return TaskResponse(task_id=task_id, status="queued")
+
+
+@app.post("/tasks/{task_id}/stop", response_model=TaskResponse)
+async def stop_task(task_id: str) -> TaskResponse:
+    """Cancel a non-terminal run, marking it ``cancelled``.
+
+    Cancels the in-flight background ``asyncio.Task`` (if still registered) and
+    writes ``status=cancelled`` to the DB immediately so the UI reflects the stop
+    without waiting on the run loop.
+
+    Important: cancelling the asyncio task does NOT abort a blocking LLM call that
+    is already executing in an executor thread (a running thread cannot be
+    cancelled). The DB status flips right away, but any such orphaned call drains
+    in the background and is discarded — its result is never persisted because the
+    cancelled coroutine never reaches ``_persist_result``. This is also why a
+    stop is the only reliable way to clear a run wedged on a hung completion.
+
+    Args:
+        task_id: The task to cancel.
+
+    Returns:
+        The task's ``TaskResponse`` after cancellation (or its unchanged terminal
+        state if it had already finished — the call is idempotent).
+
+    Raises:
+        HTTPException 404: no task with this id.
+    """
+    async with _db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT status FROM tasks WHERE task_id=?", (task_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Task not found")
+
+    # Already finished — nothing to cancel; return current state (idempotent).
+    if row["status"] in _TERMINAL:
+        return await get_task(task_id)
+
+    t = _RUNNING.get(task_id)
+    if t is not None and not t.done():
+        t.cancel()
+
+    await _update_task(task_id, status="cancelled", error="Cancelled by user")
+    _append_progress(task_id, "[hyperion] status=cancelled")
+    return await get_task(task_id)
 
 
 @app.get("/tasks/{task_id}", response_model=TaskResponse)
@@ -1182,10 +1308,11 @@ async def approve_task(task_id: str, body: ApproveRequest) -> TaskResponse:
     payload = json.loads(row["pending_payload"]) if row["pending_payload"] else {}
 
     await _update_task(task_id, status="running")
-    asyncio.create_task(
+    _spawn_tracked(
+        task_id,
         _resume_and_update(
             task_id, row["request"], body.action, body.chosen_option, body.edits, payload
-        )
+        ),
     )
     return TaskResponse(task_id=task_id, status="running")
 
@@ -1231,14 +1358,70 @@ async def feedback_task(task_id: str, body: FeedbackRequest) -> TaskResponse:
         answer_affordance(task_id, body.message)
         payload = json.loads(row["pending_payload"]) if row["pending_payload"] else {}
         await _update_task(task_id, status="running")
-        asyncio.create_task(
-            _resume_and_update(task_id, row["request"], "revise", None, body.message, payload)
+        _spawn_tracked(
+            task_id,
+            _resume_and_update(task_id, row["request"], "revise", None, body.message, payload),
         )
         return TaskResponse(task_id=task_id, status="running")
 
     # Running (or any other) task: queue the feedback for the next stage drain.
     append_feedback(task_id, body.message)
     return TaskResponse(task_id=task_id, status=row["status"])
+
+
+@app.post("/tasks/{task_id}/chat", response_model=ChatResponse)
+async def chat_task(task_id: str, body: ChatRequest) -> ChatResponse:
+    """Hold a follow-up conversation about a finished run's result.
+
+    Unlike ``/feedback`` (which steers a *running* task), this answers questions about a
+    task that has already reached ``done``/``failed``. It grounds a lightweight single
+    agent on the run's distilled outputs (result + node index) and lets it retrieve any
+    node's full detail on demand — without re-running the workflow. The conversation is
+    persisted to ``chat.jsonl`` so it is multi-turn and survives an API restart.
+
+    Args:
+        task_id: The completed task to discuss.
+        body: The ``ChatRequest`` carrying the user's message.
+
+    Returns:
+        A ``ChatResponse`` with the assistant's grounded reply for this turn.
+
+    Raises:
+        HTTPException 404: no such task.
+        HTTPException 409: the task hasn't finished yet (still queued/running/paused).
+
+    Side effects:
+        Appends the user and assistant turns to the task's ``chat.jsonl`` and issues
+        one (tool-augmented) LLM call.
+    """
+    from hyperion.followup import append_turn, load_history, run_followup_chat
+
+    async with _db() as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT status, request FROM tasks WHERE task_id=?", (task_id,)
+        ) as cur:
+            row = await cur.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if row["status"] not in ("done", "failed"):
+        raise HTTPException(
+            status_code=409,
+            detail=f"Task is {row['status']}; follow-up chat is available once it finishes.",
+        )
+
+    message = (body.message or "").strip()
+    if not message:
+        raise HTTPException(status_code=422, detail="Empty message")
+
+    history = load_history(task_id)
+    # Run the (blocking, LiteLLM) chat off the event loop so the server stays responsive.
+    reply = await asyncio.to_thread(
+        run_followup_chat, task_id, row["request"], history, message
+    )
+    append_turn(task_id, "user", message)
+    append_turn(task_id, "assistant", reply)
+    return ChatResponse(task_id=task_id, reply=reply)
 
 
 @app.get("/tasks/{task_id}/stream")

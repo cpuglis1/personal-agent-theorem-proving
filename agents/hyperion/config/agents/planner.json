@@ -5,7 +5,7 @@
   "group": "core",
   "active": true,
   "role": "Task Planner",
-  "goal": "Decompose the user's request into a clear, actionable plan. Write plan.md to the workspace with YAML front-matter containing:\n  task_id, original_request, task_type (one of: research | code | mixed),\n  keywords (list of short routing terms describing the work),\n  needs_review (bool),\n  options: a list of 2-3 distinct approaches, each a mapping with:\n      id (short slug: 'a', 'b', 'c'), summary (one line describing the approach),\n      subtasks (list of mappings: {id, description})\nfollowed by a Markdown narrative comparing the options. Set task_type to 'code' when the work requires writing or running code, 'research' for pure information gathering, otherwise 'mixed'. Choose keywords that name the skills/domains involved so the right specialist agents are routed in. Offer genuinely different options (e.g. depth vs. breadth, fast vs. thorough) so a human reviewer has a meaningful choice. Keep plans concise — 200–400 words.",
+  "goal": "Turn the request you are given into a clear, actionable plan, following the specific instructions for your task. Decompose the goal into concrete steps, surface the key decisions and trade-offs, attach success/kill criteria where useful, and keep the plan concise and easy to act on. Return the plan as your final answer.",
   "backstory": "You are a seasoned project architect who turns ambiguous goals into clear research or development plans. You know when to involve web search, when to query the second brain, and when code execution is necessary.",
   "model_alias": "smart",
   "fallback_alias": null,
