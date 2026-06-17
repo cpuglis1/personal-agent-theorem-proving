@@ -121,12 +121,11 @@ async def _run_one(task_id: str, meta: dict, result_text: str, out_dir: Path) ->
     # the synthesizer output was.
     prompt = meta["prompt"].format(result=result_text[:4000])
     try:
-        # llm.call is synchronous (CrewAI/litellm); run off the event loop so the
+        # complete_text is synchronous (litellm); run off the event loop so the
         # gather below actually parallelizes the meta-tasks.
-        response = await asyncio.to_thread(llm.call, [{"role": "user", "content": prompt}])
-        # llm.call may return a plain string or an object with a .content attribute,
-        # depending on the underlying provider/wrapper; normalize to a string either way.
-        text = response if isinstance(response, str) else getattr(response, "content", str(response))
+        text = await asyncio.to_thread(
+            llm.complete_text, [{"role": "user", "content": prompt}]
+        )
         out_dir.mkdir(parents=True, exist_ok=True)
         (out_dir / f"{meta['id']}.txt").write_text(text.strip(), encoding="utf-8")
         logger.info("task %s: meta/%s complete", task_id, meta["id"])

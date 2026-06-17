@@ -1,142 +1,177 @@
 """
-llms.py — per-role LLM factories pointing at the LiteLLM proxy.
+llms.py — per-role LLM handles pointing at the LiteLLM proxy.
 
-All models use the OpenAI-compatible interface via LiteLLM so no provider
-SDK credentials are needed beyond the LITELLM_HYPERION_KEY.
+Every call routes through the LiteLLM proxy over the OpenAI-compatible interface
+(``openai/<model>``), so no provider SDK credentials are needed beyond the
+LITELLM_HYPERION_KEY.
 
-Each factory accepts an optional task_id which becomes the Langfuse session_id —
-this groups every LLM call from a single Hyperion task into one Langfuse session
-so you can see Planner → Researcher → Synthesizer turns side by side.
+``LlmHandle`` is a thin wrapper over ``litellm.completion`` (Phase 2 — it replaced
+the former ``HyperionLLM(crewai.LLM)`` subclass once CrewAI was removed). It owns
+exactly what Hyperion needs and nothing more:
+
+  * Langfuse attribution — the ``extra_body.metadata`` block (session_id = task_id,
+    tags, generation_name, node_id) so every call of one task groups into a single
+    Langfuse session and is attributed to the exact workflow node.
+  * Per-agent spend caps — checked *before* each completion via
+    ``usage.check_agent_cap`` (litellm swallows raises from its own pre-call hook,
+    so the gate lives here, one layer above litellm).
+  * A single fallback-model retry when the primary completion raises.
+
+Because we now own the LiteLLM callback list directly (the usage logger is
+installed once via ``usage.register()``), the old CrewAI ``set_callbacks`` fight is
+gone.
 """
 
 from __future__ import annotations
 
+import logging
+from dataclasses import dataclass
 from typing import Any
-
-from crewai import LLM
 
 from hyperion.config import settings
 
+logger = logging.getLogger(__name__)
 
-class HyperionLLM(LLM):
-    """CrewAI LLM that keeps usage accounting alive and enforces per-agent caps.
 
-    Two CrewAI behaviours fight us, both fixed here:
+@dataclass
+class LlmHandle:
+    """A configured handle over ``litellm.completion`` for one agent/node.
 
-    1. CrewAI's ``LLM.set_callbacks`` does ``litellm.callbacks = callbacks`` (a full
-       overwrite) at construction *and* on every agent turn (it passes its own
-       ``TokenCalcHandler`` via ``call(callbacks=...)``). That silently evicts our
-       usage logger right before the completion. We override ``set_callbacks`` to
-       always re-append the logger, so both CrewAI's handler and ours fire.
+    Attributes:
+        model: The OpenAI-compatible target, e.g. ``openai/<model>``.
+        base_url: The LiteLLM proxy base URL.
+        api_key: The LiteLLM API key.
+        temperature: Sampling temperature.
+        top_p: Optional nucleus-sampling value (sent only when set).
+        max_tokens: Optional output token cap (sent only when set).
+        metadata: Optional Langfuse/usage metadata block, sent via ``extra_body``.
+        task_id: Hyperion task id; when set with ``agent_role`` enables cap checks.
+        agent_role: Role label used for the per-agent spend-cap lookup.
+        fallback_model: Optional ``openai/<model>`` retried once on primary failure.
+    """
 
-    2. The litellm ``log_pre_api_call`` callback can *detect* an over-cap condition
-       but can't stop the run — litellm's ``Logging.pre_call`` swallows the raise.
-       So we gate in ``call`` (one layer above litellm) where a ``CapExceeded``
-       propagates through CrewAI's executor to the runner's handler."""
+    model: str
+    base_url: str
+    api_key: str
+    temperature: float = 0.1
+    top_p: float | None = None
+    max_tokens: int | None = None
+    metadata: dict | None = None
+    task_id: str | None = None
+    agent_role: str | None = None
+    fallback_model: str | None = None
 
-    def __init__(self, *args: Any, hyperion_task_id: str | None = None,
-                 hyperion_role: str | None = None,
-                 hyperion_fallback_model: str | None = None, **kwargs: Any) -> None:
-        """Construct a CrewAI ``LLM`` augmented with Hyperion bookkeeping.
+    def _kwargs(self, messages: Any, tools: list[dict] | None, timeout: float | None) -> dict:
+        """Assemble the ``litellm.completion`` kwargs for one call."""
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "base_url": self.base_url,
+            "api_key": self.api_key,
+            "temperature": self.temperature,
+        }
+        if self.top_p is not None:
+            kwargs["top_p"] = self.top_p
+        if self.max_tokens is not None:
+            kwargs["max_tokens"] = self.max_tokens
+        if timeout is not None:
+            # The ONLY knob that can interrupt a stalled upstream from inside the
+            # executor thread; litellm raises litellm.Timeout once it elapses.
+            kwargs["timeout"] = timeout
+        if self.metadata:
+            # The proxy reads this for Langfuse; the local usage logger digs it out
+            # of optional_params.extra_body.metadata for attribution + cap checks.
+            kwargs["extra_body"] = {"metadata": self.metadata}
+        if tools:
+            kwargs["tools"] = tools
+        return kwargs
 
-        Args:
-            *args: Positional args forwarded verbatim to ``crewai.LLM`` (e.g. ``model``).
-            hyperion_task_id: The Hyperion task id. When set, per-agent usage caps
-                are enforced on every ``call`` (see ``call``). Also used upstream as
-                the Langfuse session_id so all turns of one task group together.
-            hyperion_role: The agent role (planner/worker/critic/...) this LLM serves.
-                Combined with ``hyperion_task_id`` to look up the role's spend cap.
-            hyperion_fallback_model: Optional concrete ``openai/<model>`` string used
-                for a single retry if the primary completion raises (see ``call``).
-            **kwargs: Keyword args forwarded verbatim to ``crewai.LLM`` (e.g.
-                ``base_url``, ``api_key``, ``temperature``, ``extra_body``).
+    def _request_timeout(self, deadline: float | None) -> float | None:
+        """Resolve the per-request timeout for one completion.
 
-        Side effects:
-            Stashes the three Hyperion fields on the instance; no I/O.
+        Bounds every call by ``min(remaining wall budget, cap_per_call_seconds)``:
+
+          * ``cap_per_call_seconds`` is the ceiling that protects callers with no
+            wall deadline (e.g. the meta-prompt / follow-up pipelines) from a
+            permanently hung upstream. Disabled (no ceiling) when set to 0.
+          * ``deadline`` (a ``time.monotonic()`` value threaded down from the
+            stage's remaining wall budget) shortens the timeout as the run nears
+            its wall cap, so a single call can never outlive the wall budget.
+
+        Returns ``None`` only when neither bound applies. A non-positive remaining
+        budget collapses to a tiny positive value so litellm fails fast rather than
+        treating ``<=0`` as "no timeout".
         """
-        super().__init__(*args, **kwargs)
-        self._hyperion_task_id = hyperion_task_id
-        self._hyperion_role = hyperion_role
-        # Concrete `openai/<model>` to retry once if the primary call raises. This is
-        # a per-agent fallback layered *above* LiteLLM's own alias-group fallbacks —
-        # it covers the case where the record pins a concrete model that has no proxy
-        # fallback configured.
-        self._hyperion_fallback_model = hyperion_fallback_model
+        ceiling = settings.cap_per_call_seconds or None
+        if deadline is None:
+            return ceiling
+        import time
 
-    def set_callbacks(self, callbacks: Any) -> None:
-        """Install litellm callbacks, always preserving Hyperion's usage logger.
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            remaining = 0.001  # already over budget — force an immediate timeout
+        return min(ceiling, remaining) if ceiling else remaining
 
-        CrewAI calls this both at construction and before every agent turn, each
-        time *replacing* ``litellm.callbacks`` wholesale. Left alone, that evicts
-        Hyperion's usage logger right before a completion. This override re-appends
-        the singleton usage logger so both CrewAI's own handler and ours fire.
+    def complete(
+        self, messages: Any, tools: list[dict] | None = None, deadline: float | None = None
+    ) -> Any:
+        """Run one completion, enforcing the spend cap and a single fallback retry.
 
         Args:
-            callbacks: The callback list CrewAI wants to install (may be ``None``).
-
-        Side effects:
-            Sets the process-global ``litellm.callbacks`` (via ``super()``) to the
-            given list with the usage logger appended.
-        """
-        from hyperion.usage import get_logger
-
-        logger = get_logger()
-        # Append (don't overwrite) so CrewAI's TokenCalcHandler and our logger coexist.
-        cbs = list(callbacks or [])
-        if logger not in cbs:
-            cbs = cbs + [logger]
-        super().set_callbacks(cbs)
-
-    def call(self, messages: Any, *args: Any, **kwargs: Any) -> Any:
-        """Run a completion, enforcing spend caps and a single fallback retry.
-
-        Cap enforcement lives here (one layer above litellm) because litellm's
-        ``Logging.pre_call`` swallows raises from its own pre-call callbacks; gating
-        at this level lets a ``CapExceeded`` propagate through CrewAI's executor up
-        to the runner's handler.
-
-        Args:
-            messages: The chat messages payload passed through to ``crewai.LLM.call``.
-            *args: Additional positional args forwarded to ``super().call``.
-            **kwargs: Additional keyword args forwarded to ``super().call`` (CrewAI
-                may inject ``callbacks=...`` here, which routes through
-                ``set_callbacks``).
+            messages: The chat messages payload.
+            tools: Optional list of OpenAI/LiteLLM function-tool schemas.
+            deadline: Optional ``time.monotonic()`` wall-budget deadline for the
+                enclosing stage. Threaded down so each call's per-request timeout is
+                ``min(remaining budget, cap_per_call_seconds)`` — the only thing that
+                can break a hung upstream from inside the executor thread.
 
         Returns:
-            The completion result from ``crewai.LLM.call`` (typically a str).
+            The raw LiteLLM ``ModelResponse`` (``.choices[0].message`` carries the
+            content and any ``tool_calls``).
 
         Raises:
-            CapExceeded: If this task/role has hit its configured spend cap. Never
-                swallowed into a fallback retry — caps are a deliberate abort.
-            Exception: Any error from the primary model when no fallback is
-                configured, or the fallback's error if the retry also fails.
-
-        Side effects:
-            May record usage and emit a warning log line when falling back.
+            CapExceeded: If this task/role has hit its configured spend cap — a
+                deliberate abort, never swallowed into the fallback retry.
+            Exception: The primary model's error when no fallback is configured, or
+                the fallback's error if the retry also fails. A ``litellm.Timeout``
+                flows through the normal single fallback retry — but the fallback's
+                timeout is recomputed against the same ``deadline``, so it stays
+                bounded and cannot reintroduce the hang; if the wall budget is spent
+                it fails fast and the timeout propagates to fail the run.
         """
-        if self._hyperion_task_id and self._hyperion_role:
+        if self.task_id and self.agent_role:
             from hyperion.usage import check_agent_cap
 
-            check_agent_cap(self._hyperion_task_id, self._hyperion_role)
+            check_agent_cap(self.task_id, self.agent_role)
+
+        import litellm
+
         try:
-            return super().call(messages, *args, **kwargs)
+            return litellm.completion(**self._kwargs(messages, tools, self._request_timeout(deadline)))
         except Exception as exc:
             from hyperion.crews.runner import CapExceeded
 
             # Caps are a deliberate abort — never swallow them into a fallback retry.
-            if isinstance(exc, CapExceeded) or not self._hyperion_fallback_model:
+            if isinstance(exc, CapExceeded) or not self.fallback_model:
                 raise
-            import logging
-
-            logging.getLogger(__name__).warning(
+            logger.warning(
                 "Primary model %s failed (%s); retrying once on fallback %s",
-                self.model, exc, self._hyperion_fallback_model,
+                self.model, exc, self.fallback_model,
             )
-            primary, self.model = self.model, self._hyperion_fallback_model
-            try:
-                return super().call(messages, *args, **kwargs)
-            finally:
-                self.model = primary
+            # Recompute the timeout against the same deadline so the fallback is
+            # bounded by whatever wall budget remains (never a fresh full ceiling).
+            kwargs = self._kwargs(messages, tools, self._request_timeout(deadline))
+            kwargs["model"] = self.fallback_model
+            return litellm.completion(**kwargs)
+
+    def complete_text(self, messages: Any) -> str:
+        """Convenience: run a tool-less completion and return the content string.
+
+        Used by lightweight callers (e.g. the meta-prompt pipeline) that just want
+        a single text answer rather than the full tool-calling loop.
+        """
+        resp = self.complete(messages, tools=None)
+        return (getattr(resp.choices[0].message, "content", None) or "").strip()
 
 
 def _make_llm(
@@ -150,25 +185,23 @@ def _make_llm(
     max_tokens: int | None = None,
     fallback_model: str | None = None,
     extra_tags: list[str] | None = None,
-) -> LLM:
-    """Construct a configured ``HyperionLLM`` pointed at the LiteLLM proxy.
+) -> LlmHandle:
+    """Construct a configured ``LlmHandle`` pointed at the LiteLLM proxy.
 
-    Central factory shared by every public builder below. It assembles the
+    Central factory shared by every public builder. It assembles the
     OpenAI-compatible ``openai/<model>`` target, attaches Langfuse/usage metadata
     when a ``task_id`` is present, and wires through the optional fallback model.
 
     Args:
         model: The LiteLLM model alias or concrete name (without the ``openai/``
             prefix, which is added here).
-        temperature: Sampling temperature passed to the model.
+        temperature: Sampling temperature.
         task_id: Hyperion task id. When set, enables cap enforcement and adds the
             Langfuse session/trace metadata block.
         agent_role: Role label used in tags and the Langfuse generation name; also
             keys the per-agent cap lookup.
-        node_id: Optional workflow-node id this call ran under. Recorded on the
-            trace event so the trace UI can attribute calls to the exact node (an
-            agent may run in more than one node). Distinct from ``agent_role``,
-            which stays the agent id for cap/Langfuse purposes.
+        node_id: Optional workflow-node id this call runs under, recorded on the
+            trace event so the trace UI can attribute calls to the exact node.
         top_p: Optional nucleus-sampling value; only sent when not ``None``.
         max_tokens: Optional output token cap; only sent when not ``None``.
         fallback_model: Optional alias/name retried once on primary failure;
@@ -177,10 +210,17 @@ def _make_llm(
             into the default ``hyperion``/role tags.
 
     Returns:
-        A ready-to-use ``HyperionLLM`` instance.
+        A ready-to-use ``LlmHandle`` instance.
     """
-    # Holds optional kwargs assembled conditionally, then splatted into the ctor.
-    extra: dict = {}
+    # Ensure the usage logger is on litellm's global callback list. CrewAI used to
+    # (inadvertently) keep it attached per-LLM; now that we call litellm.completion
+    # ourselves, the once-only global install is what makes token accounting + trace
+    # events fire. Idempotent — a no-op after the first call.
+    from hyperion.usage import register as _register_usage
+
+    _register_usage()
+
+    metadata: dict | None = None
     if task_id:
         # Langfuse picks up these fields from LiteLLM's metadata block; the usage
         # logger reads `tags` to classify each call (e.g. "meta-prompt").
@@ -193,20 +233,17 @@ def _make_llm(
         }
         if node_id:
             metadata["node_id"] = node_id
-        extra["extra_body"] = {"metadata": metadata}
-    if top_p is not None:
-        extra["top_p"] = top_p
-    if max_tokens is not None:
-        extra["max_tokens"] = max_tokens
-    return HyperionLLM(
+    return LlmHandle(
         model=f"openai/{model}",
         base_url=settings.litellm_base_url,
         api_key=settings.llm_api_key,
         temperature=temperature,
-        hyperion_task_id=task_id,
-        hyperion_role=agent_role,
-        hyperion_fallback_model=f"openai/{fallback_model}" if fallback_model else None,
-        **extra,
+        top_p=top_p,
+        max_tokens=max_tokens,
+        metadata=metadata,
+        task_id=task_id,
+        agent_role=agent_role,
+        fallback_model=f"openai/{fallback_model}" if fallback_model else None,
     )
 
 
@@ -220,17 +257,13 @@ def make_agent_llm(
     top_p: float | None = None,
     max_tokens: int | None = None,
     fallback_alias: str | None = None,
-) -> LLM:
-    """Build an LLM from an agent record's fields (data-driven path, Phase 1).
+) -> LlmHandle:
+    """Build an ``LlmHandle`` from an agent record's fields (data-driven path).
 
-    With model_alias='smart'/'worker' and the seeded temperatures, this is
-    identical to the planner_llm/worker_llm factories the old code used.
-
-    ``fallback_alias`` (the record's fallback model) is retried once if the
-    primary call raises — see HyperionLLM.call.
-
-    ``node_id`` (the workflow node this call runs under) is recorded on the trace
-    event so the trace UI can attribute calls to the exact node.
+    ``fallback_alias`` (the record's fallback model) is retried once if the primary
+    call raises — see ``LlmHandle.complete``. ``node_id`` (the workflow node this
+    call runs under) is recorded on the trace event so the trace UI can attribute
+    calls to the exact node.
     """
     return _make_llm(
         model_alias,
@@ -242,18 +275,3 @@ def make_agent_llm(
         max_tokens=max_tokens,
         fallback_model=fallback_alias,
     )
-
-
-def planner_llm(task_id: str | None = None) -> LLM:
-    """High-stakes planning. Alias defaults to 'smart' (Opus → Gemini Pro → GPT-4o)."""
-    return _make_llm(settings.model_planner, temperature=0.1, task_id=task_id, agent_role="planner")
-
-
-def worker_llm(task_id: str | None = None, agent_role: str = "worker") -> LLM:
-    """Balanced reasoning/cost. Alias defaults to 'worker' (Sonnet → Gemini Pro → GPT-4o)."""
-    return _make_llm(settings.model_worker, temperature=0.2, task_id=task_id, agent_role=agent_role)
-
-
-def cheap_llm(task_id: str | None = None) -> LLM:
-    """Cheap sub-calls. Alias defaults to 'cheap' (Haiku → Gemini Flash → GPT-4o-mini)."""
-    return _make_llm(settings.model_cheap, temperature=0.0, task_id=task_id, agent_role="cheap")

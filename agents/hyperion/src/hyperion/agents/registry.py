@@ -13,11 +13,11 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
-from crewai.tools import BaseTool
 from pydantic import BaseModel, Field
 
+from hyperion.agent_loop import ToolSpec
 from hyperion.config import settings
 from hyperion.feedback import AskUserTool, ReadHumanFeedbackTool
 from hyperion.memory.context_store import ContextGetTool, ContextPutTool, RecallSimilarTasksTool
@@ -34,10 +34,14 @@ _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 
 
 # ---------------------------------------------------------------------------
-# Tool registry — name -> factory(task_id) -> BaseTool
+# Tool registry — name -> factory(task_id) -> tool instance
+#
+# Each factory returns a plain tool object exposing ``name``, ``description``,
+# ``parameters`` (a JSON schema) and ``_run`` (the callable). ``build_tools``
+# wraps each into a ``ToolSpec`` for the owned agent loop (see ``agent_loop``).
 # ---------------------------------------------------------------------------
 
-TOOL_REGISTRY: dict[str, Callable[[str], BaseTool]] = {
+TOOL_REGISTRY: dict[str, Callable[[str], Any]] = {
     "workspace_read": lambda task_id: WorkspaceReadTool(task_id=task_id),
     "workspace_write": lambda task_id: WorkspaceWriteTool(task_id=task_id),
     "workspace_list": lambda task_id: WorkspaceListTool(task_id=task_id),
@@ -53,14 +57,15 @@ TOOL_REGISTRY: dict[str, Callable[[str], BaseTool]] = {
 }
 
 
-def register_tool(name: str, factory: Callable[[str], BaseTool]) -> None:
+def register_tool(name: str, factory: Callable[[str], Any]) -> None:
     """Register a tool factory. Later phases call this to add new capabilities.
 
     Args:
         name: Registry key that agent records reference in their ``tools`` list.
         factory: Callable taking the current ``task_id`` and returning a fresh
-            ``BaseTool`` instance. Per-task construction lets task-scoped tools
-            (e.g. workspace/context tools) bind to the correct task.
+            tool instance (exposing ``name``/``description``/``parameters``/``_run``).
+            Per-task construction lets task-scoped tools (e.g. workspace/context
+            tools) bind to the correct task.
 
     Side effects:
         Mutates the module-global ``TOOL_REGISTRY`` in place. Re-registering an
@@ -69,8 +74,8 @@ def register_tool(name: str, factory: Callable[[str], BaseTool]) -> None:
     TOOL_REGISTRY[name] = factory
 
 
-def build_tools(names: list[str], task_id: str) -> list[BaseTool]:
-    """Resolve a list of tool names against the registry for a given task.
+def build_tools(names: list[str], task_id: str) -> list[ToolSpec]:
+    """Resolve a list of tool names against the registry into ``ToolSpec`` descriptors.
 
     Args:
         names: Tool names (registry keys) requested by an agent record.
@@ -78,17 +83,24 @@ def build_tools(names: list[str], task_id: str) -> list[BaseTool]:
             task-scoped tools bind to the right workspace and context store.
 
     Returns:
-        Freshly constructed ``BaseTool`` instances, one per name, in input order.
+        One ``ToolSpec`` per name, in input order, each wrapping the tool's
+        ``name``/``description``/``parameters`` and its ``_run`` callable.
 
     Raises:
         ValueError: If any name is not present in ``TOOL_REGISTRY``.
     """
-    tools: list[BaseTool] = []
+    tools: list[ToolSpec] = []
     for name in names:
         factory = TOOL_REGISTRY.get(name)
         if factory is None:
             raise ValueError(f"Unknown tool {name!r} (not in TOOL_REGISTRY)")
-        tools.append(factory(task_id))
+        inst = factory(task_id)
+        tools.append(ToolSpec(
+            name=inst.name,
+            description=inst.description,
+            parameters=inst.parameters,
+            fn=inst._run,
+        ))
     return tools
 
 

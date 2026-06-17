@@ -10,8 +10,6 @@ string rather than raising, so an agent loop degrades gracefully.
 from __future__ import annotations
 
 import httpx
-from crewai.tools import BaseTool
-from pydantic import BaseModel, Field
 
 from hyperion.config import settings
 
@@ -110,31 +108,31 @@ def create_notion_page(title: str, body: str) -> dict:
     return {"url": data.get("url"), "id": data.get("id")}
 
 
-class _NotionWriteInput(BaseModel):
-    """Pydantic argument schema for :class:`NotionWriteTool`.
-
-    Defines the structured input the LLM must supply when invoking the
-    ``notion_write`` tool; the field descriptions are surfaced to the model.
-    """
-
-    title: str = Field(description="Title for the new Notion page")
-    body: str = Field(description="Markdown/plain-text body content for the page")
-
-
-class NotionWriteTool(BaseTool):
-    """CrewAI tool that saves a result to the configured Notion database.
+class NotionWriteTool:
+    """Tool that saves a result to the configured Notion database.
 
     Wraps :func:`create_notion_page` so agents can persist a final artifact as a
-    new Notion page. Exposed to the LLM as the ``notion_write`` tool with the
-    schema defined by :class:`_NotionWriteInput`.
+    new Notion page. Exposed to the LLM as the ``notion_write`` tool.
+
+    Attributes:
+        name: Tool identifier exposed to the agent/LLM ("notion_write").
+        description: Natural-language guidance shown to the LLM.
+        parameters: JSON schema for the tool's arguments.
     """
 
-    name: str = "notion_write"
-    description: str = (
+    name = "notion_write"
+    description = (
         "Save a result to the configured Notion database as a new page. "
         "Input: a title and a plain-text body. Returns the new page URL."
     )
-    args_schema: type[BaseModel] = _NotionWriteInput
+    parameters = {
+        "type": "object",
+        "properties": {
+            "title": {"type": "string", "description": "Title for the new Notion page."},
+            "body": {"type": "string", "description": "Markdown/plain-text body content."},
+        },
+        "required": ["title", "body"],
+    }
 
     def _run(self, title: str, body: str) -> str:
         """Execute the tool: create a Notion page and return a status string.

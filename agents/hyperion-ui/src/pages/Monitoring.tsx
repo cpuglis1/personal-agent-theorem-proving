@@ -49,6 +49,7 @@ const STATUS_STYLES: Record<TaskStatus, string> = {
   awaiting_input: "border-amber-500/40 text-amber-300",
   done: "border-emerald-500/40 text-emerald-300",
   failed: "border-rose-500/40 text-rose-300",
+  cancelled: "border-slate-500/40 text-slate-300",
 };
 
 /**

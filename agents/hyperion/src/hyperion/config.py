@@ -155,21 +155,13 @@ class Settings(BaseSettings):
     cap_output_tokens: int = 80_000
     cap_tool_loop: int = 3              # consecutive identical calls before abort
     cap_wall_seconds: int = 900         # 15 min
-    # Backstops the prover's repair loop (build plan §1a): the verify controller
-    # delegates ONE repair proposal per iteration to the `repair` agent and re-checks
-    # it with the kernel, looping at most this many times before giving up cleanly.
-    # Each iteration is one repair-agent LLM call plus one cheap verify, so this knob
-    # trades proof quality against LLM spend (Post-work re-tunes it against measured
-    # sidecar latency). Parallel to cap_tool_loop; default 3 mirrors it.
-    cap_repair_iters: int = 3
-    # Prover RESEARCH vs DEPLOY policy (build plan §Phase 5 decision b; full `when`-based
-    # knob is Post-work). False (DEPLOY, default) ⇒ `verify` is exploit-first: it
-    # short-circuits on the first path that closes the goal — the historical behavior.
-    # True (RESEARCH) ⇒ `verify` does NOT short-circuit: it kernel-verifies BOTH Path A
-    # and Path B so `compare` has a genuine A-vs-B contest and `abstract` can fire on a
-    # fresh Path-B lemma even when Path A also closed (anti-starvation). The comparison
-    # IS the experiment, so the thesis runs are RESEARCH; deployments are DEPLOY.
-    prover_research_mode: bool = False
+    # Per-request timeout (seconds) passed to litellm.completion. This is the ONLY
+    # mechanism that can interrupt a stalled upstream LLM call from *inside* the
+    # executor thread — the wall budget (cap_wall_seconds) is enforced by asyncio
+    # between stages and cannot cancel an already-running thread. Each call is
+    # bounded by min(remaining wall budget, cap_per_call_seconds); a breach raises
+    # litellm.Timeout, which propagates up and fails the run instead of hanging.
+    cap_per_call_seconds: int = 180     # 3 min
     # Max nesting depth for subworkflow nodes (a node whose kind is "subworkflow"
     # runs another workflow). The top-level run is depth 0; a subworkflow node at
     # depth d runs its child at depth d+1, and the runner aborts (CapExceeded) once

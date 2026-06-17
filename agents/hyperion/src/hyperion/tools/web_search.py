@@ -35,8 +35,6 @@ import re
 from typing import Any
 
 import httpx
-from crewai.tools import BaseTool
-from pydantic import Field
 
 from hyperion.config import settings
 from hyperion.tools.reranker import rerank
@@ -75,8 +73,8 @@ def _strip_html(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
-class WebSearchTool(BaseTool):
-    """CrewAI tool exposing SearXNG-backed web search to Hyperion agents.
+class WebSearchTool:
+    """Tool exposing SearXNG-backed web search to Hyperion agents.
 
     Registered under the name ``web_search``. Agents call it with a single
     query string; it queries SearXNG, re-ranks the snippets, and returns a
@@ -84,22 +82,32 @@ class WebSearchTool(BaseTool):
     prefixed with an untrusted-content warning for the consuming LLM.
 
     Attributes:
-        name: Tool identifier used by CrewAI / agents to invoke this tool.
+        name: Tool identifier agents use to invoke this tool.
         description: Human/LLM-readable summary of what the tool does and its
             input/output contract.
+        parameters: JSON schema for the tool's arguments.
         categories: Comma-separated SearXNG search categories to query
             (default ``"general,news"``).
         top_k: Maximum number of results to keep after reranking.
     """
 
-    name: str = "web_search"
-    description: str = (
+    name = "web_search"
+    description = (
         "Search the web for current information. "
         "Input: a search query string. "
         "Returns top results with title, snippet, and URL."
     )
-    categories: str = Field(default="general,news")
-    top_k: int = Field(default=10)
+    parameters = {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "The web search query."}
+        },
+        "required": ["query"],
+    }
+
+    def __init__(self, categories: str = "general,news", top_k: int = 10):
+        self.categories = categories
+        self.top_k = top_k
 
     def _run(self, query: str) -> str:
         """Execute a web search and return formatted, reranked results.

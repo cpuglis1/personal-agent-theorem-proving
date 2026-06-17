@@ -9,8 +9,8 @@ rather than talking to Qdrant or the embedding endpoint directly, so the
 retrieval strategy lives in one place.
 
 The collection is populated by two ingestion scripts:
-  - secondbrain/ingest_obsidian.py  (Obsidian vault → Qdrant)
-  - secondbrain/ingest_notion.py    (Notion databases → Qdrant)
+  - ~/secondbrain/ingest_obsidian.py  (Obsidian vault → Qdrant)
+  - ~/secondbrain/ingest_notion.py    (Notion databases → Qdrant)
 
 Both write the same payload shape (title, text, notion_url) into the same
 collection, so a single search call covers all second-brain content.

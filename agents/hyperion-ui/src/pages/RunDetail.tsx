@@ -28,6 +28,7 @@ import {
   useApproveTask,
   useFeedbackTask,
   useSaveToNotion,
+  useStopTask,
   useTask,
   type TaskStatus,
 } from "../api/client";
@@ -39,7 +40,7 @@ import { useToast } from "../components/Toast";
  * Statuses that mean the run has finished and will not change further.
  * Used to halt polling (see `useTask` refetchInterval below).
  */
-const TERMINAL: TaskStatus[] = ["done", "failed"];
+const TERMINAL: TaskStatus[] = ["done", "failed", "cancelled"];
 
 /**
  * Maps a task status to Tailwind border/text utility classes for the status
@@ -53,6 +54,7 @@ const statusColor: Record<string, string> = {
   awaiting_input: "border-amber-500/40 text-amber-200",
   done: "border-emerald-500/40 text-emerald-200",
   failed: "border-rose-500/40 text-rose-200",
+  cancelled: "border-slate-500/40 text-slate-300",
 };
 
 /**
@@ -114,10 +116,14 @@ export default function RunDetail() {
 
   const approve = useApproveTask(taskId);
   const feedback = useFeedbackTask(taskId);
+  const stop = useStopTask(taskId);
   // Disable interactive controls while either mutation is in flight.
   const busy = approve.isPending || feedback.isPending;
 
   if (!task) return <p className="text-slate-400">Loading task…</p>;
+
+  // A run can be stopped while it has not reached a terminal state.
+  const stoppable = !TERMINAL.includes(task.status);
 
   return (
     <div className="mx-auto max-w-3xl space-y-4">
@@ -130,6 +136,15 @@ export default function RunDetail() {
           <Link to={`/runs/${taskId}/trace`} className="btn text-sm">
             View Trace
           </Link>
+          {stoppable && (
+            <button
+              className="btn text-sm border-rose-500/40 text-rose-200"
+              disabled={stop.isPending}
+              onClick={() => stop.mutate()}
+            >
+              {stop.isPending ? "Stopping…" : "Stop"}
+            </button>
+          )}
           <span className={`pill ${statusColor[task.status] ?? "border-edge"}`}>{task.status}</span>
         </div>
       </div>
