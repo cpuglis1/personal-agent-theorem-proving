@@ -297,9 +297,33 @@ Copy the skeleton of [episodic.py](agents/hyperion/src/hyperion/memory/episodic.
 - **Files:** `tests/test_lemma_retrieval.py` (unit; mock Qdrant, mock reranker via `httpx`, mock `verify_lean` with `_mock_lean`).
 - **Under test:** ranking order from the reranker is honored; the applicability gate **drops a textually-similar-but-non-applying lemma** and **keeps an applying one** (the core correctness claim of this phase); reranker-down degrades to vector order (fail-soft, like [test_tools.py:122](agents/hyperion/tests/test_tools.py#L122)); token-budget trim preserved.
 - **Definition of Done:**
-  - [ ] A crafted case where the top *textual* match does **not** apply and a lower one does → retrieval returns the applying lemma first.
-  - [ ] With the reranker mocked down, retrieval still returns vector-ordered candidates.
-  - [ ] Runs fully offline.
+  - [x] A crafted case where the top *textual* match does **not** apply and a lower one does → retrieval returns the applying lemma first. *(`test_applying_lemma_returned_first_non_applier_dropped`: reranker puts the non-applier first; a content-aware `verify_lean` fake — `ok=False` only when the probe inlines the non-applier's type — proves the gate demotes/drops it and returns the applier alone.)*
+  - [x] With the reranker mocked down, retrieval still returns vector-ordered candidates. *(`test_reranker_down_degrades_to_vector_order`: the reranker's own `httpx.post` raises, exercising its real fail-soft → bank/vector order preserved.)*
+  - [x] Runs fully offline. *(All 12 tests in `tests/test_lemma_retrieval.py` mock `lemma_bank.retrieve_lemmas` + `verify_lean` and patch the reranker; no Qdrant/Infinity/Lean. Full suite **152 passed, 4 skipped**.)*
+
+  > **Implemented:** `tools/lemma_retrieval.py` — `retrieve_applicable_lemmas(goal, *,
+  > limit=5, over_fetch=15, token_budget=None, probe=True)` (plain function; thin
+  > `LemmaRetrievalTool` wrapper alongside). Pipeline: `lemma_bank.retrieve_lemmas`
+  > (vector) → `reranker.rerank` (fail-soft) → **applicability gate** → token-budget trim
+  > (mirrors `reranker.prioritize`) → `limit`.
+  >
+  > **Gate routing (mirrors Phase 1's load-bearing `infra_ok`):** for each reranked
+  > candidate, `verify_lean(probe, mode="skeleton")` — `infra_ok=False` ⇒ **KEEP**
+  > (inconclusive ≠ drop; `test_probe_infra_down_keeps_all_candidates`), `ok=True` ⇒ KEEP,
+  > `ok=False` ⇒ DROP. `probe=False` skips the gate and never calls the verifier
+  > (`test_probe_false_skips_gate_and_never_calls_verifier`).
+  >
+  > **Probe construction (build decision, step 2):** self-contained, name-free probe
+  > `example (h : <lemma_type>) : <goal_type> := by first | exact h | (apply h; all_goals
+  > sorry)`, checked in `skeleton` mode so a unifying `apply` that leaves subgoals still
+  > counts as progress. `<lemma_type>` is extracted from the stored `statement` by
+  > `_lemma_type()` (a bracket-depth scanner strips the decl keyword/name/binders to the
+  > first top-level `:`, then the `:=`/`where` suffix; falls back to the whole statement).
+  > **Tradeoff flagged:** the extractor is a dependency-free heuristic that strips binders
+  > to a bare proposition and will mishandle exotic signatures; the robust fix is storing
+  > the bare type as a first-class `lemma_bank` payload field (a Phase 2 schema change),
+  > **deferred** to the Phase 4 / live-Lean wiring. This affects only live-Lean behavior —
+  > the offline DoD mocks `verify_lean` and does not depend on the exact probe string.
 
 ---
 
