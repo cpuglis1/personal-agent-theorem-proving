@@ -155,6 +155,13 @@ class Settings(BaseSettings):
     cap_output_tokens: int = 80_000
     cap_tool_loop: int = 3              # consecutive identical calls before abort
     cap_wall_seconds: int = 900         # 15 min
+    # Backstops the prover's repair loop (build plan §1a): the verify controller
+    # delegates ONE repair proposal per iteration to the `repair` agent and re-checks
+    # it with the kernel, looping at most this many times before giving up cleanly.
+    # Each iteration is one repair-agent LLM call plus one cheap verify, so this knob
+    # trades proof quality against LLM spend (Post-work re-tunes it against measured
+    # sidecar latency). Parallel to cap_tool_loop; default 3 mirrors it.
+    cap_repair_iters: int = 3
     # Max nesting depth for subworkflow nodes (a node whose kind is "subworkflow"
     # runs another workflow). The top-level run is depth 0; a subworkflow node at
     # depth d runs its child at depth d+1, and the runner aborts (CapExceeded) once

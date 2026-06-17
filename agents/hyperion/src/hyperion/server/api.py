@@ -1563,6 +1563,7 @@ def _validate_workflow_record(record) -> None:
         HTTPException 422: the workflow is structurally invalid or references an
             unknown agent.
     """
+    from hyperion.crews.native import NATIVE_HANDLERS
     from hyperion.crews.workflows import (
         load_all_workflows,
         load_workflow,
@@ -1574,7 +1575,11 @@ def _validate_workflow_record(record) -> None:
     try:
         # Pass the workflow registry + a loader so subworkflow refs are checked
         # for existence and cross-workflow cycles (A -> B -> A), not just structure.
-        validate_workflow(record, known, known_workflows, load_workflow)
+        # NATIVE_HANDLERS keys reject dangling native `handler` refs (Phase 4).
+        validate_workflow(
+            record, known, known_workflows, load_workflow,
+            known_handler_ids=set(NATIVE_HANDLERS),
+        )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
 

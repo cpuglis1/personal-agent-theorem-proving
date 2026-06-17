@@ -167,3 +167,12 @@ async def _echo_handler(ctx: NativeNodeCtx) -> NativeResult:
 
 
 register_native_handler("echo", _echo_handler)
+
+
+# ---------------------------------------------------------------------------
+# Prover handlers (Phase 4): import for side-effect registration of the
+# retrieve/skeleton_check/verify/bank handlers. Done at the bottom so the
+# registry primitives above are defined first and the import can't be circular
+# (lean_handlers imports only register_native_handler + NativeNodeCtx from here).
+# ---------------------------------------------------------------------------
+from hyperion.crews import lean_handlers as _lean_handlers  # noqa: E402,F401

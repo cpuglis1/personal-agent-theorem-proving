@@ -124,6 +124,7 @@ def store_lemma(
     source_goal: str = "",
     verification_mode: str = "full",
     verified_at: int | None = None,
+    lean_type: str | None = None,
 ) -> StoreResult:
     """Embed and upsert a verified lemma into the bank.
 
@@ -139,6 +140,12 @@ def store_lemma(
         source_goal: The originating sub-goal this lemma was derived for.
         verification_mode: How it was verified (``"full"`` / ``"skeleton"``).
         verified_at: Epoch seconds of verification; defaults to now when unset.
+        lean_type: The *bare* Lean proposition this lemma proves (the sub-goal's
+            ``lean_type`` from the plan contract), stored as a first-class payload
+            field so the Phase-3 applicability probe can use it directly instead of
+            re-deriving it from ``statement`` via the ``_lemma_type`` heuristic
+            (build plan Phase 4 decision b). Optional/defaulted: ``None`` omits the
+            field, keeping the payload backward-compatible with pre-Phase-4 writes.
 
     Returns:
         A :class:`StoreResult`. ``ok=True`` ⇒ persisted (one point, deterministic id);
@@ -152,17 +159,20 @@ def store_lemma(
 
         from qdrant_client.models import PointStruct
 
+        payload: dict[str, Any] = {
+            "statement": statement,
+            "proof_term": proof_term,
+            "generality_score": generality_score,
+            "source_goal": source_goal,
+            "verified_at": verified_at if verified_at is not None else int(time.time()),
+            "verification_mode": verification_mode,
+        }
+        if lean_type is not None:
+            payload["lean_type"] = lean_type
         point = PointStruct(
             id=point_id,
             vector=vector,
-            payload={
-                "statement": statement,
-                "proof_term": proof_term,
-                "generality_score": generality_score,
-                "source_goal": source_goal,
-                "verified_at": verified_at if verified_at is not None else int(time.time()),
-                "verification_mode": verification_mode,
-            },
+            payload=payload,
         )
         collection = _collection()
         qdrant.upsert(collection_name=collection, points=[point])
@@ -208,6 +218,7 @@ def retrieve_lemmas(goal: str, limit: int = 5) -> list[dict[str, Any]]:
                 "source_goal": h.payload.get("source_goal", ""),
                 "verified_at": h.payload.get("verified_at"),
                 "verification_mode": h.payload.get("verification_mode"),
+                "lean_type": h.payload.get("lean_type"),
                 "score": round(h.score, 3),
             }
             for h in response.points
