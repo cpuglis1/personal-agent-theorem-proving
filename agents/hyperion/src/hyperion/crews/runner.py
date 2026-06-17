@@ -853,6 +853,18 @@ async def _execute_workflow(
                         task_id, n, request, deadline, wall, caps, progress_callback, depth
                     )
                     return n.id, res
+                if n.kind == "native":
+                    # Deterministic step: dispatch to a registered plain-Python
+                    # handler (verify/compare/bank/retrieve in the prover). Runs
+                    # inside this same try, so it inherits CapExceeded/wall budget.
+                    from hyperion.crews.native import NativeNodeCtx, run_native_node
+
+                    ctx = NativeNodeCtx(
+                        task_id=task_id, node=n, request=request,
+                        progress_callback=progress_callback,
+                    )
+                    res = await run_native_node(ctx)
+                    return n.id, res
                 rec = load_agent(n.agent)
                 agt = build_agent(rec, task_id, node_id=n.id)
                 tsk = _node_task(n, rec, agt, request, context_brief, fb)
@@ -867,6 +879,11 @@ async def _execute_workflow(
                 if n.kind == "subworkflow":
                     # Record the child run id so the trace UI can drill into it.
                     routing.setdefault("subworkflows", {})[n.id] = f"{task_id}__{n.id}"
+                elif n.kind == "native":
+                    # Native handlers manage their own outputs (blackboard/bank);
+                    # they don't write notes/ or artifacts/, so skip the
+                    # empty-stage check that keys on agent-node kinds.
+                    pass
                 elif not n.instruction:
                     # The empty-stage check keys on node.kind (work→notes/,
                     # synthesize→artifacts/). Skip explicit-instruction nodes

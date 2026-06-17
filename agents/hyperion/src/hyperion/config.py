@@ -120,6 +120,10 @@ class Settings(BaseSettings):
     # Infinity reranker
     infinity_url: str = "http://localhost:7997"
 
+    # Lean verifier sidecar (the prover's oracle). A long-lived service on ai-net
+    # with a warm Mathlib cache; the lean_verify tool POSTs candidate sources here.
+    lean_url: str = "http://localhost:8900"
+
     # Langfuse
     langfuse_public_key: str = ""
     langfuse_secret_key: str = ""

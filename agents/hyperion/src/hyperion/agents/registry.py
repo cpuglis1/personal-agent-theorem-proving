@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field
 from hyperion.config import settings
 from hyperion.feedback import AskUserTool, ReadHumanFeedbackTool
 from hyperion.memory.context_store import ContextGetTool, ContextPutTool, RecallSimilarTasksTool
+from hyperion.tools.lean_verify import LeanVerifyTool
 from hyperion.tools.notion import NotionWriteTool
 from hyperion.tools.second_brain import SecondBrainTool
 from hyperion.tools.web_search import WebSearchTool
@@ -48,6 +49,7 @@ TOOL_REGISTRY: dict[str, Callable[[str], BaseTool]] = {
     "read_human_feedback": lambda task_id: ReadHumanFeedbackTool(task_id=task_id),
     "ask_user": lambda task_id: AskUserTool(task_id=task_id),
     "notion_write": lambda task_id: NotionWriteTool(),
+    "lean_verify": lambda task_id: LeanVerifyTool(),
 }
 
 

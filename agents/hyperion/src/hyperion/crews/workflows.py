@@ -34,7 +34,13 @@ from hyperion.config import settings
 # handing that child workflow's final report back to the parent like a work output.
 # A subworkflow node sets ``workflow`` and leaves ``agent`` unset; every other kind
 # sets ``agent`` and leaves ``workflow`` unset (enforced by ``validate_workflow``).
-NodeKind = Literal["plan", "work", "synthesize", "subworkflow"]
+#
+# "native" is the second non-agent kind: instead of an agent or a child workflow, the
+# node runs a registered plain-Python handler (referenced by ``WorkflowNode.handler``)
+# for deterministic DAG steps (verify/compare/bank/retrieve in the Lean prover). A
+# native node sets ``handler`` and leaves ``agent``/``workflow`` unset. It dispatches
+# exactly parallel to subworkflow (see ``hyperion.crews.native`` and ``runner._run_one``).
+NodeKind = Literal["plan", "work", "synthesize", "subworkflow", "native"]
 
 # Identifier guard for workflow ids and node ids: lowercase alnum start, then
 # alnum / underscore / hyphen. Used both as a filename-safety check (ids become
@@ -79,19 +85,22 @@ class WorkflowNode(BaseModel):
     distinct from ``agent``, the same agent can appear in multiple nodes (e.g. a
     critic that reviews two different upstream branches).
 
-    A node with ``kind == "subworkflow"`` is the exception: it runs another whole
-    workflow (named by ``workflow``) as one composable step and leaves ``agent``
-    unset. Exactly one of ``agent`` / ``workflow`` is set; ``validate_workflow``
-    enforces this and that ``kind == "subworkflow"`` iff ``workflow`` is set.
+    Two kinds are exceptions that do not bind an agent. ``kind == "subworkflow"``
+    runs another whole workflow (named by ``workflow``) as one composable step;
+    ``kind == "native"`` runs a registered plain-Python handler (named by
+    ``handler``) for deterministic steps. Exactly one of ``agent`` / ``workflow`` /
+    ``handler`` is set, keyed by ``kind``; ``validate_workflow`` enforces this.
 
     Attributes:
         id: Node slug, unique within the workflow. Used as the topo-sort key and
             as the target of other nodes' ``upstream`` references.
-        agent: Id of the agent record this node runs (None for subworkflow nodes).
+        agent: Id of the agent record this node runs (None for subworkflow/native nodes).
         workflow: Id of the child workflow this node runs (set only when
             ``kind == "subworkflow"``; None otherwise).
-        kind: The role this node plays (plan / work / synthesize / subworkflow);
-            drives the default task instructions and the HITL gate/revise flow.
+        handler: Registry key of the native handler this node runs (set only when
+            ``kind == "native"``; None otherwise). See ``hyperion.crews.native``.
+        kind: The role this node plays (plan / work / synthesize / subworkflow /
+            native); drives the default task instructions and the HITL gate/revise flow.
         upstream: Ids of nodes that must complete before this node may run. An
             empty list means the node is a graph root with no dependencies.
         gate_before: When True, the runner pauses for human approval (HITL)
@@ -106,9 +115,10 @@ class WorkflowNode(BaseModel):
     """
 
     id: str                                   # node slug, unique within the workflow
-    agent: Optional[str] = None               # agent record id this node runs (None for subworkflow)
+    agent: Optional[str] = None               # agent record id this node runs (None for subworkflow/native)
     workflow: Optional[str] = None            # child workflow id (subworkflow nodes only)
-    kind: NodeKind = "work"                   # role within the workflow (plan/work/synthesize/subworkflow)
+    handler: Optional[str] = None             # native handler registry key (native nodes only)
+    kind: NodeKind = "work"                   # role within the workflow (plan/work/synthesize/subworkflow/native)
     upstream: list[str] = Field(default_factory=list)  # node ids that must finish first
     gate_before: bool = False                 # pause for human approval before this node (HITL)
     instruction: Optional[str] = None         # overrides the kind-derived task description
@@ -321,6 +331,7 @@ def validate_workflow(
     known_agent_ids: set[str],
     known_workflow_ids: Optional[set[str]] = None,
     resolve: Optional[Callable[[str], "WorkflowRecord"]] = None,
+    known_handler_ids: Optional[set[str]] = None,
 ) -> None:
     """Structural validation of a workflow record.
 
@@ -338,6 +349,10 @@ def validate_workflow(
         resolve: Optional loader ``workflow_id -> WorkflowRecord`` used to walk
             subworkflow references for cross-workflow cycle detection. When None,
             cross-workflow cycle detection is skipped (single-workflow validation).
+        known_handler_ids: Ids of native handlers that may be referenced by native
+            nodes. When None, native-handler existence is not checked (only
+            structure) — pass the real set (``NATIVE_HANDLERS`` keys) to reject
+            dangling ``handler`` refs.
 
     Raises:
         ValueError: on any structural problem, an unknown agent/workflow
@@ -356,8 +371,10 @@ def validate_workflow(
         if node.id in seen:
             raise ValueError(f"Duplicate node id {node.id!r} in workflow {record.id!r}")
         seen.add(node.id)
-        # Exactly-one-of: a subworkflow node runs a workflow; every other kind
-        # runs an agent. Mixing the two (or setting neither) is a schema error.
+        # Exactly-one-of: a subworkflow node runs a workflow, a native node runs a
+        # handler, every other kind runs an agent. Setting more than one of
+        # agent/workflow/handler (or none of the kind's required field) is a schema
+        # error. The native branch mirrors the subworkflow rule exactly.
         if node.kind == "subworkflow":
             if not node.workflow:
                 raise ValueError(
@@ -367,15 +384,41 @@ def validate_workflow(
                 raise ValueError(
                     f"Sub-workflow node {node.id!r} must not also set 'agent'"
                 )
+            if node.handler:
+                raise ValueError(
+                    f"Sub-workflow node {node.id!r} must not also set 'handler'"
+                )
             if known_workflow_ids is not None and node.workflow not in known_workflow_ids:
                 raise ValueError(
                     f"Node {node.id!r} references unknown workflow {node.workflow!r}"
+                )
+        elif node.kind == "native":
+            if not node.handler:
+                raise ValueError(
+                    f"Native node {node.id!r} must set 'handler'"
+                )
+            if node.agent:
+                raise ValueError(
+                    f"Native node {node.id!r} must not also set 'agent'"
+                )
+            if node.workflow:
+                raise ValueError(
+                    f"Native node {node.id!r} must not also set 'workflow'"
+                )
+            if known_handler_ids is not None and node.handler not in known_handler_ids:
+                raise ValueError(
+                    f"Node {node.id!r} references unknown native handler {node.handler!r}"
                 )
         else:
             if node.workflow:
                 raise ValueError(
                     f"Node {node.id!r} sets 'workflow' but kind is {node.kind!r} "
                     f"(use kind 'subworkflow' to run a workflow)"
+                )
+            if node.handler:
+                raise ValueError(
+                    f"Node {node.id!r} sets 'handler' but kind is {node.kind!r} "
+                    f"(use kind 'native' to run a handler)"
                 )
             if not node.agent:
                 raise ValueError(f"Node {node.id!r} must set 'agent'")
