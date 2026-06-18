@@ -59,9 +59,16 @@ class NodeWhen(BaseModel):
     When present, the node runs only if the planner-classified ``task_type`` of the
     run is listed in ``task_types`` (e.g. a developer node that fires only on
     ``code`` tasks). An empty/omitted ``when`` means the node always fires.
+
+    ``prover_mode`` adds the RESEARCH/DEPLOY policy gate (build-plan Post-work #2):
+    ``"research"`` ⇒ the node fires only when ``settings.prover_research_mode`` is True;
+    ``"deploy"`` ⇒ only when it is False. Used to gate the Path-B ``synthesize`` node so
+    DEPLOY runs greedy-retrieval (no synthesis) while RESEARCH always races A+B. Both
+    conditions, when set, must hold for the node to fire.
     """
 
     task_types: list[str] = Field(default_factory=list)
+    prover_mode: Optional[str] = None  # "research" | "deploy" | None (mode-agnostic)
 
 
 class NodePosition(BaseModel):

@@ -432,10 +432,15 @@ Copy the skeleton of [episodic.py](agents/hyperion/src/hyperion/memory/episodic.
 ### Test Gate — Post-work
 
 - **Definition of Done:**
-  - [ ] Thesis-curve harness produces a plot from a real multi-theorem run; numbers are reproducible from the triple log.
-  - [ ] Flipping the RESEARCH/DEPLOY flag measurably changes whether `synthesize` fires (asserted by a routing test, like the `skipped` records in `_node_fires`).
-  - [ ] Caps re-tuned against measured sidecar latency; documented.
-  - [ ] A killed bank write fails loudly in an integration test.
+  - [~] Thesis-curve harness produces a plot from a real multi-theorem run; numbers are reproducible from the triple log. *(Read-out built & tested offline: `eval/thesis_curve.py` (`aggregate`/`running_curve`/`format_summary`, `load_triples` over run-dir `context.json`) + `eval/trace.py` (per-stage, per-sub-goal tracer) + `eval/demo.py` (sample problems through the REAL runner, mocked LLM/Lean). `test_eval.py` (9) asserts the aggregation math and that the demo runs all three paths (retrieval / repair / research-contest+abstract). **Plot + "real multi-theorem run" deferred** — the numbers come from real runs once the live sidecar + LLM are wired; the harness returns numbers/curve and leaves plotting to the caller (no hot-path / no plotting dep).)*
+  - [x] Flipping the RESEARCH/DEPLOY flag measurably changes whether `synthesize` fires (asserted by a routing test, like the `skipped` records in `_node_fires`). *(`NodeWhen.prover_mode` (`"research"`/`"deploy"`) consulted by `runner._node_fires` against `settings.prover_research_mode`; `test_policy_knob.py` (4) — a `research`-gated node fires only in RESEARCH and is skipped with reason in DEPLOY, and vice-versa; mode-agnostic nodes unchanged.)*
+  - [ ] Caps re-tuned against measured sidecar latency; documented. *(Blocked on the live-Lean tier — needs the Phase-1 integration latency numbers.)*
+  - [ ] A killed bank write fails loudly in an integration test. *(Loud write path + surfacing proven offline in P2/P4; the killed-Qdrant integration test is live-tier.)*
+
+  > **Implemented (Post-work, partial — observability + policy knob):**
+  > - **Eval package** [`src/hyperion/eval/`](agents/hyperion/src/hyperion/eval/): `trace.py` (reconstruct a run's per-stage output from the durable blackboard + plan + `result.lean`; `collect_trace` pure, `trace_task` disk wrapper, `format_trace` renderer), `thesis_curve.py` (aggregate the triple log → solved-rate / Path-A win-rate / retrieval-beats-synthesis-in-contest / running snowball curve), `demo.py` (`python -m hyperion.eval.demo` runs sample theorems through `runner.run_task` with mocked LLM+Lean and prints each stage). All read-only, off the hot path.
+  > - **Policy knob (decision deferred from Phase 5)**: `NodeWhen.prover_mode` + `_node_fires` gate. The shipped `lean-prove.json` leaves `synthesize` mode-agnostic (fires in both modes); operators opt a node into the gate by setting `when.prover_mode`. **Caveat (follow-up):** because `retrieve ‖ synthesize` share a wave, *confidence-gated* DEPLOY synthesis (fire only on low-retrieval-confidence) needs a retrieve→verify→synthesize-on-miss sequential variant — the current gate is the coarser all-or-nothing mode switch.
+  > - **Finding from the demo (next hardening target):** the bank's `_assemble` substitutes a winner's `proof_term` into the scaffold `sorry` hole, but the **repair** winner sets `proof_term` to the *full* `theorem … := proof` source (not a bare term), so a repaired sub-goal assembles malformed Lean (the final full-verify would reject it live). The fix is to make synthesized/repaired winners expose a bare proof term (extract after the top-level `:=`); tracked for the bank-hardening pass.
 
 ---
 
@@ -452,7 +457,8 @@ Copy the skeleton of [episodic.py](agents/hyperion/src/hyperion/memory/episodic.
 | Plan contract (P4) | `test_plan_contract_lean.py` | unit | Reads `lean_type`/`scaffold`; still tolerates old plans |
 | Compare (P5) | `test_compare.py` | unit | More-general lemma wins; triple logged to schema |
 | Abstractor (P5) | `test_abstractor.py` | unit + lean | Abstraction re-verifies; over-abstraction rejected |
-| Policy knob (Post) | extend workflow test | orchestration | DEPLOY flag suppresses `synthesize` firing |
+| Policy knob (Post) | `test_policy_knob.py` | orchestration | RESEARCH/DEPLOY flag flips `synthesize` firing via `NodeWhen.prover_mode` |
+| Eval / observability (Post) | `test_eval.py` | unit + orchestration | Stage tracer reconstructs each stage; triple-log aggregates to the thesis read-out; demo runs all 3 paths |
 
 Run discipline: `uv run pytest` (offline tiers) on every commit; `uv run pytest -m lean` (integration) before merging a phase and nightly.
 
