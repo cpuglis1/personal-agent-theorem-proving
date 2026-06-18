@@ -318,6 +318,32 @@ async def test_bank_surfaces_a_failed_write(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Bank assembly — a repair winner's full-declaration proof_term is reduced to a
+# bare term that fits a `have … := <here>` hole (Post-work bank-hardening finding)
+# ---------------------------------------------------------------------------
+
+
+def test_assemble_reduces_repair_winner_to_bare_proof():
+    from hyperion.crews.lean_handlers import _assemble, _bare_proof_term
+    from hyperion.crews.plan_contract import Subtask
+
+    # A repair winner carries the WHOLE declaration in proof_term.
+    repair_win = {"proof_term": "theorem t : R := by exact r_proof",
+                  "source": "theorem t : R := by exact r_proof"}
+    assert _bare_proof_term(repair_win) == "by exact r_proof"
+    # Bare proof terms pass through untouched (Path A / synthesis).
+    assert _bare_proof_term({"proof_term": "lemP_proof"}) == "lemP_proof"
+    assert _bare_proof_term({"proof_term": "fun h => h"}) == "fun h => h"
+    # A leading comment line before the decl is tolerated.
+    assert _bare_proof_term({"proof_term": "-- fixed\ntheorem t : R := by simp"}) == "by simp"
+
+    scaffold = "theorem g : R := by\n  have h1 : R := sorry\n  exact h1"
+    out = _assemble(scaffold, [Subtask(id="h1", lean_type="R")], {"h1": repair_win})
+    assert "have h1 : R := by exact r_proof" in out
+    assert "theorem t : R" not in out          # the declaration header is gone — well-formed
+
+
+# ---------------------------------------------------------------------------
 # Phase 5 — compare/abstract wiring (after verify, before bank) + anti-starvation
 # ---------------------------------------------------------------------------
 

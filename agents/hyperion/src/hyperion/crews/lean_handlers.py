@@ -399,7 +399,9 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
                         verified_b = {
                             "source": cur_source,
                             "statement": cb.get("statement", ""),
-                            "proof_term": cur_source,
+                            # Store the BARE proof body, not the whole declaration, so the
+                            # bank and the scaffold assembly get a term that fits a hole.
+                            "proof_term": _bare_proof_term({"source": cur_source}),
                             "origin": "repair",
                             "lean_type": cb.get("lean_type") or goal,
                             "path": "B",
@@ -573,21 +575,77 @@ async def abstract_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
 # bank — assemble result.lean + store winners (loud)
 # ---------------------------------------------------------------------------
 
+_DECL_KEYWORDS = ("theorem", "lemma", "example", "def", "instance", "abbrev")
+
+
+def _proof_body_after_assign(src: str) -> Optional[str]:
+    """Return the text after the first top-level ``:=`` of ``src``, or None if there is none.
+
+    Top-level = at bracket depth 0, so a ``:=`` inside ``(…)``/``{…}``/``[…]`` (or a type
+    ascription ``:`` not followed by ``=``) is skipped. This is the proof body of a
+    declaration ``theorem t : T := <body>``.
+    """
+    depth = 0
+    i, n = 0, len(src)
+    while i < n:
+        ch = src[i]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+        elif ch == ":" and depth == 0 and i + 1 < n and src[i + 1] == "=":
+            return src[i + 2:].strip()
+        i += 1
+    return None
+
+
+def _looks_like_declaration(text: str) -> bool:
+    """True if ``text`` begins (past comment/blank lines) with a Lean decl keyword."""
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("--"):
+            continue
+        return stripped.split(None, 1)[0] in _DECL_KEYWORDS
+    return False
+
+
+def _bare_proof_term(win: dict[str, Any]) -> str:
+    """The bare proof body that fits a ``have … := <here>`` hole, for any winner shape.
+
+    Path-A and synthesized winners carry a bare ``proof_term`` already; a **repair** winner
+    sets ``proof_term`` to the *full* ``theorem … := proof`` source (the thing the kernel
+    verified). Substituting that whole declaration into a ``sorry`` hole yields malformed
+    Lean (``have h : T := theorem … := proof``). So: if the proof term (or source) is a full
+    declaration, extract the body after its top-level ``:=``; otherwise it is already bare.
+    """
+    proof = (win.get("proof_term") or "").strip()
+    source = (win.get("source") or "").strip()
+    for text in (proof, source):
+        if not text:
+            continue
+        if _looks_like_declaration(text):
+            body = _proof_body_after_assign(text)
+            if body:
+                return body
+        return text
+    return ""
+
 
 def _assemble(scaffold: str, subtasks: list[Subtask], discharged: dict[str, dict]) -> str:
     """Substitute each discharged sub-goal's proof into the scaffold's ``sorry`` holes.
 
-    Replaces the first remaining ``sorry`` token with each sub-goal's proof term, in
-    subtask order, so the have-chain that the skeleton check accepted becomes a closed
-    proof. Sub-goals with no discharge keep their ``sorry`` (the final full-mode verify
-    will then reject the artifact — the loss is not hidden).
+    Replaces the first remaining ``sorry`` token with each sub-goal's **bare** proof term
+    (see :func:`_bare_proof_term` — a repair winner's ``proof_term`` is a full declaration
+    and must be reduced to its body), in subtask order, so the have-chain that the skeleton
+    check accepted becomes a closed proof. Sub-goals with no discharge keep their ``sorry``
+    (the final full-mode verify will then reject the artifact — the loss is not hidden).
     """
     result = scaffold
     for sub in subtasks:
         win = discharged.get(sub.id)
         if not win:
             continue
-        proof = win.get("proof_term") or win.get("source") or ""
+        proof = _bare_proof_term(win)
         result = result.replace("sorry", proof, 1)
     return result
 

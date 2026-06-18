@@ -17,6 +17,7 @@ is self-contained and no per-session state is retained between requests.
 Tools exposed (see ``list_tools`` for full schemas):
   hyperion_run(task[, workflow])           → task_id (runs the crew in the background)
   hyperion_status(task_id)                 → status + recent progress lines
+  hyperion_trace(task_id)                  → prover per-stage trace (retrieve→…→bank)
   hyperion_artifact(task_id[, name])       → artifact file contents as text
   hyperion_approve(task_id[, action, ...]) → resume a plan-approval gate
   hyperion_feedback(task_id, message)      → send free-text feedback / answer a question
@@ -154,6 +155,21 @@ async def list_tools() -> list[Tool]:
         Tool(
             name="hyperion_status",
             description="Get the status and result of a Hyperion task.",
+            inputSchema={
+                "type": "object",
+                "properties": {"task_id": {"type": "string"}},
+                "required": ["task_id"],
+            },
+        ),
+        Tool(
+            name="hyperion_trace",
+            description=(
+                "Inspect a Lean prover run stage-by-stage: for each sub-goal, what "
+                "retrieve (Path A) / synthesize (Path B) produced, the verify verdict + "
+                "repair iterations, the compare winner + thesis triple, whether abstract "
+                "fired, and the assembled result.lean. Returns 'not a prover run' for "
+                "ordinary tasks."
+            ),
             inputSchema={
                 "type": "object",
                 "properties": {"task_id": {"type": "string"}},
@@ -330,6 +346,27 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             + "\n".join(f"  {l}" for l in progress[-20:])
         )
         return [TextContent(type="text", text=text)]
+
+    elif name == "hyperion_trace":
+        task_id = arguments["task_id"]
+        async with aiosqlite.connect(_db_path()) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT request, status FROM tasks WHERE task_id=?", (task_id,)
+            ) as cur:
+                row = await cur.fetchone()
+        if not row:
+            return [TextContent(type="text", text=f"Task {task_id!r} not found.")]
+        from hyperion.eval.trace import format_trace, trace_task
+
+        pt = trace_task(task_id, request=row["request"] or "", status=row["status"])
+        if not pt.get("subgoals"):
+            return [TextContent(
+                type="text",
+                text=f"Task {task_id!r} has no prover stage trace (not a Lean prover run, "
+                     "or no sub-goals reached yet).",
+            )]
+        return [TextContent(type="text", text=format_trace(pt))]
 
     elif name == "hyperion_artifact":
         task_id = arguments["task_id"]

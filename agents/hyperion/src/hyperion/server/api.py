@@ -1134,12 +1134,28 @@ async def get_task_trace(task_id: str) -> dict:
         except Exception:
             ev["tools_used"] = []
 
+    # Prover stage trace: the native nodes (retrieve/verify/compare/abstract/bank) are not
+    # LLM ``trace_events``, so they don't appear above. Reconstruct their per-stage, per-
+    # sub-goal output from the durable blackboard so a real prover run is inspectable in the
+    # same Trace Flow UI. Attached only for prover runs (``subgoals`` present); guarded so a
+    # non-prover task (or a read error) simply yields ``prover: null``.
+    prover_trace = None
+    try:
+        from hyperion.eval.trace import trace_task
+
+        pt = trace_task(task_id, request=request_text, status=row["status"])
+        if pt.get("subgoals"):
+            prover_trace = pt
+    except Exception:
+        prover_trace = None
+
     return {
         "task_id": task_id,
         "request": request_text,
         "status": row["status"],
         "routing": routing,
         "events": events,
+        "prover": prover_trace,
     }
 
 
