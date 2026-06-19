@@ -43,6 +43,32 @@ from hyperion.config import settings
 # non-greedy `.*?` stops at the first closing `---` line.
 _FRONTMATTER_RE = re.compile(r"^\s*---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 
+# An *unclosed* leading fence: an opening ``---`` with no closing one. The planner LLM
+# routinely emits the whole plan as a frontmatter block and forgets the closing fence, so
+# the strict regex above never matches and the entire typed plan (options/subtasks) is
+# silently dropped — the prover then degrades to the raw prose request, and Path-A lemma
+# retrieval (which needs the clean Lean type) always misses. Group 1 captures everything
+# after the opening fence to EOF.
+_UNCLOSED_FRONTMATTER_RE = re.compile(r"^\s*---\s*\n(.*)\Z", re.DOTALL)
+
+
+def _split_frontmatter(text: str) -> tuple[Optional[str], str]:
+    """Split plan.md into ``(frontmatter_yaml, markdown_body)``.
+
+    Prefers a properly fenced ``---\\n…\\n---\\n`` block. Falls back to an *unclosed*
+    leading fence (opening ``---`` with no closing one), treating the remainder of the file
+    as frontmatter and the body as empty — recovering plans the planner wrote without a
+    closing fence instead of losing the whole typed plan. Returns ``(None, text)`` when
+    there is no leading fence at all, so callers degrade to defaults.
+    """
+    m = _FRONTMATTER_RE.match(text)
+    if m:
+        return m.group(1), text[m.end():]
+    m = _UNCLOSED_FRONTMATTER_RE.match(text)
+    if m:
+        return m.group(1), ""
+    return None, text
+
 # A *top-level* (no leading indent) ``key: value`` line whose plain-scalar value itself
 # contains a colon — e.g. ``original_request: Prove in Lean 4: ... ``. To YAML the second
 # colon reads as a nested mapping ("mapping values are not allowed here") and the whole
@@ -198,6 +224,20 @@ class PlanFrontmatter(BaseModel):
             return [str(item).strip() for item in v if str(item).strip()]
         return [str(v)]
 
+    @field_validator("task_id", "original_request", "context_brief", "scaffold", mode="before")
+    @classmethod
+    def _coerce_str_scalar(cls, v: Any) -> Optional[str]:
+        """Stringify scalar fields YAML may have typed as non-``str`` before validation.
+
+        Same tolerance posture as :meth:`_coerce_keywords`: the planner echoes ``task_id: 1``
+        (YAML reads it as ``int``) and can emit a numeric/bool ``original_request`` or
+        ``scaffold``. Strict ``Optional[str]`` rejects those, and the rejection bubbles to the
+        salvage path which **drops ``options``** — so the typed sub-goals are lost and the
+        prover degrades to the raw prose request (Path-A retrieval then misses). Coerce any
+        non-string scalar to ``str`` here, leaving ``None`` untouched.
+        """
+        return v if v is None or isinstance(v, str) else str(v)
+
     def active_subtasks(self) -> list[Subtask]:
         """Return the subtasks of whichever option is currently in effect.
 
@@ -255,13 +295,13 @@ def parse_plan(task_id: str) -> PlanFrontmatter:
         # No plan written yet -> all defaults.
         return PlanFrontmatter()
     text = path.read_text(encoding="utf-8")
-    m = _FRONTMATTER_RE.match(text)
-    if not m:
+    fm, _body = _split_frontmatter(text)
+    if fm is None:
         # File exists but has no leading frontmatter block.
         return PlanFrontmatter()
     # Parse via the shared loader: tolerates malformed YAML (incl. the unquoted-colon
     # scalar the planner sometimes emits) by recovering or degrading to {} — never raises.
-    data = _load_frontmatter(m.group(1))
+    data = _load_frontmatter(fm)
     if not data:
         # No usable mapping (missing/blank/irrecoverable frontmatter) -> defaults.
         return PlanFrontmatter()
@@ -294,15 +334,14 @@ def update_plan_frontmatter(task_id: str, **fields) -> None:
     data: dict = {}
     if path.exists():
         text = path.read_text(encoding="utf-8")
-        m = _FRONTMATTER_RE.match(text)
-        if m:
+        fm, body = _split_frontmatter(text)
+        if fm is not None:
             # Shared loader: recovers the unquoted-colon case (and any malformed YAML)
             # to a dict so the merge below preserves the existing plan instead of
             # crashing the task — the bug that failed runs whose request held a colon.
-            data = _load_frontmatter(m.group(1))
-            body = text[m.end():]
-        else:
-            body = text
+            # ``_split_frontmatter`` also recovers an unclosed leading fence so a write
+            # re-emits a properly fenced block instead of dropping the typed plan.
+            data = _load_frontmatter(fm)
     data.update(fields)
     fm = yaml.safe_dump(data, sort_keys=False, allow_unicode=True).strip()
     path.parent.mkdir(parents=True, exist_ok=True)

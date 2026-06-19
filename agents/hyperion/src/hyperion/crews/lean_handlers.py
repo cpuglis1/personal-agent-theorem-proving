@@ -45,7 +45,7 @@ from hyperion.crews.native import NativeNodeCtx, register_native_handler
 from hyperion.crews.plan_contract import Subtask, parse_plan
 from hyperion.memory import lemma_bank
 from hyperion.tools.lean_verify import verify_lean
-from hyperion.tools.lemma_retrieval import retrieve_applicable_lemmas
+from hyperion.tools.lemma_retrieval import _lemma_type, retrieve_applicable_lemmas
 
 logger = logging.getLogger(__name__)
 
@@ -84,16 +84,45 @@ def _subgoal(ctx: NativeNodeCtx, sg_id: str) -> Optional[Subtask]:
     return None
 
 
+# Leading natural-language framing the planner/user wraps a goal in, e.g.
+# "Prove that 0 + 7 = 7." → "0 + 7 = 7". Stripped so the *retrieval query* (and the repair
+# goal) is the bare Lean type, not English — prose embeds far from the banked lemma types,
+# so a request like "Prove that 0 + 7 = 7." retrieves NOTHING while "0 + 7 = 7" surfaces the
+# applicable ∀-lemma. The load-bearing safety net for when the decomposer's YAML is
+# unparseable (the prover then falls back to ``ctx.request`` for the goal type).
+_GOAL_PROSE_PREFIX_RE = re.compile(
+    r"^\s*(?:please\s+)?(?:prove|show|verify|establish|demonstrate)\b"
+    r"(?:\s+(?:in\s+lean(?:\s*4)?|that|the\s+following|the\s+statement|the\s+theorem|:))*"
+    r"\s*:?\s*",
+    re.IGNORECASE,
+)
+
+
+def _prose_to_goal_type(request: str) -> str:
+    """Best-effort strip of natural-language framing from a goal request.
+
+    Removes a leading ``Prove/Show/Verify … that`` clause and a trailing period so the
+    result is the bare Lean type when the request is a thin wrapper around one. Conservative:
+    returns the original (trimmed) text unchanged when nothing matches or stripping would
+    empty it — a degraded query still runs, it just never *worsens* the request.
+    """
+    if not request:
+        return request
+    stripped = _GOAL_PROSE_PREFIX_RE.sub("", request).strip().rstrip(".").strip()
+    return stripped or request.strip()
+
+
 def _goal_type(ctx: NativeNodeCtx, sg_id: str) -> str:
     """The Lean type of sub-goal ``sg_id`` (the retrieval query + synthesis target).
 
     Prefers the plan contract's ``lean_type``; degrades to the run request (the target
-    theorem) when the plan has no typed sub-goal — a degraded query still runs.
+    theorem, with natural-language framing stripped) when the plan has no typed sub-goal —
+    a degraded query still runs, and stripping the prose keeps Path-A retrieval usable.
     """
     sub = _subgoal(ctx, sg_id)
     if sub and sub.lean_type:
         return sub.lean_type
-    return ctx.request
+    return _prose_to_goal_type(ctx.request)
 
 
 def _bb_key(base: str, sg_id: str) -> str:
@@ -173,17 +202,65 @@ def _synthesized_candidate(ctx: NativeNodeCtx, sg_id: str) -> Optional[dict[str,
 # ---------------------------------------------------------------------------
 
 
+def _normalize_proof_rhs(proof_term: str) -> str:
+    """Coerce a banked ``proof_term`` into a valid right-hand side for ``:= <here>``.
+
+    Banked proof terms are heterogeneous: seeds store *term* proofs (``fun n => Nat...``,
+    ``Nat.add_comm``, ``rfl``); live runs store *tactic blocks* (``\\n  intro n\\n  rfl``)
+    and ``by``-prefixed blocks (``by\\n  rfl``). Pasted verbatim into ``have h : T := …``,
+    a multi-line tactic block breaks on indentation. We:
+
+      * keep term proofs (``fun``/dotted-name/parenthesized/bare ident) as-is;
+      * collapse any tactic block — ``by``-prefixed or bare — to a single-line
+        ``by t1; t2; …`` so column-sensitive parsing can't bite inside the ``have``.
+
+    A degraded/empty term falls back to ``by exact?`` (the kernel rejects it cleanly, so
+    the candidate simply fails to verify rather than crashing the controller).
+    """
+    pt = (proof_term or "").strip()
+    if not pt:
+        return "by exact?"
+    if pt.startswith("by"):
+        tacs = [t.strip() for t in re.split(r"[\n;]", pt[2:]) if t.strip()]
+        return "by " + "; ".join(tacs) if tacs else "by exact?"
+    # Term proofs: lambda, dotted/qualified name, application, or parenthesized term.
+    if pt.startswith(("fun ", "@", "(")) or ("\n" not in pt and "=>" not in pt):
+        return pt
+    # Otherwise it's a bare (un-``by``-ed) tactic block — collapse to one line.
+    tacs = [t.strip() for t in re.split(r"[\n;]", pt) if t.strip()]
+    return "by " + "; ".join(tacs) if tacs else "by exact?"
+
+
 def _candidate_from_lemma(goal_type: str, lemma: dict[str, Any]) -> dict[str, Any]:
     """Assemble a verifiable Path-A candidate from a retrieved lemma payload.
 
-    Produces a self-contained ``full``-mode source that discharges ``goal_type`` using
-    the lemma's proof term. The exact source string is a heuristic refined on the
-    live-Lean path (the offline gate mocks ``verify_lean`` and does not depend on it);
-    what matters structurally is that ``proof_term`` carries the lemma's verified proof.
+    Produces a self-contained ``full``-mode source that discharges ``goal_type`` by
+    *applying* the banked lemma — the construction the applicability gate already proved
+    works (its probe unifies via ``exact h``/``apply h``). The earlier form pasted the
+    lemma's ``proof_term`` verbatim into ``example : {goal_type} := {proof_term}``, which
+    is ill-typed whenever ``goal_type`` is an *instance* of a ∀-lemma (e.g.
+    ``example : 0 + 0 = 0 := fun n => Nat.zero_add n``). Instead we re-prove the lemma as
+    a local ``h`` of its own type and close the goal through it::
+
+        example : {goal_type} := by
+          have h : {lemma_type} := {proof}
+          first | exact h | apply h | simpa using h
+
+    ``exact h`` closes a goal that *is* the lemma's statement; ``apply h``/``simpa`` let
+    the kernel instantiate the lemma's binders for an instance goal. ``lemma_type`` prefers
+    the payload's ``lean_type``, degrading to the type extracted from ``statement`` (which
+    may be a bare type or a full ``theorem … := …`` decl). Verified live across seed
+    (term-proof) and banked (tactic-block) payloads for both exact-∀ and instance goals.
     """
-    proof_term = lemma.get("proof_term", "") or "by exact?"
     statement = lemma.get("statement", "") or f"example : {goal_type}"
-    source = f"example : {goal_type} := {proof_term}"
+    proof_term = lemma.get("proof_term", "") or "by exact?"
+    lemma_type = lemma.get("lean_type") or _lemma_type(statement)
+    proof = _normalize_proof_rhs(proof_term)
+    source = (
+        f"example : {goal_type} := by\n"
+        f"  have h : {lemma_type} := {proof}\n"
+        f"  first | exact h | apply h | simpa using h"
+    )
     return {
         "source": source,
         "statement": statement,

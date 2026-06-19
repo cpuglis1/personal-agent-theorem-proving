@@ -220,6 +220,87 @@ def test_comma_string_keywords_preserve_options(tmp_path):
     assert plan.options and plan.active_subtasks()[0].id == "base"
 
 
+# ---------------------------------------------------------------------------
+# unclosed frontmatter fence — the planner LLM routinely emits the whole plan as a
+# leading ``---`` block and forgets the closing ``---``. The strict frontmatter regex
+# then never matched, so parse_plan returned bare defaults: empty active_subtasks ->
+# the prover ran on sub-goal "0" with goal_type = the raw prose request, and Path-A
+# lemma retrieval (which needs the clean Lean type) always missed. Recovery keeps the
+# typed plan so the live snowball (instance goal reuses a banked ∀-lemma) can close.
+# ---------------------------------------------------------------------------
+
+_UNCLOSED_PLAN = """---
+task_id: t_unclosed
+task_type: code
+keywords: [addition, identity]
+scaffold: |
+  have step1 : 0 + 7 = 7 := sorry
+  exact step1
+options:
+  - id: 'a'
+    summary: direct application of zero-add identity
+    subtasks:
+      - id: 'step1'
+        description: show 0 + 7 = 7
+        lean_type: 0 + 7 = 7
+"""
+
+
+def test_unclosed_frontmatter_fence_recovers_typed_plan(tmp_path):
+    """A plan with an opening ``---`` but NO closing fence still yields its typed
+    sub-goals — the exact failure that degraded the prover to the prose request."""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        _write_plan(tmp_path, "t_unclosed", _UNCLOSED_PLAN)
+        plan = parse_plan("t_unclosed")
+
+    assert plan.task_type == "code"
+    assert plan.options, "options must survive an unclosed fence (was dropped -> defaults)"
+    subs = plan.active_subtasks()
+    assert subs and subs[0].id == "step1"
+    # The load-bearing field: the clean Lean type drives Path-A retrieval, not the prose.
+    assert subs[0].lean_type == "0 + 7 = 7"
+
+
+_INT_TASK_ID_PLAN = """---
+task_id: 1
+original_request: Prove that 0 + 7 = 7.
+task_type: code
+keywords: [addition, identity]
+options:
+  - id: 'a'
+    summary: direct
+    subtasks:
+      - id: 'step1'
+        description: show 0 + 7 = 7
+        lean_type: 0 + 7 = 7
+"""
+
+
+def test_int_task_id_does_not_drop_options(tmp_path):
+    """``task_id: 1`` (YAML int) must coerce to str, not trip validation and lose options —
+    the planner echoes the numeric task id and strict ``Optional[str]`` would reject it."""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        _write_plan(tmp_path, "t_intid", _INT_TASK_ID_PLAN)
+        plan = parse_plan("t_intid")
+
+    assert plan.task_id == "1"  # coerced, not dropped
+    assert plan.options and plan.active_subtasks()[0].lean_type == "0 + 7 = 7"
+
+
+def test_update_frontmatter_recloses_unclosed_fence(tmp_path):
+    """Writing to an unclosed-fence plan re-emits a properly fenced block, preserving
+    the typed plan across the merge (rather than wrapping the whole file as a body)."""
+    from hyperion.crews.plan_contract import update_plan_frontmatter
+
+    with patch.object(settings, "tasks_dir", tmp_path):
+        _write_plan(tmp_path, "t_unclosed2", _UNCLOSED_PLAN)
+        update_plan_frontmatter("t_unclosed2", selected_option="a")  # must not corrupt
+        plan = parse_plan("t_unclosed2")
+
+    assert plan.selected_option == "a"
+    assert plan.active_subtasks()[0].lean_type == "0 + 7 = 7"  # typed plan preserved
+
+
 def test_keywords_coercion_handles_bool_and_mixed_list():
     """A YAML bool (from a True/False theorem) and bool/number list elements coerce to str."""
     from hyperion.crews.plan_contract import PlanFrontmatter
