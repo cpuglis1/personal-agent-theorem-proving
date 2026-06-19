@@ -646,7 +646,13 @@ function buildGraph(
     data: { request: data.request },
   });
 
-  const userEvents = data.events.filter((e) => e.prompt_type === "user-facing");
+  // "native-stage" rows are the deterministic prover nodes (skeleton_check/retrieve/
+  // verify/compare/abstract/bank) — they make no LLM call but ARE workflow nodes, so we
+  // group them with the user-facing events to light up their DAG node with stage output
+  // (otherwise they render as empty/dimmed and look like they never fired).
+  const userEvents = data.events.filter(
+    (e) => e.prompt_type === "user-facing" || e.prompt_type === "native-stage",
+  );
   const metaEvents = data.events.filter((e) => e.prompt_type === "meta-prompt");
 
   const dag = data.routing?.dag ?? null;

@@ -30,10 +30,10 @@ Design notes / non-obvious context:
 from __future__ import annotations
 
 import re
-from typing import Optional
+from typing import Any, Optional
 
 import yaml
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from hyperion.config import settings
 
@@ -42,6 +42,56 @@ from hyperion.config import settings
 # re.DOTALL lets `.` span newlines so multi-line frontmatter is captured; the
 # non-greedy `.*?` stops at the first closing `---` line.
 _FRONTMATTER_RE = re.compile(r"^\s*---\s*\n(.*?)\n---\s*\n", re.DOTALL)
+
+# A *top-level* (no leading indent) ``key: value`` line whose plain-scalar value itself
+# contains a colon — e.g. ``original_request: Prove in Lean 4: ... ``. To YAML the second
+# colon reads as a nested mapping ("mapping values are not allowed here") and the whole
+# block fails to parse. The negative lookahead skips values the planner already quoted or
+# that open a block/flow/anchor (``| > " ' [ { & *``), and the leading-anchor ``^`` means
+# indented block-scalar content (e.g. the ``scaffold: |`` body, which legitimately holds
+# colons) is never touched.
+_SCALAR_COLON_RE = re.compile(r"""^([A-Za-z_][\w-]*):[ \t]+(?![|>&*"'\[{])(.*:.*\S)\s*$""")
+
+
+def _sanitize_frontmatter(raw: str) -> str:
+    """Quote top-level scalar values that carry an unescaped colon.
+
+    A recovery pass for the common planner failure where an LLM copies a request like
+    ``Prove in Lean 4: ...`` verbatim into a frontmatter scalar, producing YAML that
+    ``safe_load`` rejects. We re-emit only the offending *top-level* lines as double-
+    quoted scalars (escaping any embedded quote/backslash), leaving every other line —
+    lists, block scalars, nested mappings — byte-for-byte unchanged.
+    """
+    out: list[str] = []
+    for line in raw.splitlines():
+        m = _SCALAR_COLON_RE.match(line)
+        if m:
+            key, val = m.group(1), m.group(2).rstrip()
+            val = val.replace("\\", "\\\\").replace('"', '\\"')
+            out.append(f'{key}: "{val}"')
+        else:
+            out.append(line)
+    return "\n".join(out)
+
+
+def _load_frontmatter(raw: str) -> dict:
+    """``yaml.safe_load`` a frontmatter block, with a colon-quoting recovery retry.
+
+    Returns the parsed mapping, or ``{}`` when even the sanitized form won't parse (or
+    parses to a non-mapping) — so every caller degrades to "empty frontmatter" rather
+    than raising. Centralizes the parse so both the reader (:func:`parse_plan`) and the
+    writer (:func:`update_plan_frontmatter`) recover identically instead of one crashing.
+    """
+    for candidate in (raw, _sanitize_frontmatter(raw)):
+        try:
+            loaded = yaml.safe_load(candidate)
+        except yaml.YAMLError:
+            continue
+        if isinstance(loaded, dict):
+            return loaded
+        # Parsed cleanly but to a scalar/list — not frontmatter; no retry will help.
+        return {}
+    return {}
 
 
 class Subtask(BaseModel):
@@ -122,6 +172,32 @@ class PlanFrontmatter(BaseModel):
     selected_option: Optional[str] = None
     scaffold: Optional[str] = None                 # have-chain proof text (prover)
 
+    @field_validator("keywords", mode="before")
+    @classmethod
+    def _coerce_keywords(cls, v: Any) -> list[str]:
+        """Coerce the planner's ``keywords`` into ``list[str]`` before validation.
+
+        Load-bearing tolerance: the LLM emits ``keywords`` in shapes Pydantic's strict
+        ``list[str]`` rejects — a bare comma string (``natural numbers, subtraction``),
+        a bool when the theorem mentions ``True``/``False`` (YAML coerces it), or a list
+        with bool/number elements. A rejection here used to bubble to the salvage path,
+        which **drops ``options``** — so a perfectly good plan lost its sub-goals and the
+        verified lemma never reached the bank (the snowball stalled). Coercing here keeps
+        validation green so ``options`` survive:
+
+          - ``None`` → ``[]``
+          - ``str``  → comma-split into trimmed keywords (single token ⇒ one element)
+          - scalar (bool/int/float) → ``[str(v)]``
+          - list/tuple → each element stringified (bools/numbers included)
+        """
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [part.strip() for part in v.split(",") if part.strip()]
+        if isinstance(v, (list, tuple)):
+            return [str(item).strip() for item in v if str(item).strip()]
+        return [str(v)]
+
     def active_subtasks(self) -> list[Subtask]:
         """Return the subtasks of whichever option is currently in effect.
 
@@ -183,13 +259,11 @@ def parse_plan(task_id: str) -> PlanFrontmatter:
     if not m:
         # File exists but has no leading frontmatter block.
         return PlanFrontmatter()
-    try:
-        data = yaml.safe_load(m.group(1)) or {}
-    except yaml.YAMLError:
-        # Malformed YAML -> defaults rather than propagating the error.
-        return PlanFrontmatter()
-    if not isinstance(data, dict):
-        # Frontmatter parsed to a scalar/list, not a mapping -> defaults.
+    # Parse via the shared loader: tolerates malformed YAML (incl. the unquoted-colon
+    # scalar the planner sometimes emits) by recovering or degrading to {} — never raises.
+    data = _load_frontmatter(m.group(1))
+    if not data:
+        # No usable mapping (missing/blank/irrecoverable frontmatter) -> defaults.
         return PlanFrontmatter()
     # Normalize task_type to the known set.
     tt = str(data.get("task_type", "mixed")).strip().lower()
@@ -222,11 +296,10 @@ def update_plan_frontmatter(task_id: str, **fields) -> None:
         text = path.read_text(encoding="utf-8")
         m = _FRONTMATTER_RE.match(text)
         if m:
-            loaded = yaml.safe_load(m.group(1))
-            # Tolerate malformed frontmatter (scalar/list, not a mapping) the same
-            # way parse_plan does: treat it as empty so .update() can't blow up and
-            # the merge still produces a valid block.
-            data = loaded if isinstance(loaded, dict) else {}
+            # Shared loader: recovers the unquoted-colon case (and any malformed YAML)
+            # to a dict so the merge below preserves the existing plan instead of
+            # crashing the task — the bug that failed runs whose request held a colon.
+            data = _load_frontmatter(m.group(1))
             body = text[m.end():]
         else:
             body = text

@@ -83,7 +83,30 @@ def main() -> None:
     print(f"Created '{COLLECTION}': {info.status}")
 
 
+def seed_bank() -> None:
+    """Provision + seed the prover's ``lemma_bank`` with the cold-start starter set.
+
+    Delegates to :func:`hyperion.memory.lemma_seed.seed_lemma_bank`, which self-creates
+    the collection (cosine, 1536-wide) on first write and dedups on the normalized
+    statement — so this is idempotent and re-running never duplicates. Unlike
+    ``hyperion_memory`` above (created empty here), the bank is provisioned *by* the
+    seed write itself, so an empty bank and a missing collection can never diverge.
+
+    Import is lazy + guarded: when run from a host without the Hyperion package
+    installed, collection creation for ``hyperion_memory`` still succeeds and only the
+    bank seed is skipped (with a note), so the script stays runnable standalone.
+    """
+    try:
+        from hyperion.memory.lemma_seed import seed_lemma_bank
+    except Exception as exc:  # package not importable (host-only run) — skip, don't fail.
+        print(f"Skipping lemma_bank seed (Hyperion package not importable: {exc}).")
+        return
+    summary = seed_lemma_bank()
+    print(f"Seeded 'lemma_bank': {summary['ok']} stored, {summary['failed']} failed.")
+
+
 if __name__ == "__main__":
     # Run the bootstrap and exit 0 explicitly so callers/CI get a clean success code.
     main()
+    seed_bank()
     sys.exit(0)

@@ -113,3 +113,117 @@ body
     assert plan.scaffold == "theorem t : True := by sorry"
     assert plan.keywords == ["a", "b"]
     assert plan.options == []  # the unparseable part was dropped
+
+
+# ---------------------------------------------------------------------------
+# Unquoted-colon recovery — the planner copies a request like "Prove in Lean
+# 4: ..." verbatim into a scalar, which naive YAML rejects ("mapping values
+# are not allowed here"). The shared loader quotes it instead of losing the plan.
+# ---------------------------------------------------------------------------
+
+_COLON_PLAN = """---
+task_id: t_colon
+original_request: Prove in Lean 4: for every natural number n, n - 0 = n
+task_type: code
+keywords: [nat, subtraction]
+scaffold: |
+  theorem nat_sub_zero (n : ℕ) : n - 0 = n := by
+    simp
+options:
+  - id: a
+    summary: direct
+    subtasks:
+      - id: direct
+        description: close it
+        lean_type: ∀ n, n - 0 = n
+---
+body prose
+"""
+
+
+def test_unquoted_colon_in_request_recovers_full_plan(tmp_path):
+    """A colon-bearing top-level scalar is recovered, not fatal — plan stays intact."""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        _write_plan(tmp_path, "t_colon", _COLON_PLAN)
+        plan = parse_plan("t_colon")  # previously raised yaml.YAMLError up the stack
+
+    assert plan.task_type == "code"
+    assert plan.keywords == ["nat", "subtraction"]
+    # The colon-bearing request survives verbatim (block scalar + lean_type colon untouched).
+    assert "n - 0 = n" in (plan.scaffold or "")
+    assert plan.options and plan.options[0].subtasks[0].lean_type == "∀ n, n - 0 = n"
+
+
+def test_update_frontmatter_survives_unquoted_colon(tmp_path):
+    """The writer recovers the colon plan and preserves it through a merge (was a crash)."""
+    from hyperion.crews.plan_contract import update_plan_frontmatter
+
+    with patch.object(settings, "tasks_dir", tmp_path):
+        _write_plan(tmp_path, "t_colon2", _COLON_PLAN)
+        update_plan_frontmatter("t_colon2", selected_option="a")  # must not raise
+        plan = parse_plan("t_colon2")
+
+    assert plan.selected_option == "a"
+    assert "n - 0 = n" in (plan.scaffold or "")  # existing plan preserved across the merge
+
+
+def test_block_scalar_colons_are_not_mangled(tmp_path):
+    """The sanitizer only touches top-level scalars — indented block content with
+    colons (the scaffold body) must pass through byte-for-byte."""
+    from hyperion.crews.plan_contract import _sanitize_frontmatter
+
+    raw = (
+        "original_request: a: b\n"
+        "scaffold: |\n"
+        "  theorem t (n : ℕ) : n = n := by\n"
+        "    rfl\n"
+    )
+    out = _sanitize_frontmatter(raw)
+    assert 'original_request: "a: b"' in out          # top-level scalar quoted
+    assert "  theorem t (n : ℕ) : n = n := by" in out  # block body untouched
+
+
+# ---------------------------------------------------------------------------
+# keywords coercion — the planner emits keywords in shapes strict list[str]
+# rejects (bare comma string, a bool from a True/False theorem, mixed list).
+# A rejection used to hit the salvage path, which DROPS options — so the plan
+# lost its sub-goals and the verified lemma never banked. Coercion keeps the
+# validation green so options (and thus active_subtasks) survive.
+# ---------------------------------------------------------------------------
+
+_COMMA_KEYWORDS_PLAN = """---
+task_id: t_kw
+task_type: code
+keywords: natural numbers, subtraction, induction
+scaffold: |
+  theorem t (n : ℕ) : n - 0 = n := by simp
+options:
+  - id: a
+    summary: induct
+    subtasks:
+      - id: base
+        description: base case
+        lean_type: 0 - 0 = 0
+---
+body
+"""
+
+
+def test_comma_string_keywords_preserve_options(tmp_path):
+    """A bare comma-string ``keywords`` is split, not fatal — so options survive."""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        _write_plan(tmp_path, "t_kw", _COMMA_KEYWORDS_PLAN)
+        plan = parse_plan("t_kw")
+
+    assert plan.keywords == ["natural numbers", "subtraction", "induction"]
+    # The load-bearing assertion: options (and active_subtasks) are NOT lost.
+    assert plan.options and plan.active_subtasks()[0].id == "base"
+
+
+def test_keywords_coercion_handles_bool_and_mixed_list():
+    """A YAML bool (from a True/False theorem) and bool/number list elements coerce to str."""
+    from hyperion.crews.plan_contract import PlanFrontmatter
+
+    assert PlanFrontmatter.model_validate({"keywords": True}).keywords == ["True"]
+    assert PlanFrontmatter.model_validate({"keywords": ["a", False, 3]}).keywords == ["a", "False", "3"]
+    assert PlanFrontmatter.model_validate({"keywords": None}).keywords == []

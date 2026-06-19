@@ -54,7 +54,7 @@
         "skeleton_check"
       ],
       "gate_before": false,
-      "instruction": "Read plan.md from the workspace. Take the first active sub-goal's lean_type as your goal. Write a complete, self-contained Lean 4 proof of exactly that proposition with NO sorry, and save it to the shared task context under the key 'candidate_b' as a JSON object {\"source\", \"statement\", \"proof_term\", \"origin\": \"synthesize\"} via the context_put tool.",
+      "instruction": "Read plan.md from the workspace. Take the first active sub-goal's lean_type as your goal. Write a complete, self-contained Lean 4 proof of exactly that proposition with NO sorry. CRITICAL: use ONLY core Lean 4 (Nat, and tactics like rfl, simp, decide, omega, induction) and do NOT add ANY `import` statements — Mathlib is NOT available to the verifier, so any import line makes verification fail. The 'source' field must contain just the theorem declaration with no import lines and no leading blank lines. Save it to the shared task context under the key 'candidate_b' as a JSON object {\"source\", \"statement\", \"proof_term\", \"origin\": \"synthesize\"} via the context_put tool.",
       "when": null,
       "position": {
         "x": 300.0,

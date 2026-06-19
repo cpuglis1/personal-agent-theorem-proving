@@ -39,3 +39,137 @@ body {
 .pill {
   @apply inline-flex items-center rounded-full border border-edge px-2 py-0.5 text-xs;
 }
+
+/* =========================================================================
+   Prover console (/prover) — Lean + math rendering.
+   ========================================================================= */
+
+/* Monospace face with full math-glyph coverage (∀ ∃ ∧ ⟨ ⟩ α β Type ⊢ …).
+   JuliaMono is ideal (use it if installed); JetBrains Mono is pulled in
+   index.html when online; Menlo is the macOS fallback that still covers the
+   common Lean glyphs. */
+:root {
+  --lean-font: "JuliaMono", "JetBrains Mono", ui-monospace, "SFMono-Regular",
+    "Menlo", monospace;
+}
+
+.lean-inline {
+  font-family: var(--lean-font);
+}
+
+/* Pill tone modifiers (base .pill above provides shape/border). */
+.pill--neutral {
+  @apply border-edge text-slate-300;
+}
+.pill--muted {
+  @apply border-edge bg-edge/40 text-slate-400;
+}
+.pill--good {
+  @apply border-emerald-500/40 bg-emerald-600/15 text-emerald-200;
+}
+.pill--bad {
+  @apply border-rose-500/40 bg-rose-600/15 text-rose-200;
+}
+.pill--a {
+  @apply border-sky-500/40 bg-sky-600/15 text-sky-200;
+}
+.pill--b {
+  @apply border-violet-500/40 bg-violet-600/15 text-violet-200;
+}
+
+/* Lean code blocks: highlighted (Shiki) or fallback <pre>; copy button; the
+   code scrolls horizontally and never wraps. */
+.lean-code__label {
+  @apply mb-1 text-[11px] uppercase tracking-wide text-slate-500;
+}
+.lean-code__body {
+  @apply relative;
+}
+.lean-code__copy {
+  @apply absolute right-1.5 top-1.5 z-10 rounded-md border border-edge bg-ink/80 px-2 py-0.5 text-[11px] text-slate-400 opacity-0 transition-opacity hover:bg-edge;
+}
+.lean-code__body:hover .lean-code__copy {
+  @apply opacity-100;
+}
+.lean-code__shiki pre,
+.lean-code__fallback {
+  font-family: var(--lean-font);
+  font-size: 13px;
+  line-height: 1.55;
+  margin: 0;
+  padding: 12px 14px;
+  border-radius: 8px;
+  border: 1px solid theme("colors.edge");
+  overflow-x: auto;
+  white-space: pre; /* never wrap */
+  tab-size: 2;
+}
+.lean-code__fallback {
+  @apply bg-ink text-slate-200;
+}
+.lean-code__shiki pre code,
+.lean-code__fallback code {
+  font-family: inherit;
+  white-space: pre;
+}
+
+/* Sub-goal card + pipeline stages. */
+.subgoal__head {
+  @apply mb-2 flex flex-wrap items-center justify-between gap-2 border-b border-edge pb-2;
+}
+.subgoal__id {
+  font-family: var(--lean-font);
+  @apply text-sm font-bold text-sky-300;
+}
+.subgoal__stages {
+  @apply flex flex-col;
+}
+.stage {
+  @apply mt-3 border-t border-edge/70 pt-3;
+}
+.stage:first-child {
+  @apply mt-0 border-t-0 pt-0;
+}
+.stage__head {
+  @apply mb-2 flex items-center gap-2;
+}
+.stage__step {
+  @apply inline-flex h-5 w-5 items-center justify-center rounded-full border border-edge bg-edge/60 text-[11px] text-slate-300;
+}
+.stage__title {
+  @apply text-[13px] font-semibold text-slate-200;
+}
+.stage__badge {
+  @apply ml-auto;
+}
+.stage__body {
+  @apply pl-7;
+}
+.stage__note {
+  @apply mb-1.5 text-xs text-slate-400;
+}
+.stage__empty {
+  @apply text-xs italic text-slate-500;
+}
+
+/* Key/value chips inside stages. */
+.kv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 6px 18px;
+}
+.kv {
+  @apply flex items-baseline gap-2 text-xs;
+}
+.kv__k {
+  @apply min-w-[88px] text-slate-500;
+}
+.kv__v {
+  @apply text-slate-200;
+}
+.cand {
+  @apply flex flex-col gap-1.5;
+}
+.cand__meta {
+  @apply flex flex-wrap gap-x-4 gap-y-1;
+}

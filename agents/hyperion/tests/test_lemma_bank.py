@@ -181,3 +181,37 @@ def test_store_does_not_raise_on_failure():
     with patch.object(lemma_bank, "_get_clients", return_value=(oai, MagicMock())):
         res = lemma_bank.store_lemma("theorem t : True", "trivial")  # must not raise
     assert res["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# Self-healing write — the collection is provisioned on first write (was the
+# cold-start failure: lemma_bank never existed, so every store 404'd).
+# ---------------------------------------------------------------------------
+
+
+def test_store_creates_missing_collection_with_embedding_dims():
+    """A missing collection is created on write, sized to the live embedding (not hardcoded)."""
+    qdrant = MagicMock()
+    qdrant.collection_exists.return_value = False
+    oai, _ = _mock_clients(qdrant)  # embedding is a 3-vector
+    with patch.object(lemma_bank, "_get_clients", return_value=(oai, qdrant)):
+        res = lemma_bank.store_lemma("theorem t : a = a", "rfl")
+
+    assert res["ok"]
+    qdrant.create_collection.assert_called_once()
+    # Dims come from len(vector), so the collection can never drift from the model.
+    assert qdrant.create_collection.call_args.kwargs["vectors_config"].size == 3
+    # And the upsert still happens after provisioning.
+    qdrant.upsert.assert_called_once()
+
+
+def test_store_skips_create_when_collection_exists():
+    """The ensure step is a no-op when the collection is already present (idempotent)."""
+    qdrant = MagicMock()
+    qdrant.collection_exists.return_value = True
+    oai, _ = _mock_clients(qdrant)
+    with patch.object(lemma_bank, "_get_clients", return_value=(oai, qdrant)):
+        lemma_bank.store_lemma("theorem t : a = a", "rfl")
+
+    qdrant.create_collection.assert_not_called()
+    qdrant.upsert.assert_called_once()

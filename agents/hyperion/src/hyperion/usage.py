@@ -23,6 +23,7 @@ import json
 import sqlite3
 import threading
 from collections import defaultdict
+from datetime import datetime
 from typing import Any
 
 from litellm.integrations.custom_logger import CustomLogger
@@ -295,6 +296,89 @@ def _prompt_preview(kwargs: dict) -> str:
             p.get("text", "") for p in content if isinstance(p, dict)
         )
     return str(content)
+
+
+def _native_stage_summary(handler: str, result: dict) -> str:
+    """A short, human-readable confirmation of what a native stage did.
+
+    Native nodes make no LLM call, so they leave no ``response_preview`` for the trace
+    UI — yet a prover run's deterministic stages (skeleton_check / retrieve / verify /
+    compare / abstract / bank) are exactly the ones an operator wants to confirm fired.
+    This renders the handler's result dict into one readable line per stage, falling
+    back to compact JSON for handlers without a bespoke phrasing.
+    """
+    r = result or {}
+    try:
+        if handler == "skeleton_check":
+            ok = r.get("ok")
+            verdict = "type-checks" if ok else ("FAILED" if ok is False else "inconclusive")
+            return f"scaffold {verdict}" + (f" — {r.get('errors')}" if r.get("errors") else "")
+        if handler == "retrieve":
+            n = r.get("n_candidates", 0)
+            return f"Path A: {n} applicable lemma(s); top staged={r.get('has_candidate')}"
+        if handler == "verify":
+            # a_attempts/repair_iters/mode live in the nested ``decision`` trace.
+            dec = r.get("decision") or {}
+            return (
+                f"winner=Path {r.get('winner_path')} · A-attempts={dec.get('a_attempts')} "
+                f"· repair-iters={dec.get('repair_iters')} · mode={dec.get('mode')}"
+            )
+        if handler == "compare":
+            return f"winner=Path {r.get('winner_path')} · compared={r.get('compared')}"
+        if handler == "abstract":
+            return (
+                f"abstracted={r.get('abstracted')} · "
+                f"over-abstractions rejected={r.get('n_rejected', 0)}"
+            )
+        if handler == "bank":
+            base = (
+                f"assembled result.lean · banked {r.get('n_banked', 0)}/"
+                f"{r.get('n_discharged', 0)} lemma(s)"
+            )
+            fails = r.get("bank_failures") or []
+            return base + (f" · {len(fails)} write failure(s)" if fails else "")
+    except Exception:
+        pass
+    return json.dumps(r, default=str)[:500]
+
+
+def record_native_stage(
+    task_id: str, node_id: str, handler: str, result: dict, duration_ms: int | None = None,
+) -> None:
+    """Persist one native (non-LLM) workflow stage as a ``trace_events`` row.
+
+    Parallels :func:`_write_trace_event` for deterministic nodes so the Trace Flow UI —
+    which groups events by ``node_id`` — shows the prover's native stages as *fired*
+    nodes with output, not the dimmed/empty placeholders they appear as when they leave
+    no LLM call behind. Best-effort: a tracing failure must never break the run, so all
+    exceptions are swallowed (mirrors the LLM writer's posture).
+
+    Args:
+        task_id: Run id to attribute the row to.
+        node_id: The workflow node id (the UI groups by this).
+        handler: The native handler name (``verify``/``retrieve``/``bank``/…).
+        result: The handler's returned dict, summarized into ``response_preview``.
+        duration_ms: Optional wall time for the stage.
+    """
+    try:
+        from hyperion.config import settings
+
+        summary = _native_stage_summary(handler, result)
+        db_path = str(settings.tasks_dir / "state.db")
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """INSERT INTO trace_events
+                   (task_id, agent_role, node_id, prompt_type, model, input_tokens,
+                    output_tokens, cost_usd, prompt_preview, response_preview, tools_used,
+                    started_at, duration_ms)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (task_id, f"native/{handler}", node_id, "native-stage", "native",
+                 0, 0, 0.0, f"native stage: {handler}", summary, "[]",
+                 datetime.utcnow().isoformat(), duration_ms),
+            )
+            conn.commit()
+    except Exception:
+        pass
 
 
 def _write_trace_event(

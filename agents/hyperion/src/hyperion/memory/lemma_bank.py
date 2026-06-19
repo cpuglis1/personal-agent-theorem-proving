@@ -90,6 +90,28 @@ def _embed(oai, text: str) -> list[float]:
     return oai.embeddings.create(model="text-embedding-3-small", input=text).data[0].embedding
 
 
+def _ensure_collection(qdrant, dims: int) -> None:
+    """Idempotently provision the lemma-bank collection before a write.
+
+    Seed-Prover-style self-healing: the bank creates its backing Qdrant collection
+    on first write (cosine, ``dims``-wide — derived from the live embedding so it can
+    never drift from the model) instead of relying on a one-shot bootstrap script. A
+    wiped/fresh Qdrant volume therefore self-provisions on the next banked lemma rather
+    than silently 404-ing every ``store_lemma`` (the prior failure mode: the collection
+    never existed, so the snowball could never start). No-op when it already exists.
+    """
+    from qdrant_client.models import Distance, VectorParams
+
+    collection = _collection()
+    if qdrant.collection_exists(collection):
+        return
+    qdrant.create_collection(
+        collection_name=collection,
+        vectors_config=VectorParams(size=dims, distance=Distance.COSINE),
+    )
+    logger.info("Created lemma-bank collection %s (dims=%d, cosine)", collection, dims)
+
+
 def _normalize(statement: str) -> str:
     """Normalize a lemma statement for stable dedup identity.
 
@@ -156,6 +178,7 @@ def store_lemma(
     try:
         oai, qdrant = _get_clients()
         vector = _embed(oai, statement)
+        _ensure_collection(qdrant, len(vector))
 
         from qdrant_client.models import PointStruct
 

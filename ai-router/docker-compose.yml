@@ -187,11 +187,13 @@ services:
       - "6334:6334"
     volumes:
       - qdrant-data:/qdrant/storage
-    # /collections is used instead of /readyz because /readyz doesn't exist in
-    # all Qdrant versions; curl is available in the qdrant Docker image.
+    # The qdrant/qdrant image ships NO curl/wget (only bash + the qdrant binary),
+    # so the old `curl ...` healthcheck failed every probe ("curl: not found") and
+    # pinned the container as (unhealthy) forever despite a fully working service.
+    # bash IS present, so probe the HTTP port via bash's /dev/tcp instead — a raw TCP
+    # open against 6333 confirms the REST API is accepting connections, no external tool.
     healthcheck:
-      # /readyz does not exist in all Qdrant versions — /collections is stable
-      test: ["CMD-SHELL", "curl -sf http://localhost:6333/collections || exit 1"]
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333' || exit 1"]
       interval: 15s
       timeout: 5s
       retries: 5
@@ -332,6 +334,10 @@ services:
       # it's unset/placeholder. Master key stays available for admin (alias reconcile).
       LITELLM_HYPERION_KEY: "${LITELLM_HYPERION_KEY:-}"
       QDRANT_URL: "http://qdrant:6333"
+      # Lean verifier sidecar (the prover's oracle). DNS name on ai-net + the
+      # in-network port — NOT the host-published :8900. The lean_verify tool POSTs
+      # candidate sources to {LEAN_URL}/verify.
+      LEAN_URL: "http://lean:8900"
       SEARXNG_URL: "http://searxng:8080"
       INFINITY_URL: "http://infinity:7997"
       LANGFUSE_HOST: "http://langfuse:3000"
@@ -380,6 +386,10 @@ services:
       # it's unset/placeholder. Master key stays available for admin (alias reconcile).
       LITELLM_HYPERION_KEY: "${LITELLM_HYPERION_KEY:-}"
       QDRANT_URL: "http://qdrant:6333"
+      # Lean verifier sidecar (the prover's oracle). DNS name on ai-net + the
+      # in-network port — NOT the host-published :8900. The lean_verify tool POSTs
+      # candidate sources to {LEAN_URL}/verify.
+      LEAN_URL: "http://lean:8900"
       SEARXNG_URL: "http://searxng:8080"
       INFINITY_URL: "http://infinity:7997"
       LANGFUSE_HOST: "http://langfuse:3000"
@@ -398,6 +408,25 @@ services:
     networks:
       - ai-net
     command: ["uv", "run", "hyperion-mcp"]
+
+  # ---------------------------------------------------------------------------
+  # Lean verifier sidecar — the prover's oracle. HTTP wrapper around `lake env
+  # lean`: POST /verify {source, mode} -> {ok, errors, ...}. Reached by hyperion
+  # via the in-network DNS name `lean:8900` (see LEAN_URL above). The image bakes a
+  # warm Mathlib v4.15.0 cache at BUILD time, so it is large/slow to build once but
+  # never cold-builds Mathlib per request. Host :8900 is published for the
+  # @pytest.mark.lean integration tier to hit directly.
+  # ---------------------------------------------------------------------------
+  lean:
+    build:
+      context: ../agents/hyperion/lean-sidecar
+      dockerfile: Dockerfile
+    container_name: lean
+    restart: unless-stopped
+    ports:
+      - "8900:8900"
+    networks:
+      - ai-net
 
   # ---------------------------------------------------------------------------
   # Hyperion Web UI (Phase 7) — React/Vite built to static assets, nginx-served.

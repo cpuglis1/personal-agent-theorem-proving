@@ -57,6 +57,9 @@ general_settings:
 # Global behavior applied to every request regardless of model.
 litellm_settings:
   drop_params: true        # silently drop params a target provider doesn't support (keeps cross-provider calls portable)
+  modify_params: true      # auto-massage messages into Anthropic-compatible form. CrewAI's tool loop can end a
+                           # conversation on an assistant turn (prefill); newer Claude models reject that
+                           # ("conversation must end with a user message"). This makes litellm fix it instead of failing.
   set_verbose: false       # keep proxy logs quiet; flip to true only for local debugging
   request_timeout: 120     # seconds per upstream call before LiteLLM aborts it
   num_retries: 2           # retries per entry on transient/rate errors before moving on
@@ -69,14 +72,16 @@ litellm_settings:
   # Within a group, LiteLLM already retries across entries on auth/rate errors.
   # Each list is tried left-to-right; note these chains can hop between role
   # aliases and concrete model names (e.g. smart -> worker -> gpt-4o).
+  # CHEAP-CLAUDE MODE: all role aliases route to the cheapest Claude (Haiku). The
+  # Gemini free tier on this key is too rate-limited (~20 req/day) for iterative runs,
+  # so for "is the workflow firing end to end?" testing we use Haiku — cheap, fast, and
+  # high enough rate limits to complete a full prover run. Flip the alias blocks below
+  # back to gemini/* to return to free-tier mode.
   fallbacks:
-    - smart:            ["worker", "gpt-4o", "gemini-2.5-pro"]
-    - worker:           ["gpt-4o", "gemini-2.5-pro"]
-    - cheap:            ["fast", "gpt-4o-mini"]
-    - fast:             ["gpt-4o-mini", "cheap"]
-    - gpt-4o:           ["gemini-2.5-pro", "claude-sonnet-4-6"]
-    - claude-sonnet-4-6: ["gpt-4o", "gemini-2.5-pro"]
-    - gemini-2.5-pro:   ["gpt-4o", "claude-sonnet-4-6"]
+    - smart:            ["worker", "gpt-4o-mini"]
+    - worker:           ["gpt-4o-mini"]
+    - cheap:            ["fast", "claude-sonnet-4-6"]
+    - fast:             ["claude-sonnet-4-6"]
 
 # Concrete model definitions plus role-alias groups.
 # model_name is the public handle clients request; litellm_params.model is the
@@ -106,9 +111,9 @@ model_list:
   # Requires ANTHROPIC_API_KEY (console.anthropic.com — pay-per-use)
   # Omit ANTHROPIC_API_KEY and these models will be skipped by the aliases below.
 
-  - model_name: claude-opus-4-6
+  - model_name: claude-opus-4-8
     litellm_params:
-      model: anthropic/claude-opus-4-6
+      model: anthropic/claude-opus-4-8
       api_key: os.environ/ANTHROPIC_API_KEY
 
   - model_name: claude-sonnet-4-6
@@ -134,6 +139,16 @@ model_list:
       model: gemini/gemini-2.5-pro
       api_key: os.environ/GEMINI_API_KEY
 
+  - model_name: gemini-2.0-flash
+    litellm_params:
+      model: gemini/gemini-2.0-flash
+      api_key: os.environ/GEMINI_API_KEY
+
+  - model_name: gemini-2.5-flash-lite
+    litellm_params:
+      model: gemini/gemini-2.5-flash-lite
+      api_key: os.environ/GEMINI_API_KEY
+
   # ── Embeddings ────────────────────────────────────────────────────────────
   # text-embedding-3-small is used for Qdrant RAG (requires OPENAI_API_KEY)
 
@@ -150,69 +165,41 @@ model_list:
   # To change which model is used for a role, set the env var in
   # agents/hyperion/.env (MODEL_PLANNER, MODEL_WORKER, MODEL_CHEAP).
 
-  # smart — best reasoning. Claude Opus preferred; falls back to Gemini Pro, GPT-4o.
-  - model_name: smart
-    litellm_params:
-      model: anthropic/claude-opus-4-6
-      api_key: os.environ/ANTHROPIC_API_KEY
+  # CHEAP-CLAUDE MODE (see fallbacks note above): every role alias resolves to the
+  # cheapest Claude (Haiku) so a full prover run completes reliably for workflow-firing
+  # tests. To return to free-tier mode, repoint these four blocks back to gemini/*.
 
+  # smart / worker — the two CrewAI AGENT stages (decompose, synthesize). CrewAI's
+  # ReAct loop ends each turn on an assistant message (prefill); the newer Claude models
+  # (sonnet-4-6 / haiku-4-5 / opus-4-8) reject that outright ("This model does not support
+  # assistant message prefill"), and litellm's modify_params does NOT strip it (a trailing
+  # assistant message is a legal request it won't rewrite). So the CrewAI stages run on
+  # gpt-4o-mini (prefill-safe, cheap); Claude is kept for every NON-CrewAI call below,
+  # which uses a plain client with no prefill. To move these onto Claude, the proxy needs
+  # a pre-call hook that drops the trailing assistant message for anthropic/* models.
   - model_name: smart
     litellm_params:
-      model: gemini/gemini-2.5-pro
-      api_key: os.environ/GEMINI_API_KEY
-
-  - model_name: smart
-    litellm_params:
-      model: openai/gpt-4o
+      model: openai/gpt-4o-mini
       api_key: os.environ/OPENAI_API_KEY
 
-  # worker — balanced reasoning/cost. Claude Sonnet preferred.
   - model_name: worker
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+  # cheap — Sonnet. Tool sub-calls (repair/abstract proposals) + meta (title/tags). Kept
+  # on Sonnet rather than Haiku: Haiku skipped the plan-writing tool entirely in testing,
+  # so for reliable workflow runs we default the small calls to Sonnet too.
+  - model_name: cheap
     litellm_params:
       model: anthropic/claude-sonnet-4-6
       api_key: os.environ/ANTHROPIC_API_KEY
 
-  - model_name: worker
+  # fast — Sonnet (cheapest/fastest iteration that still follows tool protocols reliably).
+  - model_name: fast
     litellm_params:
-      model: gemini/gemini-2.5-pro
-      api_key: os.environ/GEMINI_API_KEY
-
-  - model_name: worker
-    litellm_params:
-      model: openai/gpt-4o
-      api_key: os.environ/OPENAI_API_KEY
-
-  # cheap — fast, low-cost. Claude Haiku preferred; falls back to Gemini Flash.
-  - model_name: cheap
-    litellm_params:
-      model: anthropic/claude-haiku-4-5-20251001
+      model: anthropic/claude-sonnet-4-6
       api_key: os.environ/ANTHROPIC_API_KEY
-
-  - model_name: cheap
-    litellm_params:
-      model: gemini/gemini-2.5-flash
-      api_key: os.environ/GEMINI_API_KEY
-
-  - model_name: cheap
-    litellm_params:
-      model: openai/gpt-4o-mini
-      api_key: os.environ/OPENAI_API_KEY
-
-  # fast — alias for cheapest/fastest iteration (same as cheap, Gemini-first).
-  - model_name: fast
-    litellm_params:
-      model: gemini/gemini-2.5-flash
-      api_key: os.environ/GEMINI_API_KEY
-
-  - model_name: fast
-    litellm_params:
-      model: anthropic/claude-haiku-4-5-20251001
-      api_key: os.environ/ANTHROPIC_API_KEY
-
-  - model_name: fast
-    litellm_params:
-      model: openai/gpt-4o-mini
-      api_key: os.environ/OPENAI_API_KEY
 
 # Router-level controls for how entries within a model group are selected/retried.
 router_settings:

@@ -35,6 +35,7 @@ import { NavLink, Outlet } from "react-router-dom";
 const nav = [
   { to: "/", label: "Dashboard", end: true },
   { to: "/runs", label: "Runs", end: false },
+  { to: "/prover", label: "Prover", end: false },
   { to: "/workflows", label: "Workflows", end: false },
   { to: "/monitoring", label: "Monitoring", end: false },
   { to: "/settings", label: "Settings", end: false },

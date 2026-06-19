@@ -19,6 +19,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Callable
@@ -873,7 +874,21 @@ async def _execute_workflow(
                         task_id=task_id, node=n, request=request,
                         progress_callback=progress_callback,
                     )
+                    _native_t0 = time.monotonic()
                     res = await run_native_node(ctx)
+                    # Trace the deterministic stage so it shows in the Trace Flow UI as a
+                    # FIRED node with output (native nodes make no LLM call, so without
+                    # this they render dimmed/empty and look like they never ran).
+                    try:
+                        from hyperion.usage import record_native_stage
+
+                        record_native_stage(
+                            task_id, n.id, n.handler or "native",
+                            res if isinstance(res, dict) else {"result": res},
+                            duration_ms=int((time.monotonic() - _native_t0) * 1000),
+                        )
+                    except Exception:
+                        pass
                     return n.id, res
                 rec = load_agent(n.agent)
                 agt = build_agent(rec, task_id, node_id=n.id)

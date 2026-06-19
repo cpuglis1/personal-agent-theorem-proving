@@ -1,0 +1,91 @@
+{
+  "request": "prove S",
+  "status": "done",
+  "scaffold": "theorem target : S := by\n  have h1 : S := sorry\n  exact h1\n",
+  "skeleton_ok": true,
+  "subgoals": {
+    "h1": {
+      "lean_type": "S",
+      "candidate_a": {
+        "source": "example : S := lemS_proof",
+        "statement": "lem_S",
+        "proof_term": "lemS_proof",
+        "origin": "retrieve",
+        "lean_type": "S"
+      },
+      "candidates_a": [
+        {
+          "source": "example : S := lemS_proof",
+          "statement": "lem_S",
+          "proof_term": "lemS_proof",
+          "origin": "retrieve",
+          "lean_type": "S"
+        }
+      ],
+      "candidate_b": {
+        "source": "theorem t_h1 : S := by exact s_proof",
+        "statement": "theorem t_h1 : S",
+        "proof_term": "s_proof",
+        "origin": "synthesize",
+        "lean_type": "S"
+      },
+      "verified_a": {
+        "source": "example : S := lemS_proof",
+        "statement": "lem_S",
+        "proof_term": "lemS_proof",
+        "origin": "retrieve",
+        "lean_type": "S",
+        "path": "A"
+      },
+      "verified_b": {
+        "source": "theorem t_h1 : S := by exact s_proof",
+        "statement": "theorem t_h1 : S",
+        "proof_term": "s_proof",
+        "origin": "synthesize",
+        "lean_type": "S",
+        "path": "B"
+      },
+      "verify_decision": {
+        "subgoal": "h1",
+        "winner_path": "A",
+        "a_attempts": 1,
+        "repair_iters": 0,
+        "verdicts": [
+          { "path": "A", "ok": true },
+          { "path": "B", "ok": true }
+        ],
+        "mode": "research"
+      },
+      "triple_log": {
+        "subgoal": "h1",
+        "goal_type": "S",
+        "retrieved_verified": true,
+        "synthesized_verified": true,
+        "winner_path": "B",
+        "scores": { "a": 0.0, "b": 0.0, "winner": 0.0 },
+        "compared": true,
+        "mode": "research",
+        "ts": 1781746902
+      },
+      "discharged": {
+        "source": "theorem t_h1 : S := by exact s_proof",
+        "statement": "theorem t_h1 : S",
+        "proof_term": "s_proof",
+        "origin": "synthesize",
+        "lean_type": "S",
+        "path": "B",
+        "generality_score": 0.0
+      },
+      "abstracted": {
+        "source": "theorem gen {α : Type} (x : α) : x = x := rfl",
+        "statement": "theorem gen {α : Type} (x : α) : x = x",
+        "proof_term": "rfl",
+        "origin": "abstract",
+        "lean_type": "∀ {α : Type} (x : α), x = x",
+        "path": "B",
+        "generality_score": 3.0
+      }
+    }
+  },
+  "result_lean": "theorem target : S := by\n  have h1 : S := s_proof\n  exact h1\n"
+}

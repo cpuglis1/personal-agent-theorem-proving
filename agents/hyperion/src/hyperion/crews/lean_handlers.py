@@ -36,6 +36,7 @@ proposal fake a pass (only ``verify_lean`` sets ``ok``).
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Optional
 
 from hyperion.config import settings
@@ -102,6 +103,69 @@ def _bb_key(base: str, sg_id: str) -> str:
     so a workflow can fan out N sub-goals as N node-triples over a single context store.
     """
     return f"{base}:{sg_id}"
+
+
+_IMPORT_LINE_RE = re.compile(r"^\s*import\s+\S+.*$", re.MULTILINE)
+_LEADING_LEMMA_RE = re.compile(r"(?m)^(\s*)lemma(\s)")
+
+
+def _sanitize_lean_source(source: str) -> str:
+    """Scrub the two Mathlib-isms LLM synthesizers reliably emit for *core* goals.
+
+    The verifier is core Lean 4 with no Mathlib on the import path, but synthesizers
+    (trained on Mathlib-heavy corpora) habitually (a) prepend an ``import Mathlib...``
+    line — which fails fast because the ``.olean`` isn't built — and (b) use the
+    ``lemma`` keyword, which Mathlib defines but core Lean does not (``theorem`` is the
+    core spelling). Both make an otherwise-valid proof fail verification. We strip import
+    lines and rewrite a leading ``lemma`` → ``theorem`` (they are exact synonyms), then
+    trim leading blank lines. Defensive and idempotent: a proof that was already core
+    passes through unchanged. (NB: when real Mathlib verification lands — build-plan
+    priority 3 — this core-only scrub becomes conditional on the goal's needs.)
+    """
+    if not source:
+        return source
+    cleaned = _IMPORT_LINE_RE.sub("", source)
+    cleaned = _LEADING_LEMMA_RE.sub(r"\1theorem\2", cleaned)
+    return cleaned.lstrip("\n")
+
+
+def _synthesized_candidate(ctx: NativeNodeCtx, sg_id: str) -> Optional[dict[str, Any]]:
+    """The Path-B candidate the synthesizer staged for sub-goal ``sg_id``.
+
+    The ``lemma_synthesizer`` agent persists its candidate via ``context_put`` under the
+    *un-namespaced* key ``candidate_b`` — that is its documented tool contract (see the
+    agent goal / synthesize node instruction) and the agent has no reliable handle on the
+    sub-goal id to namespace it. The rest of the prover blackboard, however, is sub-goal
+    namespaced (``candidate_b:<sg>``, the form the ``eval`` harness writes). Prefer the
+    namespaced key when present; fall back to the plain one so the live synthesize→verify
+    hand-off actually finds the candidate on the shipped single-sub-goal ``lean-prove``
+    workflow. Without this fallback Path B is silently empty and every live proof "fails".
+
+    The value is also normalized to a dict: the ``context_put`` tool persists the agent's
+    candidate as a JSON *string*, whereas the native handlers (and the eval harness) store
+    it as a dict. Parse a string form here so callers can always do ``cand["source"]``.
+    """
+    raw = ctx.get(_bb_key("candidate_b", sg_id)) or ctx.get("candidate_b")
+    if isinstance(raw, str):
+        import json
+
+        try:
+            # strict=False permits raw control characters (literal newlines/tabs) inside
+            # string values. The synthesizer hand-writes this JSON and routinely embeds an
+            # un-escaped newline in the multi-line Lean ``source`` — strict parsing rejects
+            # that ("Invalid control character"), silently dropping an otherwise-valid Path
+            # B candidate so verify finds nothing to check and the run fails.
+            raw = json.loads(raw, strict=False)
+        except (ValueError, TypeError):
+            logger.warning("candidate_b is a non-JSON string; ignoring Path B candidate")
+            return None
+    if not isinstance(raw, dict):
+        return None
+    # Scrub Mathlib-isms (import lines / `lemma` keyword) from the synthesized source so
+    # a core-provable goal isn't failed by the synthesizer's dialect (see the helper).
+    if raw.get("source"):
+        raw["source"] = _sanitize_lean_source(raw["source"])
+    return raw
 
 
 # ---------------------------------------------------------------------------
@@ -382,7 +446,7 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     # RESEARCH: always verify B (the comparison is the experiment). DEPLOY: only when
     # Path A failed to close (exploit-first — don't pay for B once A has won).
     if research or verified_a is None:
-        cb = ctx.get(_bb_key("candidate_b", sg_id))
+        cb = _synthesized_candidate(ctx, sg_id)
         if cb:
             closed, errors = _full_verdict(cb["source"])
             _record("B", closed)
@@ -392,7 +456,7 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
                 cur_source = cb["source"]
                 for _ in range(settings.cap_repair_iters):
                     decision["repair_iters"] += 1
-                    cur_source = await propose_repair(goal, cur_source, errors)
+                    cur_source = _sanitize_lean_source(await propose_repair(goal, cur_source, errors))
                     closed, errors = _full_verdict(cur_source)
                     _record("B-repair", closed)
                     if closed:
@@ -460,7 +524,7 @@ async def compare_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     sg_id = _subgoal_id(ctx)
     goal = _goal_type(ctx, sg_id)
     retrieved = ctx.get(_bb_key("candidate_a", sg_id))
-    synthesized = ctx.get(_bb_key("candidate_b", sg_id))
+    synthesized = _synthesized_candidate(ctx, sg_id)
     verified_a = ctx.get(_bb_key("verified_a", sg_id))
     verified_b = ctx.get(_bb_key("verified_b", sg_id))
 
@@ -662,7 +726,15 @@ async def bank_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     """
     plan = parse_plan(ctx.task_id)
     subtasks = plan.active_subtasks()
-    discharged = {s.id: ctx.get(_bb_key("discharged", s.id)) for s in subtasks}
+    # Collect discharged winners under the SAME sub-goal ids the rest of the pipeline
+    # used. ``_subgoal_id`` resolves to the first active subtask, or the literal ``"0"``
+    # fallback on the single-sub-goal happy path (no typed subtasks). Bank must mirror
+    # that fallback — otherwise a proof closed under ``discharged:0`` is invisible here
+    # and a *verified* lemma is silently never banked (banked 0/0), stalling the snowball.
+    candidate_ids = [s.id for s in subtasks] or ["0"]
+    if "0" not in candidate_ids:
+        candidate_ids.append("0")  # always probe the happy-path fallback id too
+    discharged = {sid: ctx.get(_bb_key("discharged", sid)) for sid in candidate_ids}
     discharged = {k: v for k, v in discharged.items() if v}
 
     scaffold = plan.scaffold or ""

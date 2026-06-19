@@ -34,8 +34,10 @@ RUN curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-ini
 WORKDIR /app/leanproject
 
 # Copy the project manifest first so the (expensive) Mathlib fetch/build layer caches
-# independently of the server code.
-COPY lean-toolchain lakefile.lean ./
+# independently of the server code. Scratch.lean is the `@[default_target]` lean_lib
+# root (it `import Mathlib` to realize the cached oleans), so it must be present for
+# `lake build` below — without it the build fails with "no such file Scratch.lean".
+COPY lean-toolchain lakefile.lean Scratch.lean ./
 # Pin Mathlib to the release tag, fetch the prebuilt cache, then build.
 RUN lake update -R \
     && lake exe cache get \

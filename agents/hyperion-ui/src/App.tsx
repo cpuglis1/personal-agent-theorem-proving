@@ -34,6 +34,8 @@ import Monitoring from "./pages/Monitoring";
 import Workflows from "./pages/Workflows";
 import WorkflowEditor from "./pages/WorkflowEditor";
 import TraceFlow from "./pages/TraceFlow";
+import ProverRun from "./pages/ProverRun";
+import ProverSubmit from "./pages/ProverSubmit";
 
 /**
  * App — Root component that declares the Hyperion UI route table.
@@ -58,6 +60,9 @@ export default function App() {
         <Route path="runs" element={<Runs />} />
         <Route path="runs/:id" element={<RunDetail />} />
         <Route path="runs/:id/trace" element={<TraceFlow />} />
+        <Route path="prover" element={<ProverRun />} />
+        <Route path="prover/submit" element={<ProverSubmit />} />
+        <Route path="prover/runs/:id" element={<ProverRun />} />
       </Route>
     </Routes>
   );
