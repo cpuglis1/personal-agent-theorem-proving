@@ -341,6 +341,60 @@ def _candidate_from_lemma(goal_type: str, lemma: dict[str, Any]) -> dict[str, An
     }
 
 
+def _compose_multi_source(goal_type: str, lemmas: list[dict[str, Any]]) -> str:
+    """Build a ``full``-mode source that discharges ``goal_type`` by *composing* lemmas.
+
+    Each banked lemma becomes a local ``have hᵢ`` of its own type; the goal is then closed
+    by a banked-only closer (no ambient Mathlib normalizers, so a verified proof's depth is
+    honestly "how many banked lemmas it took"). The ``first | …`` ladder tries, in order:
+    pure ``simp only`` over the haves, the same after ``intros`` (∀-goals), and ``rw`` chains
+    — enough to cover rewrite- and simp-shaped compositions without importing AC power lemmas.
+    """
+    haves = []
+    names = []
+    for i, lem in enumerate(lemmas):
+        name = f"h{i}"
+        names.append(name)
+        ltype = lem.get("lean_type") or _lemma_type(lem.get("statement", "") or f"example : {goal_type}")
+        proof = _normalize_proof_rhs(lem.get("proof_term", "") or "by exact?")
+        haves.append(f"  have {name} : {ltype} := {proof}")
+    hset = ", ".join(names)
+    closers = (
+        f"  first\n"
+        f"    | simp only [{hset}]\n"
+        f"    | (intros; simp only [{hset}])\n"
+        f"    | rw [{hset}]\n"
+        f"    | (intros; rw [{hset}])"
+    )
+    return f"example : {goal_type} := by\n" + "\n".join(haves) + "\n" + closers
+
+
+def _multi_candidate_from_lemmas(goal_type: str, lemmas: list[dict[str, Any]]) -> dict[str, Any]:
+    """A depth>=2 Path-A candidate that *composes* several banked lemmas (build-plan depth axis).
+
+    The single-lemma :func:`_candidate_from_lemma` ceilings reuse at depth 1 by construction;
+    this is the form that makes composition reachable. ``lemmas_used`` starts as the full
+    offered set, but the verify controller ablates it down to the lemmas actually *needed*
+    (single-drop necessity) before crediting :func:`lemma_compare.reuse_depth` — so depth is a
+    verified lower bound, never the (gameable) count of lemmas handed to ``simp``.
+    """
+    return {
+        "id": None,  # a composition is not itself a banked lemma
+        "source": _compose_multi_source(goal_type, lemmas),
+        "statement": f"example : {goal_type}",
+        "proof_term": "",  # filled from the verified source at bank time if it wins
+        "origin": "compose",
+        "source_collection": None,
+        "lean_type": goal_type,
+        "lemmas_used": [lem["id"] for lem in lemmas if lem.get("id")],
+        "multi": True,
+        # The full lemma payloads, kept so verify can re-compose subsets during ablation.
+        "compose_lemmas": lemmas,
+        "times_retrieved": 0,
+        "times_won": 0,
+    }
+
+
 # ---------------------------------------------------------------------------
 # repair proposal — the one generative sub-step (§1a)
 # ---------------------------------------------------------------------------
@@ -476,10 +530,20 @@ async def retrieve_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     goal_type = _goal_type(ctx, sg_id)
     lemmas = retrieve_applicable_lemmas(goal_type)
     candidates = [_candidate_from_lemma(goal_type, lem) for lem in lemmas]
+    # Depth axis: also stage ONE composition of the top-k banked lemmas, appended AFTER the
+    # single-lemma candidates. verify tries singles first, so a goal that any one lemma closes
+    # stays honestly depth-1; the composition is only reached when no single lemma suffices —
+    # which is exactly when genuine multi-lemma reuse (depth>=2) is happening.
+    top_k = [lem for lem in lemmas if lem.get("id")][: settings.compose_top_k]
+    if len(top_k) >= 2:
+        candidates.append(_multi_candidate_from_lemmas(goal_type, top_k))
     top = candidates[0] if candidates else None
     ctx.put(_bb_key("candidate_a", sg_id), top)
     ctx.put(_bb_key("candidates_a", sg_id), candidates)
-    ctx.progress(f"[retrieve] {sg_id}: {len(candidates)} applicable lemma(s)")
+    ctx.progress(
+        f"[retrieve] {sg_id}: {len(lemmas)} applicable lemma(s)"
+        f"{f' (+1 composition of {len(top_k)})' if len(top_k) >= 2 else ''}"
+    )
     return {
         "handler": "retrieve",
         "subgoal": sg_id,
@@ -536,6 +600,28 @@ def _full_verdict(source: str) -> tuple[bool, list[str]]:
     return bool(res["ok"]), res["errors"]
 
 
+def _necessary_lemma_ids(goal_type: str, lemmas: list[dict[str, Any]]) -> list[str]:
+    """Single-drop ablation: which banked lemmas the composition actually *needed*.
+
+    A lemma is necessary iff removing it (and re-running the kernel on the remaining set)
+    breaks the proof. The credited :func:`lemma_compare.reuse_depth` is the count of such
+    lemmas — a verified lower bound on genuine composition that can't be inflated by handing
+    extra lemmas to ``simp``. Conservative on interactions (two lemmas redundant alone but
+    needed together would both read as droppable ⇒ we *under*-credit, never over-credit).
+    """
+    if len(lemmas) <= 1:
+        return [lem["id"] for lem in lemmas if lem.get("id")]
+    necessary: list[str] = []
+    for i, lem in enumerate(lemmas):
+        if not lem.get("id"):
+            continue
+        without = lemmas[:i] + lemmas[i + 1 :]
+        still_closes, _ = _full_verdict(_compose_multi_source(goal_type, without))
+        if not still_closes:
+            necessary.append(lem["id"])
+    return necessary
+
+
 async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     """The native controller: kernel verdict + deterministic routing + bounded repair.
 
@@ -587,9 +673,21 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
         decision["a_attempts"] += 1
         closed, _errors = _full_verdict(cand["source"])
         _record("A", closed)
-        if closed:
+        if not closed:
+            continue
+        if cand.get("multi"):
+            # Composition closed — credit only the lemmas single-drop ablation proves
+            # necessary, so reuse_depth is a verified count, not the number fed to simp.
+            necessary = _necessary_lemma_ids(goal, cand.get("compose_lemmas", []))
+            if not necessary:
+                # Closed without genuinely needing any banked lemma (e.g. simp/rfl alone) —
+                # not a reuse win. Don't let Path A claim it; fall through to Path B.
+                _record("A-compose-spurious", False)
+                continue
+            verified_a = {**cand, "path": "A", "lemmas_used": necessary}
+        else:
             verified_a = {**cand, "path": "A"}
-            break
+        break
 
     # ---- Path B: synthesized candidate, then the bounded repair loop ----
     # RESEARCH: always verify B (the comparison is the experiment). DEPLOY: only when

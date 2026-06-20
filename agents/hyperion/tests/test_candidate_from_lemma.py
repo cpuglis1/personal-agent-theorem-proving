@@ -113,3 +113,62 @@ def test_no_bare_newline_indentation_hazard_in_have_line():
     # exactly three lines: example header, have, first-combinator
     assert len(src.splitlines()) == 3
     assert re.search(r"have h : .+ := by intro n; rfl", have_line)
+
+
+# ---------------------------------------------------------------------------
+# multi-lemma composition — the depth>=2 candidate (build-plan depth axis)
+# ---------------------------------------------------------------------------
+
+from hyperion.crews import lean_handlers
+from hyperion.crews.lean_handlers import (
+    _compose_multi_source,
+    _multi_candidate_from_lemmas,
+    _necessary_lemma_ids,
+)
+
+
+def test_compose_multi_source_binds_each_lemma_and_uses_banked_only_closer():
+    lemmas = [
+        {"id": "a", "lean_type": "∀ n, 0 + n = n", "proof_term": "fun n => Nat.zero_add n"},
+        {"id": "b", "lean_type": "∀ a b, a + b = b + a", "proof_term": "Nat.add_comm"},
+    ]
+    src = _compose_multi_source("∀ a b, 0 + a + b = b + a", lemmas)
+    # One `have` per lemma, named h0/h1, each carrying its own type.
+    assert "have h0 : ∀ n, 0 + n = n := fun n => Nat.zero_add n" in src
+    assert "have h1 : ∀ a b, a + b = b + a := Nat.add_comm" in src
+    # Closer composes the banked hypotheses only — no ambient Mathlib normalizers.
+    assert "simp only [h0, h1]" in src
+    assert "rw [h0, h1]" in src
+    assert "add_left_comm" not in src and "add_comm]" not in src
+
+
+def test_multi_candidate_carries_all_ids_and_payloads_for_ablation():
+    lemmas = [{"id": "a", "lean_type": "TA", "proof_term": "pa"},
+              {"id": "b", "lean_type": "TB", "proof_term": "pb"}]
+    cand = _multi_candidate_from_lemmas("GOAL", lemmas)
+    assert cand["multi"] is True
+    assert cand["origin"] == "compose"
+    assert cand["id"] is None                       # a composition isn't itself a lemma
+    assert cand["lemmas_used"] == ["a", "b"]         # offered set (verify ablates this down)
+    assert cand["compose_lemmas"] == lemmas          # payloads kept so verify can re-compose
+
+
+def test_necessary_lemma_ids_credits_only_the_needed_subset(monkeypatch):
+    # Goal closes iff BOTH TA and TB are present; TC is dead weight handed to simp.
+    lemmas = [{"id": "a", "lean_type": "TA", "proof_term": "pa"},
+              {"id": "b", "lean_type": "TB", "proof_term": "pb"},
+              {"id": "c", "lean_type": "TC", "proof_term": "pc"}]
+    monkeypatch.setattr(
+        lean_handlers, "_full_verdict",
+        lambda src: (("TA" in src and "TB" in src), []),
+    )
+    # Single-drop: removing a or b breaks it (necessary); removing c still closes (dead).
+    assert set(_necessary_lemma_ids("GOAL", lemmas)) == {"a", "b"}
+
+
+def test_necessary_lemma_ids_empty_when_no_lemma_is_needed(monkeypatch):
+    # The depth-0 case: simp/rfl closes regardless of the banked set ⇒ not a reuse win.
+    lemmas = [{"id": "a", "lean_type": "TA", "proof_term": "pa"},
+              {"id": "b", "lean_type": "TB", "proof_term": "pb"}]
+    monkeypatch.setattr(lean_handlers, "_full_verdict", lambda src: (True, []))
+    assert _necessary_lemma_ids("GOAL", lemmas) == []

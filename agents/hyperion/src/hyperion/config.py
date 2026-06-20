@@ -178,6 +178,10 @@ class Settings(BaseSettings):
     # Premise-source policy for Path-A retrieval. Default stays skill-only so the
     # current green prover workflow is unchanged until Mathlib ingestion is wired.
     lemma_retrieval_mode: str = "skill"  # skill | mathlib | combined
+    # How many top-ranked banked lemmas to compose into the depth>=2 Path-A candidate
+    # (build-plan depth axis). The composition is tried only after every single-lemma
+    # candidate fails, and its credited reuse_depth is ablated to the necessary subset.
+    compose_top_k: int = 3
     # Max nesting depth for subworkflow nodes (a node whose kind is "subworkflow"
     # runs another workflow). The top-level run is depth 0; a subworkflow node at
     # depth d runs its child at depth d+1, and the runner aborts (CapExceeded) once
