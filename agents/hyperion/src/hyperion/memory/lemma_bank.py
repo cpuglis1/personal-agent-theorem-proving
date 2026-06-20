@@ -1,5 +1,5 @@
 """
-Lemma bank — stores verified Lean lemmas in Qdrant ``lemma_bank``.
+Lemma bank — stores verified Lean lemmas in Qdrant ``skill_library``.
 
 Role in the system
 ------------------
@@ -10,8 +10,8 @@ the snowball: every verified lemma is embedded and persisted so future sub-goals
 Qdrant client, lazy imports, deterministic UUID5 upsert — with three changes:
 
 1. **Embedding text** is the *lemma statement / goal type*, not ``request + summary``.
-2. **Payload schema** is ``{statement, proof_term, generality_score, source_goal,
-   verified_at, verification_mode}`` (replaces the task-episode payload).
+2. **Payload schema** is prover-native: ``statement``, ``lean_type``, ``proof_term``,
+   ``normalized_key``, ``symbol_set``, provenance/counters, and verification metadata.
 3. **Dedup identity** is a UUID5 over the *normalized statement* (not a ``task_id``),
    so re-deriving the same lemma upserts in place instead of duplicating.
 
@@ -67,14 +67,23 @@ class StoreResult(TypedDict):
     error: Optional[str]
 
 
-def _collection() -> str:
-    """Qdrant collection backing the lemma bank.
+def _skill_collection() -> str:
+    """Qdrant collection backing Hyperion's growing verified skill library."""
+    return settings.qdrant_skill_library_collection
 
-    Config-driven (``settings.qdrant_lemma_collection``) rather than a hardcoded
-    literal so the bank can be re-namespaced per deployment/domain. Read on each call
-    so a test patching ``settings`` takes effect without reimport.
+
+def _mathlib_collection() -> str:
+    """Qdrant collection backing the static Mathlib premise corpus."""
+    return settings.qdrant_mathlib_premises_collection
+
+
+def _collection() -> str:
+    """Backward-compatible alias for the current skill-library collection.
+
+    Older callers/tests use ``_collection()`` to mean the proved-lemma bank. Keep that
+    API while moving the semantics from a generic ``lemma_bank`` to ``skill_library``.
     """
-    return settings.qdrant_lemma_collection
+    return _skill_collection()
 
 
 def _get_clients():
@@ -90,7 +99,7 @@ def _embed(oai, text: str) -> list[float]:
     return oai.embeddings.create(model="text-embedding-3-small", input=text).data[0].embedding
 
 
-def _ensure_collection(qdrant, dims: int) -> None:
+def _ensure_collection(qdrant, dims: int, collection: str | None = None) -> None:
     """Idempotently provision the lemma-bank collection before a write.
 
     Seed-Prover-style self-healing: the bank creates its backing Qdrant collection
@@ -102,7 +111,7 @@ def _ensure_collection(qdrant, dims: int) -> None:
     """
     from qdrant_client.models import Distance, VectorParams
 
-    collection = _collection()
+    collection = collection or _collection()
     if qdrant.collection_exists(collection):
         return
     qdrant.create_collection(
@@ -128,6 +137,32 @@ def _normalize(statement: str) -> str:
     return re.sub(r"\s+", " ", statement).strip()
 
 
+_SYMBOL_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_'.]*|[∀∃→↔=+\-*/<>≤≥]")
+_BINDER_NAMES_RE = re.compile(r"[\(\{]\s*([A-Za-z_][A-Za-z0-9_']*)\s*:")
+_LOCAL_STOPWORDS = {
+    "theorem", "lemma", "example", "def", "instance", "abbrev", "by", "fun",
+    "where", "let", "have", "show", "exact", "apply", "intro", "simp", "rw",
+}
+
+
+def symbol_set(text: str) -> list[str]:
+    """Extract a small deterministic symbol set from a Lean statement/type.
+
+    This is the sparse retrieval floor: constants/operators survive, obvious local
+    binder names are dropped, and order is stable for payload diffs/tests. It is not a
+    Lean parser; it is a cheap companion signal for dense retrieval.
+    """
+    binders = set(_BINDER_NAMES_RE.findall(text or ""))
+    out: set[str] = set()
+    for tok in _SYMBOL_RE.findall(text or ""):
+        if tok in binders or tok in _LOCAL_STOPWORDS:
+            continue
+        if len(tok) == 1 and tok.islower():
+            continue
+        out.add(tok)
+    return sorted(out)
+
+
 def _point_id(statement: str) -> str:
     """Deterministic UUID5 point id for ``statement`` (UUID5 over the normalized form).
 
@@ -147,6 +182,10 @@ def store_lemma(
     verification_mode: str = "full",
     verified_at: int | None = None,
     lean_type: str | None = None,
+    provenance: dict[str, Any] | None = None,
+    times_retrieved: int = 0,
+    times_won: int = 0,
+    origin: str = "skill_library",
 ) -> StoreResult:
     """Embed and upsert a verified lemma into the bank.
 
@@ -177,27 +216,34 @@ def store_lemma(
     point_id = _point_id(statement)
     try:
         oai, qdrant = _get_clients()
-        vector = _embed(oai, statement)
+        doc_type = lean_type or statement
+        vector = _embed(oai, doc_type)
         _ensure_collection(qdrant, len(vector))
 
         from qdrant_client.models import PointStruct
 
         payload: dict[str, Any] = {
             "statement": statement,
+            "lean_type": doc_type,
             "proof_term": proof_term,
+            "origin": origin,
+            "source_collection": _skill_collection(),
+            "normalized_key": _normalize(statement),
+            "symbol_set": symbol_set(doc_type),
+            "provenance": provenance or {"source_goal": source_goal},
+            "times_retrieved": int(times_retrieved),
+            "times_won": int(times_won),
             "generality_score": generality_score,
             "source_goal": source_goal,
             "verified_at": verified_at if verified_at is not None else int(time.time()),
             "verification_mode": verification_mode,
         }
-        if lean_type is not None:
-            payload["lean_type"] = lean_type
         point = PointStruct(
             id=point_id,
             vector=vector,
             payload=payload,
         )
-        collection = _collection()
+        collection = _skill_collection()
         qdrant.upsert(collection_name=collection, points=[point])
         logger.info("Banked lemma %s in %s", point_id, collection)
         return {"ok": True, "id": point_id, "error": None}
@@ -208,8 +254,74 @@ def store_lemma(
         return {"ok": False, "id": point_id, "error": str(exc)}
 
 
+def _payload_from_hit(hit: Any) -> dict[str, Any]:
+    payload = hit.payload or {}
+    lean_type = payload.get("lean_type") or payload.get("statement", "")
+    source_collection = payload.get("source_collection") or _skill_collection()
+    return {
+        "id": str(getattr(hit, "id", "") or ""),
+        "statement": payload.get("statement", ""),
+        "lean_type": lean_type,
+        "proof_term": payload.get("proof_term", ""),
+        "origin": payload.get("origin") or "skill_library",
+        "source_collection": source_collection,
+        "normalized_key": payload.get("normalized_key") or _normalize(payload.get("statement", "")),
+        "symbol_set": payload.get("symbol_set") or symbol_set(lean_type),
+        "provenance": payload.get("provenance") or {"source_goal": payload.get("source_goal", "")},
+        "times_retrieved": int(payload.get("times_retrieved") or 0),
+        "times_won": int(payload.get("times_won") or 0),
+        "generality_score": payload.get("generality_score", 0.0),
+        "source_goal": payload.get("source_goal", ""),
+        "verified_at": payload.get("verified_at"),
+        "verification_mode": payload.get("verification_mode"),
+        "score": round(hit.score, 3),
+    }
+
+
+def _bump_times_retrieved(qdrant, lemmas: list[dict[str, Any]]) -> None:
+    """Best-effort telemetry bump for thesis-curve retrieval counts."""
+    updates = [
+        (lem["id"], int(lem.get("times_retrieved") or 0) + 1)
+        for lem in lemmas
+        if lem.get("id") and lem.get("source_collection") == _skill_collection()
+    ]
+    if not updates:
+        return
+    try:
+        for point_id, count in updates:
+            qdrant.set_payload(
+                collection_name=_collection(),
+                payload={"times_retrieved": count},
+                points=[point_id],
+            )
+    except Exception as exc:
+        logger.warning("Failed to update lemma retrieval counters: %s", exc)
+
+
+def bump_times_won(lemma: dict[str, Any]) -> int:
+    """Best-effort telemetry bump when a banked lemma wins compare.
+
+    Returns the incremented count so callers can carry it into a later ``store_lemma``
+    upsert; that prevents banking the winning lemma from resetting the counter to zero.
+    """
+    count = int(lemma.get("times_won") or 0) + 1
+    point_id = lemma.get("id")
+    if not point_id or lemma.get("source_collection") not in (None, _skill_collection()):
+        return count
+    try:
+        _oai, qdrant = _get_clients()
+        qdrant.set_payload(
+            collection_name=_collection(),
+            payload={"times_won": count},
+            points=[point_id],
+        )
+    except Exception as exc:
+        logger.warning("Failed to update lemma win counter: %s", exc)
+    return count
+
+
 def retrieve_lemmas(goal: str, limit: int = 5) -> list[dict[str, Any]]:
-    """Retrieve banked lemmas most similar to ``goal``, ranked by vector score.
+    """Retrieve skill-library lemmas most similar to ``goal``, ranked by vector score.
 
     Fail-soft read: any failure logs a warning and returns ``[]`` (a degraded
     retrieval must never break a run — Path B synthesis can still close the goal).
@@ -233,19 +345,50 @@ def retrieve_lemmas(goal: str, limit: int = 5) -> list[dict[str, Any]]:
             score_threshold=_SCORE_THRESHOLD,
             with_payload=True,
         )
-        return [
-            {
-                "statement": h.payload.get("statement", ""),
-                "proof_term": h.payload.get("proof_term", ""),
-                "generality_score": h.payload.get("generality_score", 0.0),
-                "source_goal": h.payload.get("source_goal", ""),
-                "verified_at": h.payload.get("verified_at"),
-                "verification_mode": h.payload.get("verification_mode"),
-                "lean_type": h.payload.get("lean_type"),
-                "score": round(h.score, 3),
-            }
-            for h in response.points
-        ]
+        lemmas = [_payload_from_hit(h) for h in response.points]
+        _bump_times_retrieved(qdrant, lemmas)
+        return lemmas
     except Exception as exc:
         logger.warning("Failed to retrieve lemmas: %s", exc)
+        return []
+
+
+def retrieve_mathlib_premises(goal: str, limit: int = 5) -> list[dict[str, Any]]:
+    """Retrieve static Mathlib premises most similar to ``goal``.
+
+    This is the read-side interface for the future LeanDojo/Mathlib trace corpus. It is
+    fail-soft and counter-free: Mathlib premises are plumbing, not the snowball skill
+    library, so ``times_retrieved``/``times_won`` are intentionally not updated here.
+    """
+    try:
+        oai, qdrant = _get_clients()
+        vector = _embed(oai, goal)
+        response = qdrant.query_points(
+            collection_name=_mathlib_collection(),
+            query=vector,
+            limit=limit,
+            score_threshold=_SCORE_THRESHOLD,
+            with_payload=True,
+        )
+        out: list[dict[str, Any]] = []
+        for hit in response.points:
+            payload = hit.payload or {}
+            lean_type = payload.get("lean_type") or payload.get("signature") or payload.get("statement", "")
+            out.append({
+                "id": str(getattr(hit, "id", "") or ""),
+                "name": payload.get("name", ""),
+                "statement": payload.get("statement") or payload.get("signature", ""),
+                "lean_type": lean_type,
+                "proof_term": payload.get("proof_term", ""),
+                "origin": "mathlib",
+                "source_collection": _mathlib_collection(),
+                "normalized_key": payload.get("normalized_key") or _normalize(payload.get("statement", "")),
+                "symbol_set": payload.get("symbol_set") or symbol_set(lean_type),
+                "provenance": payload.get("provenance") or {"source": "mathlib"},
+                "premises_used": payload.get("premises_used") or [],
+                "score": round(hit.score, 3),
+            })
+        return out
+    except Exception as exc:
+        logger.warning("Failed to retrieve Mathlib premises: %s", exc)
         return []

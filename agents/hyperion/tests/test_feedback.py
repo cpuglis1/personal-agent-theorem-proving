@@ -181,6 +181,27 @@ def test_alert_disabled_by_setting(tmp_path):
     assert not (tmp_path / "t5" / "alerts.md").exists()
 
 
+def test_none_stage_result_does_not_create_fake_artifact(tmp_path):
+    """A no-op mocked synth stage must not write literal 'None' and trigger meta tasks."""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        result_path = runner._write_fallback_result("t-none", None)
+
+    assert result_path is None
+    assert not (tmp_path / "t-none" / "artifacts" / "result.md").exists()
+
+
+def test_plan_stage_output_materialized_when_agent_skips_workspace_write(tmp_path):
+    """A planner final answer containing fenced YAML is persisted as plan.md if missing."""
+    raw = "Final Answer:\n```yaml\n---\ntask_type: code\nkeywords: [lean]\n---\n\n# Plan\n```"
+    result = MagicMock(raw=raw)
+
+    with patch.object(settings, "tasks_dir", tmp_path):
+        path = runner._write_fallback_plan("t-plan", result)
+
+    assert path == str(tmp_path / "t-plan" / "plan.md")
+    assert (tmp_path / "t-plan" / "plan.md").read_text(encoding="utf-8").startswith("---")
+
+
 # ---------------------------------------------------------------------------
 # run_task pauses on a planner question, resumes on the answer
 # ---------------------------------------------------------------------------

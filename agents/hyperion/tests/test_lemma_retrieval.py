@@ -30,9 +30,17 @@ _PROBE_TARGET = ("hyperion.tools.lemma_retrieval.verify_lean",)
 
 def _lemma(statement: str, score: float, proof_term: str = "by sorry") -> dict:
     """A lemma payload in the ``lemma_bank.retrieve_lemmas`` shape."""
+    lean_type = lemma_retrieval._lemma_type(statement)
     return {
         "statement": statement,
+        "lean_type": lean_type,
         "proof_term": proof_term,
+        "origin": "skill_library",
+        "source_collection": "skill_library",
+        "normalized_key": statement,
+        "symbol_set": lemma_retrieval.lemma_bank.symbol_set(lean_type),
+        "times_retrieved": 0,
+        "times_won": 0,
         "generality_score": 0.0,
         "source_goal": "",
         "verified_at": 1,
@@ -205,6 +213,35 @@ def test_empty_bank_returns_empty():
     lean.assert_not_called()
 
 
+def test_default_retrieval_mode_reads_skill_library_only():
+    skill = [_lemma("theorem skill : S := ps", 0.90)]
+    with patch.object(lemma_retrieval.settings, "lemma_retrieval_mode", "skill"), \
+         patch.object(lemma_retrieval.lemma_bank, "retrieve_lemmas", return_value=skill) as retrieve_skill, \
+         patch.object(lemma_retrieval.lemma_bank, "retrieve_mathlib_premises", return_value=[]) as retrieve_mathlib, \
+         patch.object(lemma_retrieval, "rerank", side_effect=_rerank_identity), \
+         mock_lean(ok=True, targets=_PROBE_TARGET):
+        out = lemma_retrieval.retrieve_applicable_lemmas("goal")
+
+    assert [r["statement"] for r in out] == ["theorem skill : S := ps"]
+    retrieve_skill.assert_called_once()
+    retrieve_mathlib.assert_not_called()
+
+
+def test_combined_retrieval_mode_reads_both_sources():
+    skill = [_lemma("theorem skill : S := ps", 0.90)]
+    mathlib = [_lemma("theorem mathlib : M := pm", 0.80)]
+    mathlib[0]["origin"] = "mathlib"
+    mathlib[0]["source_collection"] = "mathlib_premises"
+
+    with patch.object(lemma_retrieval.lemma_bank, "retrieve_lemmas", return_value=skill), \
+         patch.object(lemma_retrieval.lemma_bank, "retrieve_mathlib_premises", return_value=mathlib), \
+         patch.object(lemma_retrieval, "rerank", side_effect=_rerank_identity), \
+         mock_lean(ok=True, targets=_PROBE_TARGET):
+        out = lemma_retrieval.retrieve_applicable_lemmas("goal", mode="combined")
+
+    assert {r["origin"] for r in out} == {"skill_library", "mathlib"}
+
+
 # ---------------------------------------------------------------------------
 # Over-fetch is honored; rerank order drives the result order
 # ---------------------------------------------------------------------------
@@ -224,6 +261,20 @@ def test_over_fetch_passed_to_bank_and_rerank_order_honored():
     assert [r["statement"] for r in out] == [
         "theorem c : C := pc", "theorem a : A := pa", "theorem b : B := pb",
     ]
+
+
+def test_symbol_fusion_promotes_exact_lean_type_match_before_rerank():
+    dense_only = _lemma("theorem dense : DenseOnly := p", 0.99)
+    symbol_match = _lemma("theorem add_zero : ∀ (n : Nat), n + 0 = n := p", 0.80)
+    tail = _lemma("theorem tail : TailOnly := p", 0.10)
+    bank = [dense_only, symbol_match, tail]
+
+    with patch.object(lemma_retrieval.lemma_bank, "retrieve_lemmas", return_value=bank), \
+         patch.object(lemma_retrieval, "rerank", side_effect=_rerank_identity), \
+         mock_lean(ok=True, targets=_PROBE_TARGET):
+        out = lemma_retrieval.retrieve_applicable_lemmas("0 + 0 = 0")
+
+    assert out[0]["statement"] == symbol_match["statement"]
 
 
 # ---------------------------------------------------------------------------

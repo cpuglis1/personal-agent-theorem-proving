@@ -30,12 +30,15 @@ from hyperion.config import settings
 from hyperion.crews import lean_handlers, runner
 from hyperion.crews.lean_handlers import (
     ProofFailed,
+    lean_decompose_handler,
     abstract_handler,
     bank_handler,
     compare_handler,
+    skeleton_check_handler,
     verify_handler,
 )
 from hyperion.crews.native import NativeNodeCtx
+from hyperion.crews.plan_contract import parse_plan
 from hyperion.crews.workflows import (
     WorkflowNode,
     WorkflowRecord,
@@ -50,6 +53,101 @@ _VERIFY_TARGET = ("hyperion.crews.lean_handlers.verify_lean",)
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+# ---------------------------------------------------------------------------
+# Native Lean decomposition — deterministic plan writer for live smoke path
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_native_lean_decomposer_writes_parseable_single_subgoal_plan(tmp_path):
+    """The native decomposer writes the exact plan contract consumed downstream."""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        node = WorkflowNode(id="decompose", kind="native", handler="lean_decompose", upstream=[])
+        ctx = NativeNodeCtx(
+            task_id="native_decomp",
+            node=node,
+            request="Prove that 0 + 0 = 0.",
+            progress_callback=None,
+        )
+
+        res = await lean_decompose_handler(ctx)
+        plan = parse_plan("native_decomp")
+
+    assert res["goal"] == "0 + 0 = 0"
+    assert plan.selected_option == "a"
+    assert plan.scaffold == "have h1 : 0 + 0 = 0 := sorry\nexact h1\n"
+    subs = plan.active_subtasks()
+    assert len(subs) == 1
+    assert subs[0].id == "h1"
+    assert subs[0].description == "Prove the target proposition."
+    assert subs[0].lean_type == "0 + 0 = 0"
+
+
+@pytest.mark.anyio
+async def test_native_decomposer_scaffold_wraps_for_skeleton_check(tmp_path):
+    """The body-only native scaffold is verified via the existing command wrapper."""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        decompose = WorkflowNode(id="decompose", kind="native", handler="lean_decompose", upstream=[])
+        await lean_decompose_handler(NativeNodeCtx(
+            task_id="native_skeleton",
+            node=decompose,
+            request="Prove that True.",
+            progress_callback=None,
+        ))
+        check = WorkflowNode(
+            id="skeleton_check", kind="native", handler="skeleton_check", upstream=["decompose"]
+        )
+        ctx = NativeNodeCtx(
+            task_id="native_skeleton",
+            node=check,
+            request="Prove that True.",
+            progress_callback=None,
+        )
+
+        with mock_lean(ok=True, targets=_VERIFY_TARGET) as lean:
+            res = await skeleton_check_handler(ctx)
+
+    assert res["ok"] is True
+    source = lean.call_args.args[0]
+    assert source == "example : True := by\n  have h1 : True := sorry\n  exact h1"
+    assert lean.call_args.kwargs["mode"] == "skeleton"
+
+
+@pytest.mark.anyio
+async def test_shipped_lean_prove_mocked_workflow_runs_with_native_decompose(tmp_path):
+    """The shipped workflow no longer needs the decomposer agent in the smoke path."""
+
+    async def _fake_stage(task_id, request, stage, agents, tasks, cb, deadline):
+        if stage == "synthesize":
+            context_put(task_id, "candidate_b", {
+                "source": "theorem t_h1 : True := trivial",
+                "statement": "theorem t_h1 : True",
+                "proof_term": "trivial",
+                "origin": "synthesize",
+                "lean_type": "True",
+            })
+
+    store = MagicMock(return_value={"ok": True, "id": "pt", "error": None})
+
+    with patch.object(settings, "tasks_dir", tmp_path), \
+         patch.object(runner, "build_agent", MagicMock()), \
+         patch.object(runner, "load_agent", MagicMock()), \
+         patch.object(runner, "discover_context", MagicMock(return_value=None)), \
+         patch.object(runner, "_node_task", MagicMock()), \
+         patch.object(runner, "_run_stage", new=_fake_stage), \
+         patch.object(lean_handlers, "retrieve_applicable_lemmas", lambda goal, **k: []), \
+         patch.object(lean_handlers, "propose_abstraction", AsyncMock(return_value=[])), \
+         patch("hyperion.memory.lemma_bank.store_lemma", store), \
+         patch("hyperion.server.meta_tasks.run_meta_tasks", new=AsyncMock()), \
+         mock_lean(ok=True, targets=_VERIFY_TARGET):
+        result = await runner.run_task("native_full", "Prove that True.", workflow="lean-prove")
+
+    assert result["status"] == "done", result
+    text = (tmp_path / "native_full" / "artifacts" / "result.lean").read_text(encoding="utf-8")
+    assert text == "example : True := by\n  have h1 : True := trivial\n  exact h1"
+    assert store.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +469,38 @@ def test_compare_and_abstract_run_between_verify_and_bank():
 
 
 @pytest.mark.anyio
+async def test_compare_increments_times_won_for_winner(tmp_path):
+    with patch.object(settings, "tasks_dir", tmp_path):
+        (tmp_path / "win1").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "win1" / "plan.md").write_text(_PLAN_MD, encoding="utf-8")
+        context_put("win1", "candidate_a:h1", {
+            "id": "lemma-pt",
+            "source": "a_src",
+            "statement": "lem_P",
+            "proof_term": "pa",
+            "lean_type": "P",
+            "times_won": 2,
+        })
+        context_put("win1", "verified_a:h1", {
+            "id": "lemma-pt",
+            "source": "a_src",
+            "statement": "lem_P",
+            "proof_term": "pa",
+            "lean_type": "P",
+            "path": "A",
+            "times_won": 2,
+        })
+
+        with patch("hyperion.memory.lemma_bank.bump_times_won", MagicMock(return_value=3)) as bump:
+            res = await compare_handler(_native_ctx("win1", "compare", "compare"))
+        winner = context_get("win1", "discharged:h1")
+
+    assert res["winner_path"] == "A"
+    bump.assert_called_once()
+    assert winner["times_won"] == 3
+
+
+@pytest.mark.anyio
 async def test_research_mode_abstracts_path_b_even_when_path_a_wins_and_bank_stores_it(tmp_path):
     """RESEARCH mode end-to-end over verify→compare→abstract→bank for one sub-goal:
       - verify kernel-verifies BOTH paths (verified_a AND verified_b set);
@@ -414,6 +544,29 @@ async def test_research_mode_abstracts_path_b_even_when_path_a_wins_and_bank_sto
         assert store.call_count == 1
         banked_statement = store.call_args_list[0].args[0]
         assert banked_statement == "theorem g {α} (x : α) : x = x"
+
+
+@pytest.mark.anyio
+async def test_bank_preserves_winner_counters_on_store(tmp_path):
+    with patch.object(settings, "tasks_dir", tmp_path):
+        (tmp_path / "win2").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "win2" / "plan.md").write_text(_PLAN_MD, encoding="utf-8")
+        context_put("win2", "discharged:h1", {
+            "proof_term": "pa",
+            "statement": "lem_P",
+            "path": "A",
+            "lean_type": "P",
+            "times_retrieved": 7,
+            "times_won": 4,
+        })
+
+        store = MagicMock(return_value={"ok": True, "id": "pt", "error": None})
+        with patch("hyperion.memory.lemma_bank.store_lemma", store), \
+             mock_lean(ok=True, targets=_VERIFY_TARGET):
+            await bank_handler(_native_ctx("win2", "bank", "bank"))
+
+    assert store.call_args.kwargs["times_retrieved"] == 7
+    assert store.call_args.kwargs["times_won"] == 4
 
 
 # ---------------------------------------------------------------------------

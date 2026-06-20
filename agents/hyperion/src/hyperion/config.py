@@ -113,6 +113,11 @@ class Settings(BaseSettings):
     # episodic memory; ``qdrant_lemma_collection`` backs the prover's lemma bank.
     qdrant_memory_collection: str = "hyperion_memory"
     qdrant_lemma_collection: str = "lemma_bank"
+    # Lean prover retrieval stores are deliberately split:
+    # - skill_library: Hyperion-proved lemmas, instrumented for snowball ablations.
+    # - mathlib_premises: static traced Mathlib corpus, populated separately.
+    qdrant_skill_library_collection: str = "skill_library"
+    qdrant_mathlib_premises_collection: str = "mathlib_premises"
 
     # SearXNG
     searxng_url: str = "http://localhost:8888"
@@ -170,6 +175,9 @@ class Settings(BaseSettings):
     # fresh Path-B lemma even when Path A also closed (anti-starvation). The comparison
     # IS the experiment, so the thesis runs are RESEARCH; deployments are DEPLOY.
     prover_research_mode: bool = False
+    # Premise-source policy for Path-A retrieval. Default stays skill-only so the
+    # current green prover workflow is unchanged until Mathlib ingestion is wired.
+    lemma_retrieval_mode: str = "skill"  # skill | mathlib | combined
     # Max nesting depth for subworkflow nodes (a node whose kind is "subworkflow"
     # runs another workflow). The top-level run is depth 0; a subworkflow node at
     # depth d runs its child at depth d+1, and the runner aborts (CapExceeded) once

@@ -481,6 +481,8 @@ def _write_fallback_result(task_id: str, last_result: Any) -> str | None:
     """If the synthesizer returned its report as a chat message instead of calling
     workspace_write, persist CrewOutput.raw so the artifact is always present."""
     result_path = settings.tasks_dir / task_id / "artifacts" / "result.md"
+    if last_result is None:
+        return str(result_path) if result_path.exists() else None
     if not result_path.exists():
         try:
             raw = getattr(last_result, "raw", None) or str(last_result)
@@ -491,6 +493,45 @@ def _write_fallback_result(task_id: str, last_result: Any) -> str | None:
         except Exception as exc:
             logger.warning("Failed to write fallback result.md: %s", exc)
     return str(result_path) if result_path.exists() else None
+
+
+def _raw_stage_output(result: Any) -> str:
+    """Extract the user-visible text from a CrewAI result object."""
+    return (getattr(result, "raw", None) or str(result or "")).strip()
+
+
+def _strip_fenced_block(raw: str) -> str:
+    """Return the first fenced block's content, or the raw text when none exists."""
+    import re
+
+    match = re.search(r"```(?:yaml|yml|markdown|md)?\s*\n(?P<body>.*?)\n```", raw, re.DOTALL)
+    return (match.group("body") if match else raw).strip()
+
+
+def _write_fallback_plan(task_id: str, result: Any) -> str | None:
+    """Persist plan.md when the planner returned it as chat output.
+
+    Agents are instructed to call ``workspace_write``, but live LLMs sometimes return the
+    complete plan as their final answer. Downstream nodes read ``plan.md`` from disk, so
+    materialize that answer if the tool write did not happen.
+    """
+    plan_path = settings.tasks_dir / task_id / "plan.md"
+    if plan_path.exists() or result is None:
+        return str(plan_path) if plan_path.exists() else None
+    raw = _raw_stage_output(result)
+    if not raw:
+        return None
+    body = _strip_fenced_block(raw)
+    if "---" not in body:
+        return None
+    try:
+        plan_path.parent.mkdir(parents=True, exist_ok=True)
+        plan_path.write_text(body, encoding="utf-8")
+        logger.info("Wrote fallback plan.md from crew output (%d chars)", len(body))
+        return str(plan_path)
+    except Exception as exc:
+        logger.warning("Failed to write fallback plan.md: %s", exc)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -918,7 +959,8 @@ async def _execute_workflow(
             if len(firing) == 1:
                 # ---- Single node — run with the standard sequential path ----
                 node = firing[0]
-                _, last_result = await _run_one(node, feedback)
+                node_id, last_result = await _run_one(node, feedback)
+                wave_results = {node_id: last_result}
                 _record_node(node)
             else:
                 # ---- Parallel nodes — fan out with asyncio.gather ----------
@@ -931,12 +973,14 @@ async def _execute_workflow(
                 # last_result from a parallel work wave doesn't feed anything
                 # critical — but we store it anyway for completeness.
                 last_result = wave_pairs[-1][1]
+                wave_results = dict(wave_pairs)
                 for node in firing:
                     _record_node(node)
 
             # ---- Post-plan checks: affordance pause + record context brief --
             for node in firing:
                 if node.kind == "plan":
+                    _write_fallback_plan(task_id, wave_results.get(node.id))
                     if context_brief:
                         update_plan_frontmatter(task_id, context_brief=context_brief)
                     from hyperion.feedback import latest_pending_affordance

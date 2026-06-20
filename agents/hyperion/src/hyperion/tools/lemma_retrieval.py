@@ -17,9 +17,10 @@ candidate, ask the kernel whether ``exact``/``apply`` the lemma makes progress o
 goal. Candidates that rerank well but don't apply are dropped; the survivors stay in
 ranked order.
 
-Pipeline (over-fetch → rerank → gate → budget-trim), reusing the shape of
-``tools/second_brain.py`` and the primitives in ``tools/reranker.py``; the *source* is
-``lemma_bank`` (Phase 2), not the personal second brain.
+Pipeline (dense over-fetch → sparse symbol ranking → reciprocal-rank fusion → rerank →
+gate → budget-trim), reusing the shape of ``tools/second_brain.py`` and the primitives
+in ``tools/reranker.py``; the *source* is ``lemma_bank`` (Phase 2), not the personal
+second brain.
 
 The load-bearing ``infra_ok`` distinction (mirrors ``tools/lean_verify.py``)
 ---------------------------------------------------------------------------
@@ -44,6 +45,7 @@ from typing import Any
 
 from crewai.tools import BaseTool
 
+from hyperion.config import settings
 from hyperion.memory import lemma_bank
 from hyperion.tools.lean_verify import verify_lean
 from hyperion.tools.reranker import _estimate_tokens, rerank
@@ -154,6 +156,57 @@ def _applies(goal: str, statement: str) -> bool:
     return bool(res["ok"])
 
 
+def _document_text(candidate: dict[str, Any]) -> str:
+    """The prover-native retrieval document: the lemma's bare Lean type."""
+    return candidate.get("lean_type") or _lemma_type(candidate.get("statement", ""))
+
+
+def _symbol_overlap(goal: str, candidate: dict[str, Any]) -> int:
+    goal_symbols = set(lemma_bank.symbol_set(goal))
+    cand_symbols = set(candidate.get("symbol_set") or lemma_bank.symbol_set(_document_text(candidate)))
+    return len(goal_symbols & cand_symbols)
+
+
+def _rrf_fuse(
+    dense: list[dict[str, Any]],
+    sparse_order: list[dict[str, Any]],
+    *,
+    k: int = 60,
+    sparse_weight: float = 1.25,
+) -> list[dict[str, Any]]:
+    """Fuse dense and sparse orders with reciprocal-rank fusion."""
+    by_key: dict[str, dict[str, Any]] = {}
+    scores: dict[str, float] = {}
+
+    def key(cand: dict[str, Any]) -> str:
+        return cand.get("id") or cand.get("normalized_key") or cand.get("statement", "")
+
+    for weight, order in ((1.0, dense), (sparse_weight, sparse_order)):
+        for rank, cand in enumerate(order, start=1):
+            ident = key(cand)
+            if not ident:
+                continue
+            by_key.setdefault(ident, cand)
+            scores[ident] = scores.get(ident, 0.0) + weight / (k + rank)
+
+    return sorted(by_key.values(), key=lambda cand: scores[key(cand)], reverse=True)
+
+
+def _retrieve_by_mode(goal: str, over_fetch: int, mode: str | None = None) -> list[dict[str, Any]]:
+    """Read premise candidates according to the configured retrieval-source policy."""
+    selected = (mode or settings.lemma_retrieval_mode or "skill").strip().lower()
+    if selected not in {"skill", "mathlib", "combined"}:
+        logger.warning("Unknown lemma_retrieval_mode=%r; falling back to skill", selected)
+        selected = "skill"
+    if selected == "skill":
+        return lemma_bank.retrieve_lemmas(goal, limit=over_fetch)
+    if selected == "mathlib":
+        return lemma_bank.retrieve_mathlib_premises(goal, limit=over_fetch)
+    skill = lemma_bank.retrieve_lemmas(goal, limit=over_fetch)
+    mathlib = lemma_bank.retrieve_mathlib_premises(goal, limit=over_fetch)
+    return _rrf_fuse(skill, mathlib, sparse_weight=1.0)
+
+
 def retrieve_applicable_lemmas(
     goal: str,
     *,
@@ -161,6 +214,7 @@ def retrieve_applicable_lemmas(
     over_fetch: int = 15,
     token_budget: int | None = None,
     probe: bool = True,
+    mode: str | None = None,
 ) -> list[dict[str, Any]]:
     """Retrieve banked lemmas that plausibly *apply* to ``goal``, in ranked order.
 
@@ -185,20 +239,30 @@ def retrieve_applicable_lemmas(
         ``statement``/``proof_term``/``score``) for the applying lemmas, best-first.
         Empty when the bank is empty or every dependency degraded to nothing.
     """
-    candidates = lemma_bank.retrieve_lemmas(goal, limit=over_fetch)
+    candidates = _retrieve_by_mode(goal, over_fetch, mode=mode)
     if not candidates:
         return []
 
-    # Coarse precision pass: rerank by goal-vs-statement text. Fail-soft — a reranker
-    # outage returns the candidates in their original (vector) order.
-    statements = [c["statement"] for c in candidates]
-    ranked = rerank(goal, statements, top_n=len(statements))
-    reranked = [candidates[idx] for idx, _score in ranked]
+    # Sparse companion signal: overlap on Lean constants/operators. Fuse with dense
+    # vector order before the expensive cross-encoder/Lean gate, so exact symbol matches
+    # survive even if the embedding model is generic prose-oriented.
+    sparse = sorted(
+        candidates,
+        key=lambda c: (_symbol_overlap(goal, c), float(c.get("score") or 0.0)),
+        reverse=True,
+    )
+    fused = _rrf_fuse(candidates, sparse)
+
+    # Coarse precision pass: rerank by goal-vs-lean_type text. Fail-soft — a reranker
+    # outage returns the fused order.
+    documents = [_document_text(c) for c in fused]
+    ranked = rerank(goal, documents, top_n=len(documents))
+    reranked = [fused[idx] for idx, _score in ranked]
 
     # Applicability gate (the Phase 3 contribution): keep appliers + infra-down
     # inconclusives, drop reranked-but-non-applying lemmas. Probed in ranked order.
     if probe:
-        reranked = [c for c in reranked if _applies(goal, c["statement"])]
+        reranked = [c for c in reranked if _applies(goal, _document_text(c))]
 
     # Token-budget trim (mirrors reranker.prioritize): keep best-first until the next
     # candidate would overflow, but always keep at least one. Then cap at ``limit``.
@@ -209,7 +273,7 @@ def retrieve_applicable_lemmas(
         if len(kept) >= limit:
             break
         if token_budget is not None:
-            cost = _estimate_tokens(cand["statement"])
+            cost = _estimate_tokens(_document_text(cand))
             if used + cost > token_budget and kept:
                 dropped += 1
                 continue

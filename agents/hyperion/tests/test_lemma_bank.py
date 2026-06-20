@@ -93,14 +93,36 @@ def test_store_writes_full_payload_and_embeds_statement():
     assert oai.embeddings.create.call_args.kwargs["input"] == "theorem add_zero : n + 0 = n"
 
     payload = qdrant.upsert.call_args.kwargs["points"][0].payload
-    assert payload == {
-        "statement": "theorem add_zero : n + 0 = n",
-        "proof_term": "by simp",
-        "generality_score": 0.8,
-        "source_goal": "prove n + 0 = n",
-        "verified_at": 12345,
-        "verification_mode": "full",
-    }
+    assert payload["statement"] == "theorem add_zero : n + 0 = n"
+    assert payload["lean_type"] == "theorem add_zero : n + 0 = n"
+    assert payload["proof_term"] == "by simp"
+    assert payload["origin"] == "skill_library"
+    assert payload["source_collection"] == lemma_bank._skill_collection()
+    assert payload["generality_score"] == 0.8
+    assert payload["source_goal"] == "prove n + 0 = n"
+    assert payload["provenance"] == {"source_goal": "prove n + 0 = n"}
+    assert payload["verified_at"] == 12345
+    assert payload["verification_mode"] == "full"
+    assert payload["normalized_key"] == "theorem add_zero : n + 0 = n"
+    assert payload["times_retrieved"] == 0
+    assert payload["times_won"] == 0
+    assert {"add_zero", "+", "="}.issubset(set(payload["symbol_set"]))
+
+
+def test_store_embeds_lean_type_when_available():
+    qdrant = MagicMock()
+    oai, _ = _mock_clients(qdrant)
+    with patch.object(lemma_bank, "_get_clients", return_value=(oai, qdrant)):
+        lemma_bank.store_lemma(
+            "theorem add_zero (n : Nat) : n + 0 = n := by simp",
+            "by simp",
+            lean_type="∀ (n : Nat), n + 0 = n",
+        )
+
+    assert oai.embeddings.create.call_args.kwargs["input"] == "∀ (n : Nat), n + 0 = n"
+    payload = qdrant.upsert.call_args.kwargs["points"][0].payload
+    assert payload["lean_type"] == "∀ (n : Nat), n + 0 = n"
+    assert "n" not in payload["symbol_set"]  # local binder, not a reusable symbol
 
 
 def test_store_defaults_verified_at_to_now():
@@ -136,6 +158,9 @@ def test_retrieve_returns_payloads_ranked_by_score():
     assert [r["statement"] for r in out] == ["lemma A", "lemma B"]
     assert [r["score"] for r in out] == [0.91, 0.42]  # ranked, descending
     assert out[0]["proof_term"] == "pa"
+    assert out[0]["origin"] == "skill_library"
+    assert out[0]["source_collection"] == lemma_bank._skill_collection()
+    assert out[0]["times_retrieved"] == 0
     # The goal is the embedded query text.
     assert oai.embeddings.create.call_args.kwargs["input"] == "some goal"
 
@@ -149,6 +174,59 @@ def test_retrieve_failure_is_fail_soft_returns_empty(caplog):
             out = lemma_bank.retrieve_lemmas("goal")
     assert out == []  # degraded read never breaks a run
     assert any(rec.levelno == logging.WARNING for rec in caplog.records)
+
+
+def test_bump_times_won_updates_payload_best_effort():
+    qdrant = MagicMock()
+    oai, _ = _mock_clients(qdrant)
+    with patch.object(lemma_bank, "_get_clients", return_value=(oai, qdrant)):
+        count = lemma_bank.bump_times_won({"id": "pt1", "times_won": 2})
+
+    assert count == 3
+    qdrant.set_payload.assert_called_once_with(
+        collection_name=lemma_bank._collection(),
+        payload={"times_won": 3},
+        points=["pt1"],
+    )
+
+
+def test_bump_times_won_without_point_id_still_returns_incremented_count():
+    with patch.object(lemma_bank, "_get_clients") as clients:
+        count = lemma_bank.bump_times_won({"times_won": 4})
+
+    assert count == 5
+    clients.assert_not_called()
+
+
+def test_bump_times_won_skips_mathlib_premises():
+    with patch.object(lemma_bank, "_get_clients") as clients:
+        count = lemma_bank.bump_times_won({
+            "id": "mathlib-pt",
+            "times_won": 0,
+            "source_collection": lemma_bank._mathlib_collection(),
+        })
+
+    assert count == 1
+    clients.assert_not_called()
+
+
+def test_retrieve_mathlib_premises_has_static_source_fields():
+    qdrant = MagicMock()
+    oai, _ = _mock_clients(qdrant)
+    qdrant.query_points.return_value = MagicMock(
+        points=[
+            _hit(0.88, name="Nat.zero_add", signature="∀ (n : Nat), 0 + n = n",
+                 premises_used=["Nat.add_zero"], source="mathlib"),
+        ]
+    )
+    with patch.object(lemma_bank, "_get_clients", return_value=(oai, qdrant)):
+        out = lemma_bank.retrieve_mathlib_premises("0 + 0 = 0", limit=3)
+
+    assert out[0]["origin"] == "mathlib"
+    assert out[0]["source_collection"] == lemma_bank._mathlib_collection()
+    assert out[0]["name"] == "Nat.zero_add"
+    assert out[0]["premises_used"] == ["Nat.add_zero"]
+    qdrant.set_payload.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

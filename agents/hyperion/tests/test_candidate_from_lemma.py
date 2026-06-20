@@ -68,9 +68,16 @@ def test_lean_type_falls_back_to_statement_extraction():
 
 
 def test_origin_and_payload_fields_preserved_for_banking():
-    lemma = {"statement": "∀ (n : Nat), n = n", "proof_term": "rfl", "lean_type": "∀ (n : Nat), n = n"}
+    lemma = {
+        "statement": "∀ (n : Nat), n = n",
+        "proof_term": "rfl",
+        "lean_type": "∀ (n : Nat), n = n",
+        "origin": "skill_library",
+        "source_collection": "skill_library",
+    }
     cand = _candidate_from_lemma("7 = 7", lemma)
-    assert cand["origin"] == "retrieve"
+    assert cand["origin"] == "skill_library"
+    assert cand["source_collection"] == "skill_library"
     assert cand["statement"] == "∀ (n : Nat), n = n"
     assert cand["proof_term"] == "rfl"
     assert cand["lean_type"] == "∀ (n : Nat), n = n"

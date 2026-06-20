@@ -210,8 +210,8 @@ async def test_real_lemma_abstracted_overabstraction_rejected(tmp_path):
         with patch.object(lean_handlers, "propose_abstraction",
                           AsyncMock(return_value=proposals)):
             res = await abstract_handler(ctx)
+        chosen = context_get("alive", "abstracted:sg")
 
     assert res["abstracted"] is True
     assert res["n_rejected"] == 1            # the live kernel rejected the over-abstraction
-    chosen = context_get("alive", "abstracted:sg")
     assert "n + 0 = n" in chosen["statement"]

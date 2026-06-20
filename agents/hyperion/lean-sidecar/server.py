@@ -27,6 +27,7 @@ import os
 import re
 import subprocess
 import tempfile
+import traceback
 import uuid
 from pathlib import Path
 from typing import Literal, Optional
@@ -87,12 +88,13 @@ def health() -> dict:
 
 @app.post("/verify", response_model=VerifyResponse)
 def verify(req: VerifyRequest) -> VerifyResponse:
-    SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
-    # A unique module name per call avoids any cross-request olean caching surprises.
-    stem = f"S{uuid.uuid4().hex}"
-    src_path = SCRATCH_DIR / f"{stem}.lean"
-    src_path.write_text(req.source, encoding="utf-8")
+    src_path: Optional[Path] = None
     try:
+        SCRATCH_DIR.mkdir(parents=True, exist_ok=True)
+        # A unique module name per call avoids any cross-request olean caching surprises.
+        stem = f"S{uuid.uuid4().hex}"
+        src_path = SCRATCH_DIR / f"{stem}.lean"
+        src_path.write_text(req.source, encoding="utf-8")
         proc = subprocess.run(
             ["lake", "env", "lean", str(src_path)],
             cwd=PROJECT_DIR,
@@ -113,10 +115,18 @@ def verify(req: VerifyRequest) -> VerifyResponse:
         return VerifyResponse(ok=ok, errors=errors, elaborated_term=None)
     except subprocess.TimeoutExpired:
         return VerifyResponse(ok=False, errors=[f"lean timed out after {LEAN_TIMEOUT}s"])
+    except Exception as exc:
+        # The sidecar is the prover's oracle, so clients need a structured verdict even
+        # when the wrapper itself is misconfigured. Returning 200 with a diagnostic lets
+        # health gates and tests distinguish "server process is alive" from "verifier
+        # can actually run Lean", instead of surfacing an opaque FastAPI 500.
+        detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+        return VerifyResponse(ok=False, errors=[f"lean sidecar exception: {detail}"])
     finally:
         # Best-effort cleanup of the scratch source + its build artifact.
-        for p in (src_path, src_path.with_suffix(".olean"), src_path.with_suffix(".ilean")):
-            try:
-                p.unlink(missing_ok=True)
-            except OSError:
-                pass
+        if src_path is not None:
+            for p in (src_path, src_path.with_suffix(".olean"), src_path.with_suffix(".ilean")):
+                try:
+                    p.unlink(missing_ok=True)
+                except OSError:
+                    pass

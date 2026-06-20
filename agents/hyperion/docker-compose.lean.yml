@@ -1,13 +1,18 @@
 # =============================================================================
 # Lean verifier sidecar — the prover's oracle (build-plan Phase 1, deliverable 2).
 #
-# Brought up ALONGSIDE the base override so the service names resolve on the shared
-# ai-router network:
+# Brought up alongside the base ai-router compose file AND the Hyperion override so
+# service names such as `litellm`/`qdrant` resolve:
 #
+#     # from repo root
 #     docker compose \
-#       -f docker-compose.override.yml \
-#       -f docker-compose.lean.yml \
-#       up -d
+#       -f ai-router/docker-compose.yml \
+#       -f agents/hyperion/docker-compose.override.yml \
+#       -f agents/hyperion/docker-compose.lean.yml \
+#       up -d --build --force-recreate lean
+#
+# Or use:
+#     make lean-rebuild
 #
 # KEY DESIGN NOTES (mirrors docker-compose.override.yml):
 #   - `lean` is a long-lived service on `ai-net`. Hyperion reaches it by the Docker

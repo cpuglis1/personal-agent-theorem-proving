@@ -35,6 +35,7 @@ proposal fake a pass (only ``verify_lean`` sets ``ok``).
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from typing import Any, Optional
@@ -125,6 +126,50 @@ def _goal_type(ctx: NativeNodeCtx, sg_id: str) -> str:
     return _prose_to_goal_type(ctx.request)
 
 
+async def lean_decompose_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
+    """Write a deterministic single-subgoal Lean plan for the prover workflow.
+
+    This keeps the critical ``lean-prove`` smoke path out of the agent/ReAct loop while
+    preserving the same ``plan.md`` contract consumed by skeleton/retrieve/synthesize.
+    Richer decomposition can return to the decomposer agent later; for now one typed
+    ``have`` is enough to make the native prover pipeline deterministic.
+    """
+    goal = _prose_to_goal_type(ctx.request)
+    scaffold = f"have h1 : {goal} := sorry\nexact h1"
+    plan_md = (
+        "---\n"
+        f"task_id: {ctx.task_id}\n"
+        "task_type: code\n"
+        f"original_request: {json.dumps(ctx.request)}\n"
+        "selected_option: a\n"
+        "scaffold: |\n"
+        f"  have h1 : {goal} := sorry\n"
+        "  exact h1\n"
+        "options:\n"
+        "  - id: a\n"
+        "    summary: Prove the target proposition directly.\n"
+        "    subtasks:\n"
+        "      - id: h1\n"
+        "        description: Prove the target proposition.\n"
+        f"        lean_type: {json.dumps(goal)}\n"
+        "---\n\n"
+        "# Lean decomposition\n"
+        "\n"
+        "Single-subgoal scaffold for the target proposition.\n"
+    )
+    path = settings.tasks_dir / ctx.task_id / "plan.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(plan_md, encoding="utf-8")
+    ctx.progress("[decompose] wrote deterministic single-subgoal Lean plan")
+    return {
+        "handler": "lean_decompose",
+        "subgoals": 1,
+        "selected_option": "a",
+        "goal": goal,
+        "scaffold": scaffold,
+    }
+
+
 def _bb_key(base: str, sg_id: str) -> str:
     """Blackboard key for ``base`` namespaced to sub-goal ``sg_id`` (e.g. ``candidate_a:0``).
 
@@ -156,6 +201,25 @@ def _sanitize_lean_source(source: str) -> str:
     cleaned = _IMPORT_LINE_RE.sub("", source)
     cleaned = _LEADING_LEMMA_RE.sub(r"\1theorem\2", cleaned)
     return cleaned.lstrip("\n")
+
+
+def _indent_tactic_body(body: str) -> str:
+    return "\n".join(f"  {line}" if line.strip() else line for line in body.strip().splitlines())
+
+
+def _scaffold_as_command(scaffold: str, goal_type: str) -> str:
+    """Coerce a planner scaffold into a Lean command.
+
+    Live planners often emit the body of a ``by`` proof (`have …; exact …`) rather than
+    a top-level declaration. The verifier runs files, so that body must be wrapped in an
+    ``example : goal := by`` command for skeleton/final checks.
+    """
+    s = (scaffold or "").strip()
+    if not s:
+        return s
+    if _looks_like_declaration(s):
+        return s
+    return f"example : {goal_type} := by\n{_indent_tactic_body(s)}"
 
 
 def _synthesized_candidate(ctx: NativeNodeCtx, sg_id: str) -> Optional[dict[str, Any]]:
@@ -262,11 +326,15 @@ def _candidate_from_lemma(goal_type: str, lemma: dict[str, Any]) -> dict[str, An
         f"  first | exact h | apply h | simpa using h"
     )
     return {
+        "id": lemma.get("id"),
         "source": source,
         "statement": statement,
         "proof_term": proof_term,
-        "origin": "retrieve",
+        "origin": lemma.get("origin") or "skill_library",
+        "source_collection": lemma.get("source_collection"),
         "lean_type": lemma.get("lean_type") or goal_type,
+        "times_retrieved": int(lemma.get("times_retrieved") or 0),
+        "times_won": int(lemma.get("times_won") or 0),
     }
 
 
@@ -436,7 +504,8 @@ async def skeleton_check_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     if not scaffold:
         ctx.put("skeleton_ok", None)
         return {"handler": "skeleton_check", "ok": None, "reason": "no scaffold in plan"}
-    res = verify_lean(scaffold, mode="skeleton")
+    sg_id = _subgoal_id(ctx)
+    res = verify_lean(_scaffold_as_command(scaffold, _goal_type(ctx, sg_id)), mode="skeleton")
     if not res["infra_ok"]:
         # Inconclusive ≠ failure: degrade to "proceed" rather than blocking on a blip.
         ctx.put("skeleton_ok", None)
@@ -609,6 +678,7 @@ async def compare_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     if winner is not None:
         winner["lean_type"] = winner.get("lean_type") or goal
         winner["generality_score"] = generality_score(winner)
+        winner["times_won"] = lemma_bank.bump_times_won(winner)
         ctx.put(_bb_key("discharged", sg_id), winner)  # finalize the verify provisional
 
     mode = "research" if settings.prover_research_mode else "deploy"
@@ -697,6 +767,9 @@ async def abstract_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     else:
         abstracted = True
     chosen["generality_score"] = generality_score(chosen)
+    discharged = ctx.get(_bb_key("discharged", sg_id)) or {}
+    if discharged.get("path") == fresh_b.get("path"):
+        chosen["times_won"] = int(discharged.get("times_won") or 0)
     ctx.put(_bb_key("abstracted", sg_id), chosen)
     ctx.progress(
         f"[abstract] {sg_id}: {'abstracted' if abstracted else 'fell back'} "
@@ -761,6 +834,10 @@ def _bare_proof_term(win: dict[str, Any]) -> str:
     """
     proof = (win.get("proof_term") or "").strip()
     source = (win.get("source") or "").strip()
+    if win.get("source_collection") and _looks_like_declaration(source):
+        body = _proof_body_after_assign(source)
+        if body:
+            return body
     for text in (proof, source):
         if not text:
             continue
@@ -815,7 +892,11 @@ async def bank_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     discharged = {k: v for k, v in discharged.items() if v}
 
     scaffold = plan.scaffold or ""
-    assembled = _assemble(scaffold, subtasks, discharged) if scaffold else ""
+    assembled_body = _assemble(scaffold, subtasks, discharged) if scaffold else ""
+    assembled = (
+        _scaffold_as_command(assembled_body, _prose_to_goal_type(ctx.request))
+        if assembled_body else ""
+    )
 
     # Final ground-truth gate on the assembled proof.
     final_ok: Optional[bool] = None
@@ -845,6 +926,9 @@ async def bank_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
             verification_mode="full",
             generality_score=float(to_bank.get("generality_score", 0.0) or 0.0),
             lean_type=(sub.lean_type if sub else None) or to_bank.get("lean_type"),
+            times_retrieved=int(to_bank.get("times_retrieved") or 0),
+            times_won=int(to_bank.get("times_won") or 0),
+            origin=to_bank.get("origin") or "skill_library",
         )
         if store["ok"]:
             banked += 1
@@ -870,6 +954,7 @@ async def bank_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 register_native_handler("retrieve", retrieve_handler)
+register_native_handler("lean_decompose", lean_decompose_handler)
 register_native_handler("skeleton_check", skeleton_check_handler)
 register_native_handler("verify", verify_handler)
 register_native_handler("compare", compare_handler)
