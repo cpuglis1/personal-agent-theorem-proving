@@ -68,6 +68,14 @@ def aggregate(triples: list[dict[str, Any]]) -> dict[str, Any]:
     histogram: dict[int, int] = {}
     for d in a_depths:
         histogram[d] = histogram.get(d, 0) + 1
+
+    # Dual value claim (weak-prover gate). Among Path-A wins: how many were *necessary* (no
+    # eligible weak Path B existed) vs merely *preferred* (a weak Path B also closed but A won
+    # the compare). ``n_b_gated`` counts goals a full-strength prover could solve but the weak
+    # one couldn't — the gap the bank fills.
+    a_wins = [t for t in triples if t.get("winner_path") == "A"]
+    a_necessary = sum(1 for t in a_wins if not t.get("synthesized_verified"))
+    n_b_gated = sum(1 for t in triples if t.get("path_b_gated"))
     return {
         "n_subgoals": n,
         "solved": solved,
@@ -80,6 +88,9 @@ def aggregate(triples: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_reuse_depth": (sum(a_depths) / len(a_depths)) if a_depths else 0.0,
         "max_reuse_depth": max(a_depths) if a_depths else 0,
         "depth_histogram": histogram,
+        "path_a_necessary": a_necessary,
+        "path_a_necessary_rate": (a_necessary / len(a_wins)) if a_wins else 0.0,
+        "n_path_b_gated": n_b_gated,
     }
 
 
@@ -138,6 +149,8 @@ def format_summary(triples: list[dict[str, Any]]) -> str:
         f"(retrieval preferred {agg['retrieval_beats_synthesis_in_contest']:.0%})",
         f"  reuse depth         : mean {agg['mean_reuse_depth']:.2f}  max {agg['max_reuse_depth']}"
         f"  [{hist or 'none'}]",
+        f"  reuse necessity     : {agg['path_a_necessary']}/{agg['path_a_wins']} A-wins had no "
+        f"weak Path B ({agg['path_a_necessary_rate']:.0%})  |  B gated out: {agg['n_path_b_gated']}",
         f"  running A win-rate  : {[round(x, 2) for x in curve]}",
         f"  running mean depth  : {[round(x, 2) for x in dcurve]}",
         "  (thesis: BOTH curves trend UP — win-rate = reuse fires, depth = bank compounds)",

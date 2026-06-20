@@ -169,6 +169,34 @@ def test_triple_records_a_failed_subgoal_shape():
 # ---------------------------------------------------------------------------
 
 
+def test_triple_records_weak_gate_counterfactual():
+    # Weak gate: a full-strength Path B closed the goal (b_strong) but no *eligible* weak proof
+    # did (verified_b None), so Path A carried it — the bank was necessary under a weak prover.
+    triple = build_triple(
+        subgoal="h1", goal_type="0 + n = n",
+        retrieved=_RETRIEVED, synthesized=_SYNTH,
+        verified_a=_RETRIEVED, verified_b=None,
+        verified_b_strong=_SYNTH,                  # strong prover would have solved it
+        winner={**_RETRIEVED}, mode="research", ts=1,
+    )
+    assert triple["winner_path"] == "A"
+    assert triple["synthesized_verified"] is False        # no eligible (weak) Path B
+    assert triple["synthesized_verified_strong"] is True  # but a strong prover could
+    assert triple["path_b_gated"] is True                 # the gate forced Path A to carry it
+
+
+def test_triple_strong_defaults_to_eligible_when_gate_off():
+    # No counterfactual passed ⇒ strong == eligible (gate off, historical behavior).
+    triple = build_triple(
+        subgoal="h2", goal_type="Q",
+        retrieved=None, synthesized=_SYNTH,
+        verified_a=None, verified_b=_SYNTH,
+        winner={**_SYNTH}, mode="deploy", ts=1,
+    )
+    assert triple["synthesized_verified_strong"] is True
+    assert triple["path_b_gated"] is False
+
+
 def test_reuse_depth_zero_for_synthesis_and_none():
     from hyperion.crews.lemma_compare import reuse_depth
     assert reuse_depth(None) == 0

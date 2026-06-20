@@ -104,11 +104,26 @@ def test_aggregate_depth_separates_breadth_from_depth():
     assert thesis_curve.depth_curve(triples) == [pytest.approx(1.0), pytest.approx(2.0)]
 
 
+def test_aggregate_weak_gate_necessity_and_counterfactual():
+    # Two A-wins: one was necessary (no eligible weak B, but strong B existed ⇒ gated),
+    # one was merely preferred (a weak B also verified). Plus one B win.
+    triples = [
+        {"winner_path": "A", "synthesized_verified": False, "path_b_gated": True},   # necessary
+        {"winner_path": "A", "synthesized_verified": True, "path_b_gated": False},   # preferred
+        {"winner_path": "B", "synthesized_verified": True, "path_b_gated": False},
+    ]
+    agg = thesis_curve.aggregate(triples)
+    assert agg["path_a_necessary"] == 1
+    assert agg["path_a_necessary_rate"] == pytest.approx(0.5)   # 1 of 2 A-wins
+    assert agg["n_path_b_gated"] == 1
+
+
 def test_aggregate_empty_is_all_zero():
     agg = thesis_curve.aggregate([])
     assert agg["solved_rate"] == 0.0 and agg["path_a_win_rate"] == 0.0
     assert agg["mean_reuse_depth"] == 0.0 and agg["max_reuse_depth"] == 0
     assert agg["depth_histogram"] == {}
+    assert agg["path_a_necessary_rate"] == 0.0 and agg["n_path_b_gated"] == 0
 
 
 def test_running_curve_only_advances_on_solved():

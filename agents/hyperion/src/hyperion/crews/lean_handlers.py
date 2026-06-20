@@ -400,8 +400,14 @@ def _multi_candidate_from_lemmas(goal_type: str, lemmas: list[dict[str, Any]]) -
 # ---------------------------------------------------------------------------
 
 
-async def propose_repair(goal: str, candidate_source: str, errors: list[str]) -> str:
+async def propose_repair(
+    goal: str, candidate_source: str, errors: list[str], weak: bool = False
+) -> str:
     """Ask the ``repair`` agent for ONE revised candidate that closes ``goal``.
+
+    When ``weak`` (the weak-prover headline regime), the prompt forbids strong closers so
+    repair aims for an *eligible* proof — but the gate is still enforced mechanically by
+    :func:`_uses_only_weak_tactics`, never by trusting the model to comply.
 
     A scoped, structured LLM call (à la ``runner._summarize_context``) that reads its
     model and persona from the ``repair`` agent record — so the model/prompt stay
@@ -426,10 +432,16 @@ async def propose_repair(goal: str, candidate_source: str, errors: list[str]) ->
         return candidate_source
 
     system = f"{record.role}\n\n{record.goal}\n\n{record.backstory}"
+    weak_clause = (
+        f"\n\nCONSTRAINT: do NOT use any of these tactics — "
+        f"{', '.join(settings.prover_path_b_banned_tactics)}, or bare `simp`. "
+        f"Use only primitive steps (rfl, exact, apply, intro, rw, `simp only [...]`)."
+        if weak else ""
+    )
     user = (
         f"Goal type:\n{goal}\n\n"
         f"Candidate proof that FAILED to type-check:\n{candidate_source}\n\n"
-        f"Kernel diagnostics:\n" + "\n".join(errors or ["(no diagnostics)"]) + "\n\n"
+        f"Kernel diagnostics:\n" + "\n".join(errors or ["(no diagnostics)"]) + weak_clause + "\n\n"
         "Return ONLY the full revised Lean 4 source."
     )
     try:
@@ -600,6 +612,24 @@ def _full_verdict(source: str) -> tuple[bool, list[str]]:
     return bool(res["ok"]), res["errors"]
 
 
+def _uses_only_weak_tactics(source: str) -> bool:
+    """Whether ``source`` avoids every strong closer — the deterministic weak-prover gate.
+
+    The value claim of the snowball ("retrieval is doing real work") is only honest if Path B
+    can't trivially front-run the bank with a decision procedure. We enforce that the way the
+    kernel enforces proofs — mechanically, not by trusting the LLM to obey a prompt: a proof
+    that contains ``omega``/``ring``/``decide``/… (config ``prover_path_b_banned_tactics``)
+    is ineligible to *win*. Full ``simp`` is strong; ``simp only [...]`` (explicit lemmas) is
+    allowed, since that is itself reuse of named facts.
+    """
+    for t in settings.prover_path_b_banned_tactics:
+        if re.search(rf"\b{re.escape(t)}\b", source):
+            return False
+    if re.search(r"\bsimp\b(?!\s*only)", source):
+        return False
+    return True
+
+
 def _necessary_lemma_ids(goal_type: str, lemmas: list[dict[str, Any]]) -> list[str]:
     """Single-drop ablation: which banked lemmas the composition actually *needed*.
 
@@ -692,36 +722,59 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     # ---- Path B: synthesized candidate, then the bounded repair loop ----
     # RESEARCH: always verify B (the comparison is the experiment). DEPLOY: only when
     # Path A failed to close (exploit-first — don't pay for B once A has won).
+    #
+    # weak gate (build plan: snowball value claim): when ``prover_weak_path_b``, a proof is
+    # only *eligible to win* (verified_b) if it uses no strong closer; the full-strength
+    # verdict is logged regardless as the counterfactual ``b_strong`` (could a strong prover
+    # have solved it). Repair is given a fair shot at an eligible (weak) proof.
+    weak = settings.prover_weak_path_b
+    b_strong: Optional[dict[str, Any]] = None
     if research or verified_a is None:
         cb = _synthesized_candidate(ctx, sg_id)
         if cb:
             closed, errors = _full_verdict(cb["source"])
             _record("B", closed)
             if closed:
-                verified_b = {**cb, "path": "B"}
-            else:
+                b_strong = {**cb, "path": "B"}
+                if not weak or _uses_only_weak_tactics(cb["source"]):
+                    verified_b = b_strong
+            if verified_b is None:
                 cur_source = cb["source"]
                 for _ in range(settings.cap_repair_iters):
                     decision["repair_iters"] += 1
-                    cur_source = _sanitize_lean_source(await propose_repair(goal, cur_source, errors))
+                    cur_source = _sanitize_lean_source(
+                        await propose_repair(goal, cur_source, errors, weak=weak)
+                    )
                     closed, errors = _full_verdict(cur_source)
                     _record("B-repair", closed)
-                    if closed:
-                        verified_b = {
-                            "source": cur_source,
-                            "statement": cb.get("statement", ""),
-                            # Store the BARE proof body, not the whole declaration, so the
-                            # bank and the scaffold assembly get a term that fits a hole.
-                            "proof_term": _bare_proof_term({"source": cur_source}),
-                            "origin": "repair",
-                            "lean_type": cb.get("lean_type") or goal,
-                            "path": "B",
-                        }
+                    if not closed:
+                        continue
+                    repaired = {
+                        "source": cur_source,
+                        "statement": cb.get("statement", ""),
+                        # Store the BARE proof body, not the whole declaration, so the
+                        # bank and the scaffold assembly get a term that fits a hole.
+                        "proof_term": _bare_proof_term({"source": cur_source}),
+                        "origin": "repair",
+                        "lean_type": cb.get("lean_type") or goal,
+                        "path": "B",
+                    }
+                    if b_strong is None:
+                        b_strong = repaired
+                    if not weak or _uses_only_weak_tactics(cur_source):
+                        verified_b = repaired
                         break
 
-    # verified_a/verified_b are the compare inputs (anti-starvation reads verified_b).
+    # b_strong closed at full strength but no eligible (weak) proof won ⇒ the gate is what
+    # forces Path A to carry the goal — the load-bearing signal of the weak-prover headline.
+    decision["b_strong_closed"] = b_strong is not None
+    decision["b_gated_out"] = b_strong is not None and verified_b is None
+
+    # verified_a/verified_b are the compare inputs (anti-starvation reads verified_b);
+    # verified_b_strong is the full-strength counterfactual for the dual thesis read-out.
     ctx.put(_bb_key("verified_a", sg_id), verified_a)
     ctx.put(_bb_key("verified_b", sg_id), verified_b)
+    ctx.put(_bb_key("verified_b_strong", sg_id), b_strong)
 
     # Provisional winner — exploit-first prefers A; compare finalizes when both verified.
     winner: Optional[dict[str, Any]] = verified_a or verified_b
@@ -774,6 +827,7 @@ async def compare_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     synthesized = _synthesized_candidate(ctx, sg_id)
     verified_a = ctx.get(_bb_key("verified_a", sg_id))
     verified_b = ctx.get(_bb_key("verified_b", sg_id))
+    verified_b_strong = ctx.get(_bb_key("verified_b_strong", sg_id))
 
     winner = choose_winner(verified_a, verified_b)
     if winner is not None:
@@ -787,6 +841,7 @@ async def compare_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
         subgoal=sg_id, goal_type=goal,
         retrieved=retrieved, synthesized=synthesized,
         verified_a=verified_a, verified_b=verified_b,
+        verified_b_strong=verified_b_strong,
         winner=winner, mode=mode,
     )
     ctx.put(_bb_key("triple_log", sg_id), triple)

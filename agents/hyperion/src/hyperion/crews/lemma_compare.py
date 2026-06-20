@@ -58,6 +58,10 @@ class TripleLog(TypedDict):
             snowball's load-bearing axis. 0 for synthesis/unsolved; 1 for a single applied
             lemma (breadth); >=2 only when a multi-lemma candidate won (depth). A run whose
             depth stays pinned at 1 is "retrieval fired again", not "the bank compounded".
+        synthesized_verified_strong: Whether Path B closed the goal at *full* strength (the
+            counterfactual). Equals ``synthesized_verified`` unless the weak-prover gate is on.
+        path_b_gated: True iff a full-strength Path B closed it but no *eligible* (weak) proof
+            did — i.e. the bank is what carried the goal under a weak prover.
         mode: ``"research"`` (verify both) | ``"deploy"`` (exploit-first).
         ts: Epoch seconds the record was written.
     """
@@ -73,6 +77,8 @@ class TripleLog(TypedDict):
     scores: dict[str, float]
     compared: bool
     reuse_depth: int
+    synthesized_verified_strong: bool
+    path_b_gated: bool
     mode: str
     ts: int
 
@@ -196,17 +202,21 @@ def build_triple(
     verified_b: Optional[Candidate],
     winner: Optional[Candidate],
     mode: str,
+    verified_b_strong: Optional[Candidate] = None,
     ts: Optional[int] = None,
 ) -> TripleLog:
     """Assemble the fixed :class:`TripleLog` record. Pure (``ts`` defaults to now).
 
     ``retrieved``/``synthesized`` are the candidates that were *considered* (the raw
-    Path-A/Path-B outputs); ``verified_a``/``verified_b`` are whether each *passed*. The
-    winner's score is reported under ``scores["winner"]`` so the harness needn't recompute.
+    Path-A/Path-B outputs); ``verified_a``/``verified_b`` are whether each *passed* (and is
+    eligible to win); ``verified_b_strong`` is the full-strength counterfactual (defaults to
+    ``verified_b`` when the weak gate is off). The winner's score is reported under
+    ``scores["winner"]`` so the harness needn't recompute.
     """
     score_a = generality_score(verified_a) if verified_a else 0.0
     score_b = generality_score(verified_b) if verified_b else 0.0
     winner_score = generality_score(winner) if winner else 0.0
+    b_strong = verified_b_strong if verified_b_strong is not None else verified_b
     return TripleLog(
         subgoal=subgoal,
         goal_type=goal_type,
@@ -219,6 +229,8 @@ def build_triple(
         scores={"a": score_a, "b": score_b, "winner": winner_score},
         compared=(verified_a is not None and verified_b is not None),
         reuse_depth=reuse_depth(winner),
+        synthesized_verified_strong=b_strong is not None,
+        path_b_gated=(b_strong is not None and verified_b is None),
         mode=mode,
         ts=ts if ts is not None else int(time.time()),
     )

@@ -182,6 +182,18 @@ class Settings(BaseSettings):
     # (build-plan depth axis). The composition is tried only after every single-lemma
     # candidate fails, and its credited reuse_depth is ablated to the necessary subset.
     compose_top_k: int = 3
+    # Path-B "weak prover" gate (snowball value claim). When True, a synthesized/repaired
+    # proof is only *eligible to win* if it uses none of the strong closers below — so the
+    # bank is load-bearing and a Path-A win is a real win, not omega/ring front-running. The
+    # full-strength verdict is ALWAYS computed and logged as a counterfactual (could a strong
+    # prover have solved it?), so a single run reports both "reuse is necessary under a weak
+    # prover" and "reuse is preferred under a strong one". Enforced deterministically by lint,
+    # not by trusting the LLM to obey. The headline thesis runs set this True.
+    prover_weak_path_b: bool = False
+    prover_path_b_banned_tactics: tuple[str, ...] = (
+        "omega", "decide", "native_decide", "ring", "ring_nf", "linarith", "nlinarith",
+        "polyrith", "norm_num", "aesop", "tauto", "simp_all", "field_simp",
+    )
     # Max nesting depth for subworkflow nodes (a node whose kind is "subworkflow"
     # runs another workflow). The top-level run is depth 0; a subworkflow node at
     # depth d runs its child at depth d+1, and the runner aborts (CapExceeded) once
