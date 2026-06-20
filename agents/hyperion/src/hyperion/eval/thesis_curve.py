@@ -60,6 +60,14 @@ def aggregate(triples: list[dict[str, Any]]) -> dict[str, Any]:
     path_b = sum(1 for t in triples if t.get("winner_path") == "B")
     contests = [t for t in triples if t.get("compared")]
     a_in_contest = sum(1 for t in contests if t.get("winner_path") == "A")
+
+    # Reuse depth — the breadth-vs-depth axis. Measured only over Path-A wins (a synthesis
+    # win has no reuse depth). depth==1 everywhere ⇒ breadth (retrieval keeps firing on the
+    # same one-lemma move); a rising mean / a populated depth>=2 bucket ⇒ the bank compounds.
+    a_depths = [int(t.get("reuse_depth") or 0) for t in triples if t.get("winner_path") == "A"]
+    histogram: dict[int, int] = {}
+    for d in a_depths:
+        histogram[d] = histogram.get(d, 0) + 1
     return {
         "n_subgoals": n,
         "solved": solved,
@@ -69,6 +77,9 @@ def aggregate(triples: list[dict[str, Any]]) -> dict[str, Any]:
         "path_a_win_rate": (path_a / solved) if solved else 0.0,
         "n_contests": len(contests),
         "retrieval_beats_synthesis_in_contest": (a_in_contest / len(contests)) if contests else 0.0,
+        "mean_reuse_depth": (sum(a_depths) / len(a_depths)) if a_depths else 0.0,
+        "max_reuse_depth": max(a_depths) if a_depths else 0,
+        "depth_histogram": histogram,
     }
 
 
@@ -92,10 +103,31 @@ def running_curve(triples: list[dict[str, Any]]) -> list[float]:
     return curve
 
 
+def depth_curve(triples: list[dict[str, Any]]) -> list[float]:
+    """Cumulative mean reuse-depth over *Path-A wins*, in order.
+
+    The depth companion to :func:`running_curve`. Win-rate climbing while this stays flat
+    at 1.0 is the breadth illusion (reuse keeps firing on the same one-lemma move); this
+    trending up is the snowball compounding (goals composing several banked lemmas).
+    """
+    curve: list[float] = []
+    total = 0
+    count = 0
+    for t in triples:
+        if t.get("winner_path") != "A":
+            continue
+        total += int(t.get("reuse_depth") or 0)
+        count += 1
+        curve.append(total / count)
+    return curve
+
+
 def format_summary(triples: list[dict[str, Any]]) -> str:
     """Render the aggregate + running curve as a short text block."""
     agg = aggregate(triples)
     curve = running_curve(triples)
+    dcurve = depth_curve(triples)
+    hist = ", ".join(f"d{d}:{agg['depth_histogram'][d]}" for d in sorted(agg["depth_histogram"]))
     lines = [
         "── THESIS READ-OUT (over the triple log) ──",
         f"  sub-goals           : {agg['n_subgoals']}",
@@ -104,7 +136,10 @@ def format_summary(triples: list[dict[str, Any]]) -> str:
         f"  Path B (synthesis)  : {agg['path_b_wins']}",
         f"  A-vs-B contests     : {agg['n_contests']}  "
         f"(retrieval preferred {agg['retrieval_beats_synthesis_in_contest']:.0%})",
+        f"  reuse depth         : mean {agg['mean_reuse_depth']:.2f}  max {agg['max_reuse_depth']}"
+        f"  [{hist or 'none'}]",
         f"  running A win-rate  : {[round(x, 2) for x in curve]}",
-        "  (thesis: this curve trends UP as the bank fills ⇒ the snowball is real)",
+        f"  running mean depth  : {[round(x, 2) for x in dcurve]}",
+        "  (thesis: BOTH curves trend UP — win-rate = reuse fires, depth = bank compounds)",
     ]
     return "\n".join(lines)

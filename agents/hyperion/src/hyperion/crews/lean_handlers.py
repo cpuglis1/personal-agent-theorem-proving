@@ -333,6 +333,9 @@ def _candidate_from_lemma(goal_type: str, lemma: dict[str, Any]) -> dict[str, An
         "origin": lemma.get("origin") or "skill_library",
         "source_collection": lemma.get("source_collection"),
         "lean_type": lemma.get("lean_type") or goal_type,
+        # Provenance for the reuse-depth metric: a single-lemma candidate composes exactly
+        # one banked lemma. Multi-lemma candidates (depth>=2) carry several ids here.
+        "lemmas_used": [lemma["id"]] if lemma.get("id") else [],
         "times_retrieved": int(lemma.get("times_retrieved") or 0),
         "times_won": int(lemma.get("times_won") or 0),
     }

@@ -105,7 +105,8 @@ def test_choose_winner_is_deterministic_under_arg_swap():
 # build_triple — the fixed thesis-dataset schema
 # ---------------------------------------------------------------------------
 
-_RETRIEVED = {"lean_type": "∀ n, P n", "proof_term": "by simp", "statement": "lemP", "path": "A"}
+_RETRIEVED = {"lean_type": "∀ n, P n", "proof_term": "by simp", "statement": "lemP", "path": "A",
+              "lemmas_used": ["lem-1"]}
 _SYNTH = {"lean_type": "P 0", "proof_term": "rfl", "statement": "synthP", "path": "B"}
 
 _SCHEMA_KEYS = set(TripleLog.__annotations__)
@@ -131,6 +132,7 @@ def test_triple_schema_is_fixed_and_complete():
     assert triple["scores"]["a"] == 1.0
     assert triple["scores"]["b"] == 0.0
     assert triple["scores"]["winner"] == 1.0
+    assert triple["reuse_depth"] == 1          # Path-A winner composed one banked lemma
 
 
 def test_triple_marks_uncompared_when_only_one_path_verified():
@@ -144,6 +146,7 @@ def test_triple_marks_uncompared_when_only_one_path_verified():
     assert triple["retrieved_verified"] is False
     assert triple["synthesized_verified"] is True
     assert triple["winner_path"] == "B"
+    assert triple["reuse_depth"] == 0          # synthesis win has no reuse depth
 
 
 def test_triple_records_a_failed_subgoal_shape():
@@ -158,3 +161,27 @@ def test_triple_records_a_failed_subgoal_shape():
     assert triple["winner_path"] is None
     assert triple["scores"]["winner"] == 0.0
     assert triple["compared"] is False
+    assert triple["reuse_depth"] == 0          # unsolved ⇒ no reuse
+
+
+# ---------------------------------------------------------------------------
+# reuse_depth — the breadth-vs-depth axis
+# ---------------------------------------------------------------------------
+
+
+def test_reuse_depth_zero_for_synthesis_and_none():
+    from hyperion.crews.lemma_compare import reuse_depth
+    assert reuse_depth(None) == 0
+    assert reuse_depth({"path": "B", "lemmas_used": ["x"]}) == 0   # only Path A reuses
+
+
+def test_reuse_depth_counts_distinct_banked_lemmas():
+    from hyperion.crews.lemma_compare import reuse_depth
+    # Breadth: one applied lemma.
+    assert reuse_depth({"path": "A", "lemmas_used": ["a"]}) == 1
+    # Depth: a multi-lemma candidate composed three distinct banked lemmas.
+    assert reuse_depth({"path": "A", "lemmas_used": ["a", "b", "c"]}) == 3
+    # Distinct, not raw count — a repeated id is one lemma.
+    assert reuse_depth({"path": "A", "lemmas_used": ["a", "a", "b"]}) == 2
+    # Legacy single-lemma candidate (no lemmas_used) still counts as 1 via its id.
+    assert reuse_depth({"path": "A", "id": "a"}) == 1

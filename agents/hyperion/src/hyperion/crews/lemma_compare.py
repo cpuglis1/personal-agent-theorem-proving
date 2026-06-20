@@ -54,6 +54,10 @@ class TripleLog(TypedDict):
         winner: The chosen candidate dict, or None when neither path verified.
         scores: ``{"a", "b", "winner"}`` generality scores (0.0 when a side is absent).
         compared: True iff BOTH paths verified — a genuine A-vs-B contest.
+        reuse_depth: # distinct banked lemmas the *winning* candidate composed — the
+            snowball's load-bearing axis. 0 for synthesis/unsolved; 1 for a single applied
+            lemma (breadth); >=2 only when a multi-lemma candidate won (depth). A run whose
+            depth stays pinned at 1 is "retrieval fired again", not "the bank compounded".
         mode: ``"research"`` (verify both) | ``"deploy"`` (exploit-first).
         ts: Epoch seconds the record was written.
     """
@@ -68,6 +72,7 @@ class TripleLog(TypedDict):
     winner: Optional[Candidate]
     scores: dict[str, float]
     compared: bool
+    reuse_depth: int
     mode: str
     ts: int
 
@@ -125,6 +130,24 @@ def generality_score(c: Candidate) -> float:
         elif ch == ":" and depth == 0:
             break  # reached the top-level ':' — past the binder region
     return float(score)
+
+
+def reuse_depth(winner: Optional[Candidate]) -> int:
+    """How many distinct banked lemmas the winning candidate composed (0 for synthesis).
+
+    This is the axis that separates *breadth* (many goals each reusing one lemma — depth
+    pinned at 1) from *depth* (one goal composing several banked lemmas — the snowball
+    compounding). Only a Path-A winner can have depth; a synthesized or unsolved goal is 0.
+    The count reads the candidate's ``lemmas_used`` provenance (the banked-lemma ids it
+    introduced as ``have`` hypotheses); a legacy single-lemma candidate that predates that
+    field still counts as 1 when it carries an ``id``.
+    """
+    if not winner or winner.get("path") != "A":
+        return 0
+    used = winner.get("lemmas_used")
+    if used:
+        return len({u for u in used if u})
+    return 1 if winner.get("id") else 0
 
 
 def _ordering_key(c: Candidate) -> tuple[float, int, int]:
@@ -195,6 +218,7 @@ def build_triple(
         winner=winner,
         scores={"a": score_a, "b": score_b, "winner": winner_score},
         compared=(verified_a is not None and verified_b is not None),
+        reuse_depth=reuse_depth(winner),
         mode=mode,
         ts=ts if ts is not None else int(time.time()),
     )

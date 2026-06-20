@@ -67,10 +67,10 @@ def test_format_trace_renders_each_stage_label():
 # ---------------------------------------------------------------------------
 
 _TRIPLES = [
-    {"winner_path": "A", "compared": True},   # contest, retrieval won
-    {"winner_path": "B", "compared": True},   # contest, synthesis won
-    {"winner_path": "B", "compared": False},  # only B verified
-    {"winner_path": None, "compared": False}, # unsolved
+    {"winner_path": "A", "compared": True, "reuse_depth": 1},   # contest, retrieval won (breadth)
+    {"winner_path": "B", "compared": True, "reuse_depth": 0},   # contest, synthesis won
+    {"winner_path": "B", "compared": False, "reuse_depth": 0},  # only B verified
+    {"winner_path": None, "compared": False, "reuse_depth": 0}, # unsolved
 ]
 
 
@@ -84,11 +84,31 @@ def test_aggregate_counts_and_rates():
     assert agg["path_a_win_rate"] == pytest.approx(1 / 3)
     assert agg["n_contests"] == 2
     assert agg["retrieval_beats_synthesis_in_contest"] == pytest.approx(0.5)
+    assert agg["mean_reuse_depth"] == pytest.approx(1.0)   # the one A-win had depth 1
+    assert agg["max_reuse_depth"] == 1
+    assert agg["depth_histogram"] == {1: 1}
+
+
+def test_aggregate_depth_separates_breadth_from_depth():
+    # Two A-wins: one breadth (depth 1), one depth (depth 3) ⇒ mean 2, max 3, histogram split.
+    triples = [
+        {"winner_path": "A", "compared": False, "reuse_depth": 1},
+        {"winner_path": "A", "compared": False, "reuse_depth": 3},
+        {"winner_path": "B", "compared": False, "reuse_depth": 0},  # ignored (not Path A)
+    ]
+    agg = thesis_curve.aggregate(triples)
+    assert agg["mean_reuse_depth"] == pytest.approx(2.0)
+    assert agg["max_reuse_depth"] == 3
+    assert agg["depth_histogram"] == {1: 1, 3: 1}
+    # The running depth curve trends up: 1.0 then mean(1,3)=2.0.
+    assert thesis_curve.depth_curve(triples) == [pytest.approx(1.0), pytest.approx(2.0)]
 
 
 def test_aggregate_empty_is_all_zero():
     agg = thesis_curve.aggregate([])
     assert agg["solved_rate"] == 0.0 and agg["path_a_win_rate"] == 0.0
+    assert agg["mean_reuse_depth"] == 0.0 and agg["max_reuse_depth"] == 0
+    assert agg["depth_histogram"] == {}
 
 
 def test_running_curve_only_advances_on_solved():
