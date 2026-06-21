@@ -102,6 +102,7 @@ def soundness_ok(
     decl: str,
     *,
     strict: bool = False,
+    profile: str | None = None,
     timeout: float | None = None,
 ) -> SoundnessResult:
     """Enforce the soundness contract on ``decl`` within ``source``.
@@ -121,7 +122,7 @@ def soundness_ok(
     if source_declares_gap(source):
         reasons.append("source contains sorry/admit or a user-declared axiom")
 
-    res = lean_axioms(source, decl, timeout=timeout)
+    res = lean_axioms(source, decl, profile=profile, timeout=timeout)
     if not res["infra_ok"]:
         return SoundnessResult(ok=False, infra_ok=False, reasons=res["errors"])
 

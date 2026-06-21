@@ -82,13 +82,13 @@ def build_workflow(subgoal_ids: list[str]) -> WorkflowRecord:
 def _mocked(problem: Problem, tasks_root: Path):
     """Patch the runner's LLM/Lean/Qdrant seams so the run is fully offline."""
 
-    def _fake_verify(source, *, mode="full", timeout=None):
+    def _fake_verify(source, *, mode="full", profile="core", timeout=None):
         if mode == "skeleton":
             ok = True  # sorry elaborates in skeleton mode
         else:
             ok = ("sorry" not in source) and (source not in problem.fail_full)
         return {"ok": ok, "errors": ([] if ok else ["demo: does not close"]),
-                "elaborated_term": None, "mode": mode, "infra_ok": True}
+                "elaborated_term": None, "mode": mode, "profile": profile, "infra_ok": True}
 
     async def _fake_stage(task_id, request, stage, agents, tasks, cb, deadline):
         base = settings.tasks_dir / task_id

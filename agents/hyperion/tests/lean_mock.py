@@ -45,13 +45,14 @@ def mock_lean(
     """
     seq = [dict(r) for r in results] if results is not None else None
 
-    def _fake(source, *, mode="full", timeout=None):
+    def _fake(source, *, mode="full", profile="core", timeout=None):
         if seq is not None:
             # Pop until one remains, then repeat the last verdict indefinitely.
             chosen = seq.pop(0) if len(seq) > 1 else seq[0]
             out = {"ok": True, "errors": [], "elaborated_term": None, "infra_ok": True}
             out.update(chosen)
             out["mode"] = mode
+            out["profile"] = profile
             out["errors"] = list(out.get("errors") or [])
             return out
         return {
@@ -59,6 +60,7 @@ def mock_lean(
             "errors": list(errors or []),
             "elaborated_term": elaborated_term,
             "mode": mode,
+            "profile": profile,
             "infra_ok": infra_ok,
         }
 

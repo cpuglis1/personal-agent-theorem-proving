@@ -41,6 +41,7 @@ from hyperion.config import settings
 logger = logging.getLogger(__name__)
 
 VerifyMode = Literal["skeleton", "full"]
+LeanProfile = Literal["core", "mathlib"]
 
 # Lean elaboration can take a while even with a warm Mathlib cache; budget generously.
 # (Post-work re-tunes caps against the latency measured by the Phase 1 integration test.)
@@ -87,6 +88,7 @@ def verify_lean(
     source: str,
     *,
     mode: VerifyMode = "full",
+    profile: LeanProfile | None = None,
     timeout: float | None = None,
 ) -> LeanResult:
     """Type-check ``source`` against the Lean sidecar and return a :class:`LeanResult`.
@@ -108,11 +110,12 @@ def verify_lean(
     Raises:
         None. Network/HTTP/parse failures are caught and returned as ``infra_ok=False``.
     """
+    selected_profile = profile or settings.lean_profile or "core"
     url = f"{settings.lean_url}/verify"
     try:
         resp = httpx.post(
             url,
-            json={"source": source, "mode": mode},
+            json={"source": source, "mode": mode, "profile": selected_profile},
             timeout=timeout or _TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
@@ -166,6 +169,7 @@ def lean_axioms(
     source: str,
     decl: str,
     *,
+    profile: LeanProfile | None = None,
     timeout: float | None = None,
 ) -> AxiomsResult:
     """Return the ``#print axioms`` dependency set for ``decl`` in ``source``.
@@ -185,11 +189,12 @@ def lean_axioms(
         An :class:`AxiomsResult`. Interpretation of the axiom set against the sound
         base lives in :mod:`hyperion.crews.soundness`, not here.
     """
+    selected_profile = profile or settings.lean_profile or "core"
     url = f"{settings.lean_url}/axioms"
     try:
         resp = httpx.post(
             url,
-            json={"source": source, "decl": decl},
+            json={"source": source, "decl": decl, "profile": selected_profile},
             timeout=timeout or _TIMEOUT_SECONDS,
         )
         resp.raise_for_status()

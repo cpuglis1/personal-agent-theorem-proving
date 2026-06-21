@@ -31,6 +31,7 @@ from hyperion.config import settings
 from hyperion.crews.plan_contract import parse_plan, update_plan_frontmatter
 from hyperion.crews.workflows import WorkflowNode, expand_per_subgoal, topo_sort
 from hyperion.llms import make_agent_llm
+from hyperion.memory.context_store import context_get, context_put
 
 logger = logging.getLogger(__name__)
 
@@ -941,6 +942,8 @@ async def _execute_workflow(
             "request": request, "hitl": hitl, "caps": caps,
             "revise_count": revise_count, "workflow": workflow.id,
             "resume_node": node_id,
+            "eval_mode": context_get(task_id, "eval_mode") or settings.eval_mode,
+            "lean_profile": context_get(task_id, "lean_profile") or settings.lean_profile,
         }
 
     # Map start_index (index into the flat topo-sorted list) to a wave index so
@@ -1252,6 +1255,11 @@ async def run_task(
     cap_output_tokens: int | None = None,
     hitl: str = "off",
     workflow: str | None = None,
+    eval_mode: str | None = None,
+    lean_profile: str | None = None,
+    problem_id: str | None = None,
+    split: str | None = None,
+    order_seed: int | None = None,
 ) -> dict[str, Any]:
     """Run a task through a workflow DAG. Discovers context, then executes the
     workflow's nodes in dependency order — pausing for human approval where a node
@@ -1263,17 +1271,43 @@ async def run_task(
     from hyperion.crews.workflows import resolve_workflow
 
     wall = cap_wall_seconds or settings.cap_wall_seconds
+    mode = (eval_mode or settings.eval_mode or "train").strip().lower()
+    if mode not in {"train", "dev", "test"}:
+        mode = "train"
+    profile = (lean_profile or settings.lean_profile or "core").strip().lower()
+    if profile not in {"core", "mathlib"}:
+        profile = "core"
     loop = asyncio.get_event_loop()
     deadline = loop.time() + wall
 
     _prepare_workspace(task_id)
+    context_put(task_id, "eval_mode", mode)
+    context_put(task_id, "learning_writes_enabled", mode == "train")
+    context_put(task_id, "lean_profile", profile)
     try:
         wf = resolve_workflow(workflow)
     except (FileNotFoundError, ValueError) as exc:
         return _failed(task_id, f"Unknown workflow {workflow!r}: {exc}")
 
+    try:
+        from hyperion.eval.manifest import write_run_manifest
+
+        write_run_manifest(
+            task_id=task_id,
+            request=request,
+            workflow=wf.id,
+            eval_mode=mode,
+            lean_profile=profile,
+            caps=_caps_payload(cap_wall_seconds, cap_input_tokens, cap_output_tokens),
+            problem_id=problem_id,
+            split=split,
+            order_seed=order_seed,
+        )
+    except Exception:
+        pass
+
     if progress_callback:
-        progress_callback(f"[workflow] {wf.id} ({len(wf.nodes)} node(s))")
+        progress_callback(f"[workflow] {wf.id} ({len(wf.nodes)} node(s)); eval_mode={mode}; lean_profile={profile}")
 
     # Context discovery runs once, before the first node (best-effort; never raises).
     brief = discover_context(task_id, request)
@@ -1301,6 +1335,8 @@ async def resume_task(
     cap_wall_seconds: int | None = None,
     cap_input_tokens: int | None = None,
     cap_output_tokens: int | None = None,
+    eval_mode: str | None = None,
+    lean_profile: str | None = None,
 ) -> dict[str, Any]:
     """Resume a task paused before node ``resume_node`` in ``workflow``.
 
@@ -1312,6 +1348,15 @@ async def resume_task(
     from hyperion.crews.workflows import resolve_workflow
 
     wall = cap_wall_seconds or settings.cap_wall_seconds
+    mode = (eval_mode or context_get(task_id, "eval_mode") or settings.eval_mode or "train").strip().lower()
+    if mode not in {"train", "dev", "test"}:
+        mode = "train"
+    profile = (lean_profile or context_get(task_id, "lean_profile") or settings.lean_profile or "core").strip().lower()
+    if profile not in {"core", "mathlib"}:
+        profile = "core"
+    context_put(task_id, "eval_mode", mode)
+    context_put(task_id, "learning_writes_enabled", mode == "train")
+    context_put(task_id, "lean_profile", profile)
     loop = asyncio.get_event_loop()
     deadline = loop.time() + wall
     caps = _caps_payload(cap_wall_seconds, cap_input_tokens, cap_output_tokens)
@@ -1363,6 +1408,8 @@ async def resume_task(
                 "request": request, "hitl": hitl, "caps": caps,
                 "revise_count": revise_count, "workflow": wf.id,
                 "resume_node": resume_node,
+                "eval_mode": mode,
+                "lean_profile": profile,
             })
 
         if revise_count < _MAX_REVISIONS and resume_node and gate(task_id, "plan", hitl):
@@ -1372,6 +1419,8 @@ async def resume_task(
                 "request": request, "hitl": hitl, "caps": caps,
                 "revise_count": revise_count, "workflow": wf.id,
                 "resume_node": resume_node,
+                "eval_mode": mode,
+                "lean_profile": profile,
             })
         # Out of revision budget — force-continue with the first option.
         chosen_option = None

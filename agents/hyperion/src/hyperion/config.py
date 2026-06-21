@@ -131,6 +131,13 @@ class Settings(BaseSettings):
     # Lean verifier sidecar (the prover's oracle). A long-lived service on ai-net
     # with a warm Mathlib cache; the lean_verify tool POSTs candidate sources here.
     lean_url: str = "http://localhost:8900"
+    # Verifier profile sent to the sidecar. ``core`` rejects imports and preserves the
+    # current no-Mathlib benchmark surface; ``mathlib`` allows ``import Mathlib`` against
+    # the warm-cache sidecar project.
+    lean_profile: str = "core"  # core | mathlib
+    # Evaluation discipline. ``train`` permits persistent learning writes; ``dev`` and
+    # ``test`` keep artifacts/traces but skip lemma/concept/episode memory writes.
+    eval_mode: str = "train"  # train | dev | test
 
     # Langfuse
     langfuse_public_key: str = ""

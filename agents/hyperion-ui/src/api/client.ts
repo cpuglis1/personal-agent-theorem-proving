@@ -582,6 +582,11 @@ export interface SubmitTaskBody {
   task: string;
   hitl?: "off" | "plan" | "full";
   workflow?: string | null;
+  eval_mode?: "train" | "dev" | "test";
+  lean_profile?: "core" | "mathlib";
+  problem_id?: string;
+  split?: string;
+  order_seed?: number;
   // Plain-language description of how agents should collaborate; the server
   // compiles it into an ad-hoc workflow DAG. Ignored when `workflow` is set.
   workflow_prompt?: string;

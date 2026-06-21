@@ -82,6 +82,37 @@ async def test_submit_and_poll(tmp_path):
 
 
 @pytest.mark.anyio
+async def test_submit_passes_eval_mode_and_lean_profile(tmp_path):
+    """POST /tasks forwards benchmark discipline metadata to the runner."""
+    from hyperion.config import settings
+
+    with patch.object(settings, "tasks_dir", tmp_path):
+        with patch("hyperion.server.api._run_and_update", new=AsyncMock()) as mock_run:
+            async with AsyncClient(
+                transport=ASGITransport(app=app), base_url="http://test"
+            ) as client:
+                resp = await client.post(
+                    "/tasks",
+                    json={
+                        "task": "prove",
+                        "workflow": "lean-prove",
+                        "eval_mode": "test",
+                        "lean_profile": "mathlib",
+                        "problem_id": "p1",
+                        "split": "test",
+                        "order_seed": 7,
+                    },
+                )
+    assert resp.status_code == 202
+    _, kwargs = mock_run.call_args
+    assert kwargs["eval_mode"] == "test"
+    assert kwargs["lean_profile"] == "mathlib"
+    assert kwargs["problem_id"] == "p1"
+    assert kwargs["split"] == "test"
+    assert kwargs["order_seed"] == 7
+
+
+@pytest.mark.anyio
 async def test_missing_task_returns_404(tmp_path):
     """Polling an unknown task id returns 404 (no task file exists in tasks_dir).
 

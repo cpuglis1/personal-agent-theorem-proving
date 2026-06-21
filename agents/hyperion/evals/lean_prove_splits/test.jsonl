@@ -1,0 +1,1 @@
+{"id":"HOLDOUT-DO-NOT-RUN-YET","source":"pending-heldout","split":"test","lean_profile":"core","workflow":"lean-prove","prompt":"Placeholder only. Populate after trainer/dev calibration is frozen.","formal_statement":"","expected":"pending","tags":["placeholder"]}

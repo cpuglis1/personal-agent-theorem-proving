@@ -666,7 +666,11 @@ async def skeleton_check_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
         ctx.put("skeleton_errors", ["no scaffold in plan"])
         return {"handler": "skeleton_check", "ok": False, "errors": ["no scaffold in plan"]}
     sg_id = _subgoal_id(ctx)
-    res = verify_lean(_scaffold_as_command(scaffold, _goal_type(ctx, sg_id)), mode="skeleton")
+    res = verify_lean(
+        _scaffold_as_command(scaffold, _goal_type(ctx, sg_id)),
+        mode="skeleton",
+        profile=ctx.get("lean_profile", settings.lean_profile),
+    )
     if not res["infra_ok"]:
         # Inconclusive ≠ failure: degrade to "proceed" rather than blocking on a blip.
         ctx.put("skeleton_ok", None)
@@ -683,14 +687,14 @@ async def skeleton_check_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _full_verdict(source: str) -> tuple[bool, list[str]]:
+def _full_verdict(source: str, *, profile: str | None = None) -> tuple[bool, list[str]]:
     """Run the kernel in ``full`` mode; return (closed, errors).
 
     ``closed`` is True ONLY on a real ``ok=True`` verdict. An infra-down result
     (``infra_ok=False``) is NOT a pass — the verdict is load-bearing ground truth, so we
     never discharge a goal on a verifier we could not reach.
     """
-    res = verify_lean(source, mode="full")
+    res = verify_lean(source, mode="full", profile=profile or settings.lean_profile)
     if not res["infra_ok"]:
         return False, res["errors"]
     return bool(res["ok"]), res["errors"]
@@ -783,6 +787,7 @@ async def prove_proposition(
     max_repair: Optional[int] = None,
     decl: Optional[str] = None,
     strict_soundness: Optional[bool] = None,
+    profile: str | None = None,
 ) -> ProofOutcome:
     """Prove ``goal_type`` from ``seed_source`` via the kernel + bounded repair loop.
 
@@ -819,7 +824,7 @@ async def prove_proposition(
     strong_source: Optional[str] = None
     weak_source: Optional[str] = None
 
-    closed, errors = _full_verdict(seed_source)
+    closed, errors = _full_verdict(seed_source, profile=profile)
     verdicts.append({"path": "seed", "ok": closed})
     if closed:
         strong_source = seed_source
@@ -836,7 +841,7 @@ async def prove_proposition(
             cur_source = _sanitize_lean_source(
                 await propose_repair(goal_type, cur_source, errors, weak=weak)
             )
-            closed, errors = _full_verdict(cur_source)
+            closed, errors = _full_verdict(cur_source, profile=profile)
             verdicts.append({"path": "repair", "ok": closed})
             if not closed:
                 continue
@@ -855,7 +860,7 @@ async def prove_proposition(
         strict = (
             settings.prover_soundness_strict if strict_soundness is None else strict_soundness
         )
-        sres = soundness_ok(win, decl, strict=strict)
+        sres = soundness_ok(win, decl, strict=strict, profile=profile)
         axioms = sres.axioms
         axioms_clean = sres.ok
 
@@ -900,6 +905,7 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     """
     sg_id = _subgoal_id(ctx)
     goal = _goal_type(ctx, sg_id)
+    profile = ctx.get("lean_profile", settings.lean_profile)
     research = settings.prover_research_mode
     decision: dict[str, Any] = {
         "subgoal": sg_id, "winner_path": None, "a_attempts": 0,
@@ -922,7 +928,7 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
             a_list.append(cand)
     for cand in a_list:
         decision["a_attempts"] += 1
-        closed, _errors = _full_verdict(cand["source"])
+        closed, _errors = _full_verdict(cand["source"], profile=profile)
         _record("A", closed)
         if not closed:
             continue
@@ -956,7 +962,7 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
             # The proving kernel (verify + bounded repair + weak gate) is shared with the
             # bridge/lemma/ablation paths via prove_proposition; the verify node owns only
             # the blackboard wiring around it.
-            outcome = await prove_proposition(goal, cb["source"], weak=weak)
+            outcome = await prove_proposition(goal, cb["source"], weak=weak, profile=profile)
             for v in outcome.verdicts:
                 _record("B" if v["path"] == "seed" else "B-repair", v["ok"])
             decision["repair_iters"] += outcome.repair_iters
@@ -1038,6 +1044,7 @@ async def escalation_gate_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     """
     sg_id = _subgoal_id(ctx)
     goal = _goal_type(ctx, sg_id)
+    profile = ctx.get("lean_profile", settings.lean_profile)
     decision = ctx.get(_bb_key("verify_decision", sg_id)) or {}
     discharged = ctx.get(_bb_key("discharged", sg_id))
     stalled = discharged is None and decision.get("winner_path") is None
@@ -1146,6 +1153,7 @@ async def abstract_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     """
     sg_id = _subgoal_id(ctx)
     goal = _goal_type(ctx, sg_id)
+    profile = ctx.get("lean_profile", settings.lean_profile)
     fresh_b = ctx.get(_bb_key("verified_b", sg_id))
     if not fresh_b:
         ctx.put(_bb_key("abstracted", sg_id), None)
@@ -1164,7 +1172,7 @@ async def abstract_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
         src = p.get("source", "")
         if not src:
             continue
-        closed, _errors = _full_verdict(src)
+        closed, _errors = _full_verdict(src, profile=profile)
         if closed:
             chosen = {
                 "source": src,
@@ -1342,7 +1350,7 @@ async def bank_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     final_ok: Optional[bool] = None
     final_errors: list[str] = []
     if assembled:
-        res = verify_lean(assembled, mode="full")
+        res = verify_lean(assembled, mode="full", profile=ctx.get("lean_profile", settings.lean_profile))
         final_ok = res["ok"] if res["infra_ok"] else None
         final_errors = res["errors"]
         result_path = settings.tasks_dir / ctx.task_id / "artifacts" / "result.lean"
@@ -1367,9 +1375,12 @@ async def bank_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     # fits the scaffold hole — only the banked lemma is the generalized one.)
     bank_failures: list[dict[str, str]] = []
     banked = 0
+    learning_writes = bool(ctx.get("learning_writes_enabled", True))
     for sg_id, win in discharged.items():
         sub = next((s for s in subtasks if s.id == sg_id), None)
         to_bank = ctx.get(_bb_key("abstracted", sg_id)) or win
+        if not learning_writes:
+            continue
         store = lemma_bank.store_lemma(
             to_bank.get("statement", "") or sg_id,
             to_bank.get("proof_term", ""),
@@ -1389,13 +1400,17 @@ async def bank_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     if bank_failures:
         logger.error("bank: %d lemma write(s) failed: %s", len(bank_failures), bank_failures)
 
-    ctx.progress(f"[bank] assembled result.lean; banked {banked}/{len(discharged)} lemma(s)")
+    if learning_writes:
+        ctx.progress(f"[bank] assembled result.lean; banked {banked}/{len(discharged)} lemma(s)")
+    else:
+        ctx.progress("[bank] assembled result.lean; lemma banking skipped (eval no-write mode)")
     return {
         "handler": "bank",
         "ok": final_ok,
         "errors": final_errors,
         "n_discharged": len(discharged),
         "n_banked": banked,
+        "bank_writes_enabled": learning_writes,
         "bank_failures": bank_failures,
     }
 
@@ -1631,6 +1646,7 @@ async def verify_concept_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     candidates = ctx.get(_bb_key("concept_candidates", sg_id)) or []
     weak = settings.prover_weak_path_b
     strict = settings.prover_soundness_strict
+    profile = ctx.get("lean_profile", settings.lean_profile)
 
     verified: Optional[dict[str, Any]] = None
     attempts: list[dict[str, Any]] = []
@@ -1644,7 +1660,7 @@ async def verify_concept_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
 
         # 1. Definition must elaborate (no sorry). Conservative: an infra outage is not a
         #    rejection of the concept, just an un-decidable attempt.
-        def_res = verify_lean(def_src, mode="full")
+        def_res = verify_lean(def_src, mode="full", profile=profile)
         if not def_res["infra_ok"]:
             record["error"] = "verifier unavailable (definition elaboration)"
             attempts.append(record)
@@ -1659,7 +1675,7 @@ async def verify_concept_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
         probe = (cand.get("vacuity_probe") or "").strip()
         if probe:
             probe_src = _compose_concept_source(def_src, probe)
-            probe_res = verify_lean(probe_src, mode="full")
+            probe_res = verify_lean(probe_src, mode="full", profile=profile)
             if probe_res["infra_ok"] and probe_res["ok"]:
                 record["vacuous"] = True
                 record["error"] = "vacuity probe closed by trivial (definition is vacuous)"
@@ -1673,7 +1689,7 @@ async def verify_concept_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
             seed = _compose_concept_source(def_src, b.get("source") or "")
             outcome = await prove_proposition(
                 b.get("lean_type") or "", seed, weak=weak, decl=b.get("name"),
-                strict_soundness=strict,
+                strict_soundness=strict, profile=profile,
             )
             bridge_ok = outcome.won and bool(outcome.axioms_clean)
             record["bridges"].append({
@@ -1768,6 +1784,7 @@ async def birth_ablation_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
 
     weak = settings.prover_weak_path_b
     strict = settings.prover_soundness_strict
+    profile = ctx.get("lean_profile", settings.lean_profile)
     budget = settings.cap_repair_iters  # IDENTICAL across arms — B_ablate
     target = f"theorem {_ABLATION_DECL} : {goal} := by sorry"
     with_seed = f"{_concept_preamble(concept)}\n\n{target}\n"
@@ -1776,11 +1793,11 @@ async def birth_ablation_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     # Same call shape both arms; the ONLY difference is whether the vocabulary is in scope.
     with_out = await prove_proposition(
         goal, with_seed, weak=weak, max_repair=budget, decl=_ABLATION_DECL,
-        strict_soundness=strict,
+        strict_soundness=strict, profile=profile,
     )
     without_out = await prove_proposition(
         goal, without_seed, weak=weak, max_repair=budget, decl=_ABLATION_DECL,
-        strict_soundness=strict,
+        strict_soundness=strict, profile=profile,
     )
 
     with_solves = with_out.won and bool(with_out.axioms_clean)
@@ -1844,7 +1861,16 @@ async def bank_concept_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
         return {"handler": "bank_concept", "subgoal": sg_id, "ok": False,
                 "banked": False, "reason": "no accepted concept"}
 
-    store = concept_bank.store_concept(accepted, source_goal=ctx.request, theorem_id=ctx.task_id)
+    learning_writes = bool(ctx.get("learning_writes_enabled", True))
+    if learning_writes:
+        store = concept_bank.store_concept(accepted, source_goal=ctx.request, theorem_id=ctx.task_id)
+    else:
+        store = {
+            "ok": False,
+            "id": None,
+            "error": "concept banking skipped (eval no-write mode)",
+            "skipped": True,
+        }
     if store["ok"]:
         accepted = {**accepted, "bank_id": store["id"]}
         ctx.put(_bb_key("accepted_concept", sg_id), accepted)
@@ -1867,6 +1893,7 @@ async def bank_concept_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     result = {
         "subgoal": sg_id,
         "banked": store["ok"],
+        "bank_writes_enabled": learning_writes,
         "store": store,
         "concept_id": accepted.get("concept_id"),
         "discharged": True,
@@ -1875,6 +1902,7 @@ async def bank_concept_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     ctx.progress(
         f"[bank_concept] {sg_id}: "
         + (f"banked concept {accepted.get('concept_id')}" if store["ok"]
+           else f"concept write skipped ({store['error']})" if store.get("skipped")
            else f"concept write failed ({store['error']})")
     )
     return {"handler": "bank_concept", "subgoal": sg_id, "ok": store["ok"], **result}

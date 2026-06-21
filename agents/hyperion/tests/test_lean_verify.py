@@ -84,7 +84,20 @@ def test_mode_is_forwarded_and_echoed():
     with patch("httpx.post", side_effect=_capture):
         res = verify_lean("src", mode="skeleton")
     assert captured["json"]["mode"] == "skeleton"
+    assert captured["json"]["profile"] == "core"
     assert res["mode"] == "skeleton"
+
+
+def test_mathlib_profile_is_forwarded():
+    captured = {}
+
+    def _capture(url, json, timeout):  # noqa: A002 - mirror httpx.post kwarg name
+        captured["json"] = json
+        return _resp({"ok": True, "errors": []})
+
+    with patch("httpx.post", side_effect=_capture):
+        verify_lean("import Mathlib\n#check Nat", mode="full", profile="mathlib")
+    assert captured["json"]["profile"] == "mathlib"
 
 
 def test_tool_wrapper_ok_string():
@@ -183,7 +196,7 @@ def test_axioms_forwards_decl():
     with patch("httpx.post", side_effect=_capture):
         lean_axioms("src", "MyThm")
     assert captured["url"].endswith("/axioms")
-    assert captured["json"] == {"source": "src", "decl": "MyThm"}
+    assert captured["json"] == {"source": "src", "decl": "MyThm", "profile": "core"}
 
 
 # ---------------------------------------------------------------------------

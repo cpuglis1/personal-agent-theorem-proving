@@ -134,6 +134,8 @@ _NEW_COLUMNS = {
     "routing": "TEXT",
     "callback_url": "TEXT",  # (Phase 9) outbound completion webhook
     "workflow": "TEXT",      # workflow id this task runs (null → server default)
+    "eval_mode": "TEXT",     # train|dev|test benchmark discipline
+    "lean_profile": "TEXT",  # core|mathlib verifier profile
 }
 
 
@@ -622,11 +624,23 @@ async def _enqueue_scheduled(record: AgentRecord) -> None:
     request = scheduler.scheduled_task_request(record)
     async with _db() as db:
         await db.execute(
-            "INSERT INTO tasks (task_id, status, request, hitl) VALUES (?,?,?,?)",
-            (task_id, "queued", request, "off"),
+            "INSERT INTO tasks (task_id, status, request, hitl, eval_mode, lean_profile) "
+            "VALUES (?,?,?,?,?,?)",
+            (task_id, "queued", request, "off", settings.eval_mode, settings.lean_profile),
         )
         await db.commit()
-    asyncio.create_task(_run_and_update(task_id, request, False, None, None, None, "off"))
+    asyncio.create_task(
+        _run_and_update(
+            task_id,
+            request,
+            cap_wall_seconds=None,
+            cap_input_tokens=None,
+            cap_output_tokens=None,
+            hitl="off",
+            workflow=None,
+            eval_mode=settings.eval_mode, lean_profile=settings.lean_profile,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -701,6 +715,10 @@ class TaskRequest(BaseModel):
         callback_url: Optional outbound webhook POSTed once on terminal status.
         cap_wall_seconds / cap_input_tokens / cap_output_tokens: Per-run budget
             overrides; ``None`` uses the global caps.
+        eval_mode: Benchmark discipline. ``train`` permits learning writes; ``dev`` and
+            ``test`` keep artifacts/traces but disable persistent memory/bank writes.
+        lean_profile: Verifier profile. ``core`` rejects imports; ``mathlib`` allows
+            ``import Mathlib`` on the warm-cache sidecar.
     """
     task: str
     schema_version: int = 1                              # (Phase 9) external-caller contract
@@ -711,6 +729,11 @@ class TaskRequest(BaseModel):
     cap_wall_seconds: Optional[int] = None
     cap_input_tokens: Optional[int] = None
     cap_output_tokens: Optional[int] = None
+    eval_mode: Literal["train", "dev", "test"] = settings.eval_mode  # type: ignore[assignment]
+    lean_profile: Literal["core", "mathlib"] = settings.lean_profile  # type: ignore[assignment]
+    problem_id: Optional[str] = None
+    split: Optional[str] = None
+    order_seed: Optional[int] = None
 
 
 class TaskResponse(BaseModel):
@@ -847,6 +870,11 @@ async def _run_and_update(
     cap_output_tokens: Optional[int],
     hitl: str = "off",
     workflow: Optional[str] = None,
+    eval_mode: str = "train",
+    lean_profile: str = "core",
+    problem_id: Optional[str] = None,
+    split: Optional[str] = None,
+    order_seed: Optional[int] = None,
 ) -> None:
     """Background coroutine that runs a fresh task end-to-end and persists outcome.
 
@@ -888,13 +916,21 @@ async def _run_and_update(
         cap_output_tokens=cap_output_tokens,
         hitl=hitl,
         workflow=workflow,
+        eval_mode=eval_mode,
+        lean_profile=lean_profile,
+        problem_id=problem_id,
+        split=split,
+        order_seed=order_seed,
     )
     await _persist_result(task_id, result)
     _progress(f"[hyperion] status={result['status']}")
 
     if result["status"] in ("awaiting_approval", "awaiting_input"):
         return  # paused for human input; episode stored after the task finishes
-    _maybe_store_episode(task_id, request, result, started)
+    if eval_mode == "train":
+        _maybe_store_episode(task_id, request, result, started)
+    else:
+        _progress(f"[eval] episode memory write skipped (eval_mode={eval_mode})")
     await _maybe_fire_callback(task_id, result)
 
 
@@ -936,6 +972,8 @@ async def _resume_and_update(
         _append_progress(task_id, line)
 
     caps = payload.get("caps") or {}
+    eval_mode = payload.get("eval_mode", "train")
+    lean_profile = payload.get("lean_profile", "core")
     result = await resume_task(
         task_id=task_id,
         request=request,
@@ -950,13 +988,18 @@ async def _resume_and_update(
         cap_wall_seconds=caps.get("cap_wall_seconds"),
         cap_input_tokens=caps.get("cap_input_tokens"),
         cap_output_tokens=caps.get("cap_output_tokens"),
+        eval_mode=eval_mode,
+        lean_profile=lean_profile,
     )
     await _persist_result(task_id, result)
     _progress(f"[hyperion] status={result['status']}")
 
     if result["status"] in ("awaiting_approval", "awaiting_input"):
         return  # re-paused after a revision / new question
-    _maybe_store_episode(task_id, request, result, started)
+    if eval_mode == "train":
+        _maybe_store_episode(task_id, request, result, started)
+    else:
+        _progress(f"[eval] episode memory write skipped (eval_mode={eval_mode})")
     await _maybe_fire_callback(task_id, result)
 
 
@@ -1029,9 +1072,12 @@ async def submit_task(body: TaskRequest) -> TaskResponse:
     db = await _get_db()  # creates + migrates the table (adds callback_url if absent)
     try:
         await db.execute(
-            "INSERT INTO tasks (task_id, status, request, hitl, callback_url, workflow) "
-            "VALUES (?,?,?,?,?,?)",
-            (task_id, "queued", body.task, body.hitl, body.callback_url, workflow_id),
+            "INSERT INTO tasks (task_id, status, request, hitl, callback_url, workflow, eval_mode, lean_profile) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (
+                task_id, "queued", body.task, body.hitl, body.callback_url, workflow_id,
+                body.eval_mode, body.lean_profile,
+            ),
         )
         await db.commit()
     finally:
@@ -1046,6 +1092,11 @@ async def submit_task(body: TaskRequest) -> TaskResponse:
             body.cap_output_tokens,
             body.hitl,
             workflow_id,
+            eval_mode=body.eval_mode,
+            lean_profile=body.lean_profile,
+            problem_id=body.problem_id,
+            split=body.split,
+            order_seed=body.order_seed,
         )
     )
     return TaskResponse(task_id=task_id, status="queued")

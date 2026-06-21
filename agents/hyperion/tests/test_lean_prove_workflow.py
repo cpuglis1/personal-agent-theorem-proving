@@ -859,6 +859,34 @@ async def test_bank_surfaces_a_failed_write(tmp_path):
 
 
 @pytest.mark.anyio
+async def test_bank_skips_lemma_writes_in_eval_no_write_mode(tmp_path):
+    """Dev/test evaluation still verifies result.lean but must not mutate the lemma bank."""
+    from hyperion.crews.lean_handlers import bank_handler
+
+    with patch.object(settings, "tasks_dir", tmp_path):
+        (tmp_path / "prove_nowrite").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "prove_nowrite" / "plan.md").write_text(_PLAN_MD, encoding="utf-8")
+        context_put("prove_nowrite", "learning_writes_enabled", False)
+        context_put("prove_nowrite", "discharged:h1",
+                    {"proof_term": "lemP_proof", "statement": "lem_P", "path": "A", "lean_type": "P"})
+        context_put("prove_nowrite", "discharged:h2",
+                    {"proof_term": "h2_synth_proof", "statement": "t_h2", "path": "B", "lean_type": "Q"})
+        node = WorkflowNode(id="bank", kind="native", handler="bank", upstream=[])
+        ctx = NativeNodeCtx(task_id="prove_nowrite", node=node, request="prove P ∧ Q", progress_callback=None)
+
+        store = MagicMock(return_value={"ok": True, "id": "pt", "error": None})
+        with patch("hyperion.memory.lemma_bank.store_lemma", store), \
+             mock_lean(ok=True, targets=_VERIFY_TARGET):
+            res = await bank_handler(ctx)
+
+        assert res["ok"] is True
+        assert res["bank_writes_enabled"] is False
+        assert res["n_banked"] == 0
+        store.assert_not_called()
+        assert (tmp_path / "prove_nowrite" / "artifacts" / "result.lean").exists()
+
+
+@pytest.mark.anyio
 async def test_bank_rejects_invalid_final_assembly(tmp_path):
     """A node may discharge a subgoal, but the assembled result.lean is the final gate."""
     with patch.object(settings, "tasks_dir", tmp_path):

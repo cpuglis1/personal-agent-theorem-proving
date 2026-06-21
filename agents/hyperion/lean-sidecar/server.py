@@ -67,6 +67,7 @@ app = FastAPI(title="lean-verifier", version="1.0")
 class VerifyRequest(BaseModel):
     source: str
     mode: Literal["skeleton", "full"] = "full"
+    profile: Literal["core", "mathlib"] = "core"
 
 
 class VerifyResponse(BaseModel):
@@ -78,6 +79,7 @@ class VerifyResponse(BaseModel):
 class AxiomsRequest(BaseModel):
     source: str
     decl: str
+    profile: Literal["core", "mathlib"] = "core"
 
 
 class AxiomsResponse(BaseModel):
@@ -156,12 +158,22 @@ def _run_lean(source: str) -> subprocess.CompletedProcess[str]:
 
 @app.get("/health")
 def health() -> dict:
-    return {"status": "ok"}
+    return {"status": "ok", "profiles": ["core", "mathlib"], "project_dir": str(PROJECT_DIR)}
+
+
+def _profile_errors(source: str, profile: str) -> list[str]:
+    """Policy checks that sit above Lean elaboration."""
+    if profile == "core" and re.search(r"^\s*import\b", source, re.MULTILINE):
+        return ["core profile rejects import statements; use profile='mathlib' for Mathlib proofs"]
+    return []
 
 
 @app.post("/verify", response_model=VerifyResponse)
 def verify(req: VerifyRequest) -> VerifyResponse:
     try:
+        profile_errors = _profile_errors(req.source, req.profile)
+        if profile_errors:
+            return VerifyResponse(ok=False, errors=profile_errors, elaborated_term=None)
         proc = _run_lean(req.source)
         errors, saw_sorry = _parse_diagnostics(proc.stdout, proc.stderr)
         # A non-zero exit with no parsed error line still means failure — surface raw.
@@ -195,6 +207,9 @@ def axioms(req: AxiomsRequest) -> AxiomsResponse:
     dependency, which is exactly how an unclosed hole surfaces here.
     """
     try:
+        profile_errors = _profile_errors(req.source, req.profile)
+        if profile_errors:
+            return AxiomsResponse(ok=False, axioms=[], errors=profile_errors)
         probe = f"{req.source}\n\n#print axioms {req.decl}\n"
         proc = _run_lean(probe)
         errors, _ = _parse_diagnostics(proc.stdout, proc.stderr)

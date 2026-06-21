@@ -140,3 +140,413 @@ lemma without a final scaffold theorem.
   legitimately win without retrieval.
 - Each sub-goal is proved **independently** then stitched, so every `have` type must be
   self-contained and the closing lines must derive the target from the haves.
+
+
+Think of lean-prove as two contracts glued together:
+
+  1. An LLM proposes structure or proof text.
+  2. Lean kernel/native code decides whether that text is real.
+
+  The LLM can suggest. It never gets to certify.
+
+  Decompose
+  Uses LLM: yes, decomposer.
+
+  Input:
+
+  - user request
+  - workflow/task context
+
+  Output:
+
+  - plan.md
+  - YAML frontmatter with:
+      - scaffold: Lean theorem/example with have h1 : T1 := sorry, have h2 : T2 := sorry, then a closing line
+      - options[].subtasks[]: each {id, lean_type}
+      - prose proof sketch/context
+
+  Verified against:
+
+  - not directly here. It is just generation.
+  - downstream skeleton_check verifies the scaffold.
+
+  How it knows components:
+
+  - It invents the have chain.
+  - After latest fixes, if it emits scaffold but forgets structured subtasks, parser recovers them from have h : T := sorry.
+
+  Skeleton Check
+  Uses LLM: no.
+
+  Input:
+
+  - plan.scaffold
+  - target proposition from request or subgoal context
+
+  What it does:
+
+  - Sanitizes scaffold:
+      - removes trailing tactic commas
+      - rewrites fragile closings like exact h2.trans h1.symm or ▸ casts to exact h2
+
+  - Wraps body as example : <goal> := by ... if needed.
+  - Sends to Lean sidecar in skeleton mode, where sorry is allowed.
+
+  Output:
+
+  - skeleton_ok
+  - skeleton_errors
+
+  Verified against:
+
+  - Lean kernel/typechecker.
+  - It checks that the have chain shape composes to the target, not that subgoals are proven.
+
+  Should use LLM?
+
+  - No. This is exactly where native/kernel arbitration belongs.
+
+  Retrieve / Path A
+  Uses LLM: no.
+
+  Input:
+
+  - one subgoal id, e.g. h1
+  - its lean_type, e.g. 2 ^ 3 = 8
+  - lemma bank / concept bank
+
+  What it does:
+
+  - Searches stored lemmas.
+  - Builds candidate proof sources using retrieved lemmas.
+  - May rank/filter candidates by applicability.
+
+  Output:
+
+  - candidate_a:<subgoal>
+  - candidates_a:<subgoal>
+  - retrieved concept context
+
+  Verified against:
+
+  - Not finally here. It proposes candidates.
+  - verify checks candidates with Lean.
+
+  Should use LLM?
+
+  - Mostly no. Retrieval/ranking/applicability should stay deterministic or model-assisted only if needed. The proof validity must remain kernel-checked.
+
+  Synthesize / Path B
+  Uses LLM: yes, lemma_synthesizer.
+
+  Input:
+
+  - exact subgoal lean_type
+  - runner-owned prompt
+  - no tools now; one final-answer JSON is captured by runner
+
+  What it does:
+
+  - Generates a self-contained Lean theorem for exactly that proposition.
+
+  Output:
+
+  - candidate_b:<subgoal>:
+      - source
+      - statement
+      - proof_term
+      - origin: synthesize
+
+  Verified against:
+
+  - Not in this node.
+  - verify checks it with Lean full mode.
+
+  How it knows components:
+
+  - The runner fans the workflow once per active_subtasks().
+  - Each cloned synth node gets the subgoal id in its instruction/context.
+  - _goal_type(ctx, sg_id) resolves the exact lean_type.
+
+  Should use LLM?
+
+  - Yes. This is the right place for generative proof search.
+
+  Verify
+  Uses LLM: partly. The handler itself is native, but repair calls can use LLM.
+
+  Input:
+
+  - Path A candidates
+  - Path B candidate
+  - subgoal lean_type
+
+  What it does:
+
+  - For Path A: tries retrieved candidates in ranked order.
+  - For Path B: checks synthesized candidate.
+  - If B fails or is disallowed by weak-tactic policy, calls repair agent up to budget.
+  - Applies weak prover gate if enabled: bans strong closers like decide, omega, full simp, etc. from winning.
+
+  Output:
+
+  - verified_a:<subgoal>
+  - verified_b:<subgoal>
+  - verified_b_strong:<subgoal>
+  - provisional discharged:<subgoal>
+  - verify_decision:<subgoal>
+
+  Verified against:
+
+  - Lean sidecar, full mode.
+  - full means no sorry; proof must actually close.
+
+  Should use LLM?
+
+  - The controller no.
+  - Repair yes, but only as proposal generation. Kernel remains judge.
+
+  Compare
+  Uses LLM: no.
+
+  Input:
+
+  - verified_a
+  - verified_b
+  - original candidate_a
+  - original candidate_b
+
+  What it does:
+
+  - Chooses winner with deterministic policy:
+      - reuse/generalization/shortness style scoring
+      - records A-vs-B thesis data
+
+  - Finalizes discharged:<subgoal>.
+
+  Output:
+
+  - final discharged:<subgoal>
+  - triple_log:<subgoal>
+  - scores and winner path
+
+  Verified against:
+
+  - It only compares already verified candidates.
+  - No new Lean check here.
+
+  Should use LLM?
+
+  - No. This is measurement/policy logic and should stay deterministic.
+
+  Escalation Gate
+  Uses LLM: no.
+
+  Input:
+
+  - verify_decision
+  - discharged
+
+  What it does:
+
+  - If normal proof failed, marks the subgoal as escalated.
+  - Sets up context for definition synthesis.
+  - If normal proof succeeded, downstream concept nodes no-op.
+
+  Output:
+
+  - escalated:<subgoal>
+  - stall context fields
+
+  Verified against:
+
+  - Nothing external. It is branch routing.
+
+  Should use LLM?
+
+  - No.
+
+  Abstract
+  Uses LLM: yes for proposal, native for selection.
+
+  Input:
+
+  - fresh verified Path B lemma
+
+  What it does:
+
+  - Calls abstractor to propose generalized versions of the concrete lemma.
+  - Tries proposals most-general-first.
+  - Keeps first one that Lean verifies.
+  - Falls back to concrete lemma if all abstractions fail.
+
+  Output:
+
+  - abstracted:<subgoal>
+
+  Verified against:
+
+  - Lean full mode for each abstraction proposal.
+
+  Should use LLM?
+
+  - Yes for proposing generalizations.
+  - No for accepting them; kernel should decide.
+
+  Synthesize Definition
+  Uses LLM: yes inside propose_definition.
+
+  Input:
+
+  - stuck subgoal
+  - informal proof/stall context
+  - failed Lean diagnostics
+  - already formalized lemmas
+
+  What it does:
+
+  - Only runs if escalated is true.
+  - Asks definition_synthesizer for candidate concepts:
+      - new def
+      - bridge lemmas proving the definition is useful/sound
+
+  - Applies cheap degeneracy filters:
+      - no sorry/axiom
+      - definition not True/False
+      - not just the parent theorem renamed
+      - has bridge lemmas
+
+  Output:
+
+  - concept_candidates:<subgoal>
+  - rejected reasons
+
+  Verified against:
+
+  - Cheap static checks only here.
+  - Real verification happens in verify_concept.
+
+  Should use LLM?
+
+  - Yes. Inventing new vocabulary is generative.
+
+  Verify Concept
+  Uses LLM: indirectly through repair; handler itself native.
+
+  Input:
+
+  - concept candidates:
+      - definition source
+      - bridge theorem sources
+      - optional vacuity probe
+
+  What it does:
+
+  - Checks definition elaborates.
+  - Runs optional vacuity probe; probe should fail if definition is meaningful.
+  - Proves every bridge using prove_proposition.
+  - Runs soundness contract for bridge declarations.
+
+  Output:
+
+  - verified_concept:<subgoal> or none
+  - per-candidate attempt trace
+
+  Verified against:
+
+  - Lean full mode.
+  - Soundness/axiom check via #print axioms contract.
+
+  Should use LLM?
+
+  - For repair, yes if bridge proof needs fixing.
+  - For acceptance, no.
+
+  Birth Ablation
+  Uses LLM: indirectly through repair.
+
+  Input:
+
+  - verified concept
+  - stuck goal
+
+  What it does:
+
+  - Re-proves the target twice with same budget:
+      - WITH new definition/bridges in scope
+      - WITHOUT them
+
+  - Accepts concept only if WITH succeeds soundness-clean and WITHOUT fails.
+
+  Output:
+
+  - accepted_concept:<subgoal> if causal
+  - birth ablation result
+
+  Verified against:
+
+  - Lean full mode.
+  - Same-budget causal test.
+
+  Should use LLM?
+
+  - Repair may use LLM.
+  - The causal decision must stay native/deterministic.
+
+  Bank Concept
+  Uses LLM: no.
+
+  Input:
+
+  - accepted concept
+
+  What it does:
+
+  - Stores concept in concept bank.
+  - Stages its proof as discharged:<subgoal> with path C.
+
+  Output:
+
+  - banked concept
+  - discharge candidate for final bank
+
+  Verified against:
+
+  - Prior stages already verified it.
+  - Final bank still verifies assembled theorem.
+
+  Should use LLM?
+
+  - No.
+
+  Bank
+  Uses LLM: no.
+
+  Input:
+
+  - scaffold
+  - active subtasks
+  - discharged:<subgoal> winners
+  - optional abstracted:<subgoal>
+
+  What it does:
+
+  - Replaces each sorry in scaffold with the winning proof body.
+  - Writes artifacts/result.lean.
+  - Runs final Lean full verification.
+  - Stores winning/abstracted lemmas in lemma bank.
+
+  Output:
+
+  - result.lean
+  - final_verify
+  - banked lemmas
+
+  Verified against:
+
+  - Lean full mode on the assembled theorem.
+  - This is the final ground truth.
+
+  Should use LLM?
+
+  - No. This must stay deterministic and kernel-backed.
