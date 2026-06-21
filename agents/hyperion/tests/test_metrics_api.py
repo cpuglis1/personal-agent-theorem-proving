@@ -171,3 +171,30 @@ async def test_metrics_counts_activations_and_errors(tmp_path):
     assert by_id["researcher"]["activations"] == 2
     assert by_id["researcher"]["errors"] == 1
     assert by_id["researcher"]["error_rate"] == 0.5
+
+
+@pytest.mark.anyio
+async def test_metrics_reports_persisted_cost_by_agent(tmp_path):
+    """GET /metrics includes cost_usd summed from trace_events per agent."""
+    routing = json.dumps({"selected_agents": ["researcher"], "skipped": [], "dag": {}})
+    db_path = await _seed_db(tmp_path, [("t1", "done", "ok run", routing)])
+    db = await api._get_db()
+    await db.execute(
+        """INSERT INTO trace_events
+           (task_id, agent_role, node_id, prompt_type, model, input_tokens,
+            output_tokens, cost_usd, tools_used)
+           VALUES (?,?,?,?,?,?,?,?,?)""",
+        ("t1", "researcher", "research", "user-facing", "worker", 100, 20, 0.045, "[]"),
+    )
+    await db.commit()
+    await db.close()
+
+    assert db_path.exists()
+    async with await _client() as client:
+        resp = await client.get("/metrics")
+    by_id = {a["id"]: a for a in resp.json()["agents"]}
+    assert by_id["researcher"]["tokens"] == {
+        "input": 100,
+        "output": 20,
+        "cost_usd": 0.045,
+    }

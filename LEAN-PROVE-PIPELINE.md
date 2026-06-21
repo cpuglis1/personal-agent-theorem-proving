@@ -98,13 +98,19 @@ per-sub-goal status.
     exact h2
   ```
 
-## Known next item — decomposer closing-tactic variance
+## Decomposer closing-tactic variance — mechanically canonicalized
 
-The sub-goal *decomposition* is reliable; the scaffold's **closing line** is not. The
-decomposer alternates between the correct `exact h2` and a fragile
-`exact h2.trans (h1.symm ▸ rfl)` whose `▸` cast fails skeleton (the revision budget then
-gives up). Mechanical scrubs handle syntactic noise; closing-tactic quality is the next
-decomposer-reliability target. See `HANDOFF-2026-06-21-multi-lemma-testing.md`.
+The sub-goal *decomposition* was already reliable; the scaffold's **closing line** was not.
+The decomposer alternated between the correct `exact h2` and a fragile
+`exact h2.trans (h1.symm ▸ rfl)` whose `▸` cast failed skeleton (the revision budget then
+gave up). Fixed with the same mechanical, kernel-arbitrated approach as the comma scrub:
+`lean_handlers.py::_canonicalize_closing` (run from `_sanitize_scaffold`, so it covers both
+skeleton check and `bank` assembly) rewrites a `▸`-cast closing tactic — the chain's last
+non-blank line — to the canonical `exact <last_have>`. It fires only on a `▸`-carrying
+`exact`, so clean chain closes (`exact h2`) and conjunction closes (`exact ⟨h1, h2⟩`) pass
+through untouched, and it's idempotent. The kernel still arbitrates (skeleton + final
+`bank` verify), so it can only swap a known-fragile closing for the canonical one, never
+manufacture a false green.
 
 ## Constraints worth knowing for new test goals
 

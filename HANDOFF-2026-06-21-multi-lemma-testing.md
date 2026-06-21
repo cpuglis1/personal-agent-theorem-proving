@@ -76,11 +76,18 @@ are banned from *winning*), and so the **composition** styles differ (defeq chai
 
 ## If the open issue bites (it will, without the hint)
 
+**Update (2026-06-21): the mechanical fix below is landed.**
+`lean_handlers.py::_canonicalize_closing` (run from `_sanitize_scaffold`, covering both
+skeleton check and `bank`) rewrites a `▸`-cast closing tactic to `exact <last_have>`,
+kernel-arbitrated and idempotent (test: `test_scaffold_fragile_cast_closing_is_canonicalized`).
+The remaining options stay listed in case the fan-out stress run surfaces a closing the
+mechanical scrub doesn't cover.
+
 Decomposer closing-tactic quality is the next reliability target. Options, cheapest first:
 - **Prompt:** constrain the closing line to `exact <final_have>` / `exact ⟨…⟩` / `calc`,
   explicitly forbidding `▸` term-mode casts. (Prompt-only is unreliable — we've seen it.)
-- **Mechanical:** detect a `▸`/over-clever closing in `_sanitize_scaffold` and rewrite the
-  trivial defeq case to `exact <last_have>` (deterministic, like the comma scrub).
+- **Mechanical (DONE):** detect a `▸`/over-clever closing in `_sanitize_scaffold` and
+  rewrite the trivial defeq case to `exact <last_have>` (deterministic, like the comma scrub).
 - **Structural:** have the decomposer emit only the `have` holes and let a deterministic
   closer synthesize the composition (separate native step).
 

@@ -183,24 +183,34 @@ def _bb_key(base: str, sg_id: str) -> str:
 
 _IMPORT_LINE_RE = re.compile(r"^\s*import\s+\S+.*$", re.MULTILINE)
 _LEADING_LEMMA_RE = re.compile(r"(?m)^(\s*)lemma(\s)")
+# Synthesizers reliably name a self-contained proof ``example`` — but ``example`` is a Lean
+# keyword (the anonymous-declaration form), not a legal identifier, so ``lemma example : T
+# := p`` / ``theorem example : T := p`` fail to parse. The intent is the anonymous
+# ``example : T := p``; drop the redundant keyword. Run before the lemma→theorem rewrite so
+# both spellings collapse here and a plain ``lemma foo`` still rewrites to ``theorem foo``.
+_NAMED_EXAMPLE_RE = re.compile(r"(?m)^(\s*)(?:lemma|theorem)\s+example\b")
 
 
 def _sanitize_lean_source(source: str) -> str:
-    """Scrub the two Mathlib-isms LLM synthesizers reliably emit for *core* goals.
+    """Scrub the Mathlib-isms / dialect tics LLM synthesizers reliably emit for *core* goals.
 
     The verifier is core Lean 4 with no Mathlib on the import path, but synthesizers
     (trained on Mathlib-heavy corpora) habitually (a) prepend an ``import Mathlib...``
-    line — which fails fast because the ``.olean`` isn't built — and (b) use the
-    ``lemma`` keyword, which Mathlib defines but core Lean does not (``theorem`` is the
-    core spelling). Both make an otherwise-valid proof fail verification. We strip import
-    lines and rewrite a leading ``lemma`` → ``theorem`` (they are exact synonyms), then
-    trim leading blank lines. Defensive and idempotent: a proof that was already core
-    passes through unchanged. (NB: when real Mathlib verification lands — build-plan
-    priority 3 — this core-only scrub becomes conditional on the goal's needs.)
+    line — which fails fast because the ``.olean`` isn't built; (b) use the ``lemma``
+    keyword, which Mathlib defines but core Lean does not (``theorem`` is the core
+    spelling); and (c) name a self-contained proof ``example`` (``lemma example : T :=
+    p``), but ``example`` is the anonymous-declaration *keyword*, not a legal identifier,
+    so the decl fails to parse. We strip import lines, drop the redundant keyword from a
+    ``{lemma,theorem} example`` (→ the valid anonymous ``example : T := p``), rewrite a
+    leading ``lemma`` → ``theorem`` (exact synonyms), then trim leading blank lines. Each
+    makes an otherwise-valid proof fail verification. Defensive and idempotent: a proof that
+    was already core passes through unchanged. (NB: when real Mathlib verification lands —
+    build-plan priority 3 — this core-only scrub becomes conditional on the goal's needs.)
     """
     if not source:
         return source
     cleaned = _IMPORT_LINE_RE.sub("", source)
+    cleaned = _NAMED_EXAMPLE_RE.sub(r"\1example", cleaned)
     cleaned = _LEADING_LEMMA_RE.sub(r"\1theorem\2", cleaned)
     return cleaned.lstrip("\n")
 
@@ -214,19 +224,58 @@ def _indent_tactic_body(body: str) -> str:
 # at end of a tactic line makes the kernel reject the whole block ("unexpected token ','").
 _TRAILING_COMMA_RE = re.compile(r",[ \t]*$", re.MULTILINE)
 
+# A have-chain whose final step is definitionally equal to the goal closes with a plain
+# ``exact <last_have>``. Decomposers intermittently emit an over-clever term-mode cast
+# instead — ``exact h2.trans (h1.symm ▸ rfl)`` — whose ``▸`` rewrite is fragile and fails
+# the skeleton type-check (the revision budget then gives up). These match the chain's
+# closing tactic and the trailing ``have`` identifier so we can rewrite the fragile close.
+_HAVE_ID_RE = re.compile(r"^\s*have\s+([A-Za-z_][A-Za-z0-9_']*)\b", re.MULTILINE)
+_FRAGILE_CLOSE_RE = re.compile(r"([ \t]*)exact\b[^\n]*▸")
+
+
+def _canonicalize_closing(scaffold: str) -> str:
+    """Rewrite an over-clever ``▸``-cast closing tactic to the canonical ``exact <last_have>``.
+
+    Only fires when the chain's *last* tactic line is an ``exact`` carrying a ``▸`` cast and
+    the scaffold has at least one ``have``; it then replaces that line with
+    ``exact <final have id>``. The kernel still arbitrates (skeleton check + the final
+    ``bank`` verify), so this can only swap a known-fragile closing for the canonical one —
+    never turn a failing proof into a false green. Conjunction closings (``exact ⟨h1, h2⟩``)
+    and already-canonical ``exact h2`` carry no ``▸`` and pass through untouched. Idempotent:
+    the rewritten ``exact <id>`` has no ``▸``, so a second pass is a no-op.
+    """
+    have_ids = _HAVE_ID_RE.findall(scaffold)
+    if not have_ids:
+        return scaffold
+    trailing_nl = scaffold.endswith("\n")
+    lines = scaffold.splitlines()
+    for i in range(len(lines) - 1, -1, -1):  # the closing tactic is the last non-blank line
+        if not lines[i].strip():
+            continue
+        m = _FRAGILE_CLOSE_RE.match(lines[i])
+        if m:
+            lines[i] = f"{m.group(1)}exact {have_ids[-1]}"
+        break
+    out = "\n".join(lines)
+    return out + "\n" if trailing_nl else out
+
 
 def _sanitize_scaffold(scaffold: str) -> str:
-    """Scrub the trailing-comma tactic separator decomposers carry over from Lean 3.
+    """Scrub decomposer dialect tics from a have-chain scaffold.
 
-    Mechanical and idempotent (mirrors :func:`_sanitize_lean_source`): strips a comma at
-    the end of a tactic line so an otherwise-valid have-chain skeleton isn't failed by a
-    dialect tic the prompt can't reliably suppress. Scoped to *end-of-line* commas, which
-    in a have-chain scaffold are always the stray separator (commas inside terms/types sit
-    mid-line), so a clean scaffold passes through unchanged.
+    Mechanical and idempotent (mirrors :func:`_sanitize_lean_source`):
+
+    * strips a comma at the end of a tactic line — a Lean-3 ``:= sorry,`` separator that
+      makes the kernel reject the whole block. Scoped to *end-of-line* commas, which in a
+      have-chain are always the stray separator (commas inside terms/types sit mid-line);
+    * canonicalizes an over-clever ``▸``-cast closing tactic to ``exact <last_have>``
+      (see :func:`_canonicalize_closing`).
+
+    A clean scaffold passes through unchanged.
     """
     if not scaffold:
         return scaffold
-    return _TRAILING_COMMA_RE.sub("", scaffold)
+    return _canonicalize_closing(_TRAILING_COMMA_RE.sub("", scaffold))
 
 
 def _scaffold_as_command(scaffold: str, goal_type: str) -> str:
@@ -1225,13 +1274,21 @@ def _assemble(scaffold: str, subtasks: list[Subtask], discharged: dict[str, dict
     and must be reduced to its body), in subtask order, so the have-chain that the skeleton
     check accepted becomes a closed proof. Sub-goals with no discharge keep their ``sorry``
     (the final full-mode verify will then reject the artifact — the loss is not hidden).
+
+    Each proof is funneled through :func:`_normalize_proof_rhs` so a *multi-line* tactic
+    block (the common Path-A winner shape, ``by\\n  have h … := rfl\\n  first | exact h | …``)
+    is collapsed to a single-line ``by t1; t2; …`` before substitution. Pasted verbatim into
+    a ``have hᵢ : T := <here>`` hole, a multi-line block's inner lines inherit the scaffold's
+    shallow indent instead of nesting under the hole's ``by`` — the kernel then rejects the
+    artifact (``expected … indented tactic sequence``). Collapsing makes the RHS
+    indentation-insensitive.
     """
     result = scaffold
     for sub in subtasks:
         win = discharged.get(sub.id)
         if not win:
             continue
-        proof = _bare_proof_term(win)
+        proof = _normalize_proof_rhs(_bare_proof_term(win))
         result = result.replace("sorry", proof, 1)
     return result
 
@@ -1268,7 +1325,13 @@ async def bank_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
             "cannot assemble result.lean; undischarged sub-goal(s): " + ", ".join(missing)
         )
 
-    scaffold = plan.scaffold or ""
+    # Sanitize the scaffold *before* substitution so the closing-tactic canonicalization
+    # (:func:`_canonicalize_closing`) sees only the chain's own ``have`` ids — a ``▸``-cast
+    # close like ``exact h2 ▸ h1 ▸ rfl`` becomes ``exact h2``. Done post-substitution it
+    # would mis-resolve "the last have" to a *substituted* inner ``have h`` and emit
+    # ``exact h``. The re-sanitize inside ``_scaffold_as_command`` is then a no-op on the
+    # (already clean) closing.
+    scaffold = _sanitize_scaffold(plan.scaffold or "")
     assembled_body = _assemble(scaffold, subtasks, discharged) if scaffold else ""
     assembled = (
         _scaffold_as_command(assembled_body, _prose_to_goal_type(ctx.request))

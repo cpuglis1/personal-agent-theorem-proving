@@ -777,7 +777,7 @@ export interface AgentMetric {
   activations: number;
   errors: number;
   error_rate: number;
-  tokens: { input: number; output: number };
+  tokens: { input: number; output: number; cost_usd: number };
   thresholds: Thresholds;
 }
 

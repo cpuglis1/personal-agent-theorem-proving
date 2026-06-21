@@ -434,12 +434,7 @@ def _write_trace_event(
         except Exception:
             pass
 
-        try:
-            import litellm
-
-            cost = litellm.completion_cost(completion_response=response_obj) or 0.0
-        except Exception:
-            cost = 0.0
+        cost = _cost_from_response(response_obj)
 
         try:
             duration_ms = int((end_time - start_time).total_seconds() * 1000)
@@ -492,6 +487,54 @@ def _usage_from_response(response_obj: Any) -> tuple[int, int]:
         return 0, 0
     get = usage.get if isinstance(usage, dict) else lambda k, d=0: getattr(usage, k, d)
     return int(get("prompt_tokens", 0) or 0), int(get("completion_tokens", 0) or 0)
+
+
+def _cost_from_response(response_obj: Any) -> float:
+    """Extract call cost from a LiteLLM response, preferring proxy-provided spend.
+
+    Routed/proxy responses may use local aliases such as ``openai/worker`` that
+    LiteLLM cannot price from the public model table. LiteLLM proxy often carries
+    the already-computed spend in response metadata, so inspect those fields first
+    and only then fall back to ``litellm.completion_cost``.
+    """
+
+    def _get(obj: Any, key: str) -> Any:
+        if isinstance(obj, dict):
+            return obj.get(key)
+        return getattr(obj, key, None)
+
+    candidates = [
+        _get(response_obj, "response_cost"),
+        _get(response_obj, "cost"),
+        _get(response_obj, "cost_usd"),
+    ]
+    hidden = _get(response_obj, "_hidden_params")
+    if hidden:
+        candidates.extend(
+            [
+                _get(hidden, "response_cost"),
+                _get(hidden, "cost"),
+                _get(hidden, "cost_usd"),
+            ]
+        )
+    usage_block = _get(response_obj, "usage")
+    if usage_block:
+        candidates.extend([_get(usage_block, "cost"), _get(usage_block, "cost_usd")])
+
+    for value in candidates:
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+
+    try:
+        import litellm
+
+        return float(litellm.completion_cost(completion_response=response_obj) or 0.0)
+    except Exception:
+        return 0.0
 
 
 class HyperionUsageLogger(CustomLogger):

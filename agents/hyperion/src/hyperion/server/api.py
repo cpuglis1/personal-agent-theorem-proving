@@ -2265,11 +2265,16 @@ async def get_metrics() -> dict:
         # Durable per-agent token totals from the trace log (keyed by agent id).
         async with db.execute(
             "SELECT agent_role, SUM(input_tokens) AS input, "
-            "SUM(output_tokens) AS output FROM trace_events GROUP BY agent_role"
+            "SUM(output_tokens) AS output, SUM(cost_usd) AS cost "
+            "FROM trace_events GROUP BY agent_role"
         ) as cur:
             token_rows = await cur.fetchall()
     tokens = {
-        tr["agent_role"]: {"input": tr["input"] or 0, "output": tr["output"] or 0}
+        tr["agent_role"]: {
+            "input": tr["input"] or 0,
+            "output": tr["output"] or 0,
+            "cost_usd": tr["cost"] or 0.0,
+        }
         for tr in token_rows
     }
 
@@ -2309,7 +2314,7 @@ async def get_metrics() -> dict:
                 "activations": acts,
                 "errors": errs,
                 "error_rate": round(errs / acts, 3) if acts else 0.0,
-                "tokens": tokens.get(record.id, {"input": 0, "output": 0}),
+                "tokens": tokens.get(record.id, {"input": 0, "output": 0, "cost_usd": 0.0}),
                 "thresholds": record.thresholds.model_dump(),
             }
         )

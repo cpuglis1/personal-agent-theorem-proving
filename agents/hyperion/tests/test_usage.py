@@ -134,6 +134,19 @@ def test_success_event_accumulates_from_metadata():
     assert usage.agent_totals("t1", "planner") == (42, 7)
 
 
+def test_cost_prefers_proxy_reported_hidden_response_cost(monkeypatch):
+    """Cost extraction should use LiteLLM proxy spend when alias pricing is unavailable."""
+
+    class Resp:
+        _hidden_params = {"response_cost": "0.0123"}
+
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("local pricing fallback should not be used")
+
+    monkeypatch.setattr("litellm.completion_cost", _boom)
+    assert usage._cost_from_response(Resp()) == 0.0123
+
+
 def test_get_logger_is_singleton():
     """``get_logger`` returns the same logger instance on repeated calls.
 

@@ -139,6 +139,53 @@ def test_scaffold_lean3_trailing_commas_are_scrubbed():
     assert _sanitize_scaffold(keep) == keep
 
 
+def test_scaffold_fragile_cast_closing_is_canonicalized():
+    """A decomposer's over-clever ``▸``-cast closing is rewritten to ``exact <last_have>``;
+    clean chain/conjunction closings pass through untouched."""
+    from hyperion.crews.lean_handlers import _sanitize_scaffold
+
+    fragile = (
+        "have h1 : 20 - 5 = 15 := sorry\n"
+        "have h2 : 15 + 3 = 18 := sorry\n"
+        "exact h2.trans (h1.symm ▸ rfl)\n"
+    )
+    out = _sanitize_scaffold(fragile)
+    assert "▸" not in out
+    assert out.splitlines()[-1] == "exact h2"
+    # Idempotent: a second pass is a no-op.
+    assert _sanitize_scaffold(out) == out
+
+    # Indentation on the closing line is preserved (body-of-``by`` scaffolds are indented).
+    indented = (
+        "  have h1 : 20 - 5 = 15 := sorry\n"
+        "  have h2 : 15 + 3 = 18 := sorry\n"
+        "  exact h2.trans (h1.symm ▸ rfl)\n"
+    )
+    assert _sanitize_scaffold(indented).splitlines()[-1] == "  exact h2"
+
+    # Clean chain close and ``And.intro`` conjunction close carry no ``▸`` — untouched.
+    clean_chain = "have h1 : 20 - 5 = 15 := sorry\nhave h2 : 15 + 3 = 18 := sorry\nexact h2"
+    assert _sanitize_scaffold(clean_chain) == clean_chain
+    conj = "have h1 : a := sorry\nhave h2 : b := sorry\nexact ⟨h1, h2⟩"
+    assert _sanitize_scaffold(conj) == conj
+
+
+def test_sanitize_lean_source_scrubs_named_example_and_mathlibisms():
+    """A synthesized proof named ``example`` (a keyword, not an identifier) is rewritten to
+    the valid anonymous ``example : T := p``; imports and ``lemma`` are also scrubbed."""
+    from hyperion.crews.lean_handlers import _sanitize_lean_source
+
+    # ``lemma example : T := p`` and ``theorem example : T := p`` both → anonymous example.
+    assert _sanitize_lean_source("lemma example : 20 - 5 = 15 := rfl") == "example : 20 - 5 = 15 := rfl"
+    assert _sanitize_lean_source("theorem example : a = a := rfl") == "example : a = a := rfl"
+    # A genuinely-named decl keeps its name; bare ``lemma`` → ``theorem``.
+    assert _sanitize_lean_source("lemma foo : a = a := rfl") == "theorem foo : a = a := rfl"
+    # Import lines are stripped; a clean anonymous example passes through; idempotent.
+    out = _sanitize_lean_source("import Mathlib\nlemma example : True := trivial")
+    assert out == "example : True := trivial"
+    assert _sanitize_lean_source(out) == out
+
+
 @pytest.mark.anyio
 async def test_shipped_lean_prove_mocked_workflow_runs_with_native_decompose(tmp_path):
     """The shipped workflow uses the decomposer plan node before native prover stages."""
@@ -844,6 +891,24 @@ def test_assemble_reduces_repair_winner_to_bare_proof():
     out = _assemble(scaffold, [Subtask(id="h1", lean_type="R")], {"h1": repair_win})
     assert "have h1 : R := by exact r_proof" in out
     assert "theorem t : R" not in out          # the declaration header is gone — well-formed
+
+
+def test_assemble_collapses_multiline_pathA_proof_into_have_hole():
+    """A multi-line Path-A winner block is collapsed to a single-line ``by …; …`` RHS so its
+    inner lines don't inherit the scaffold's shallow indent and break the ``have``'s ``by``
+    nesting (the P3-bare ``expected indented tactic sequence`` regression)."""
+    from hyperion.crews.lean_handlers import _assemble
+    from hyperion.crews.plan_contract import Subtask
+
+    # The shape a Path-A winner stores: a multi-line tactic block.
+    win = {"proof_term": "by\n  have h : 2 ^ 3 = 8 := rfl\n  first | exact h | apply h"}
+    scaffold = "example : T := by\n  have h1 : 2 ^ 3 = 8 := sorry\n  exact h1"
+    out = _assemble(scaffold, [Subtask(id="h1", lean_type="2 ^ 3 = 8")], {"h1": win})
+    # The substituted proof occupies exactly the one ``have h1`` line — no orphaned, shallow
+    # inner ``have h`` / ``first`` lines that would parse as siblings of ``have h1``.
+    have_line = next(l for l in out.splitlines() if l.lstrip().startswith("have h1"))
+    assert "by have h : 2 ^ 3 = 8 := rfl; first | exact h | apply h" in have_line
+    assert not any(l.lstrip().startswith("first |") for l in out.splitlines())
 
 
 # ---------------------------------------------------------------------------

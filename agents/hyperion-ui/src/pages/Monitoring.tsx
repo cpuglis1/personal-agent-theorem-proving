@@ -69,6 +69,11 @@ function pct(rate: number): string {
   return `${Math.round(rate * 100)}%`;
 }
 
+function fmtCost(cost: number): string {
+  if (cost > 0 && cost < 0.001) return "< $0.001";
+  return `$${cost.toFixed(3)}`;
+}
+
 /**
  * Horizontal usage meter for a single token budget.
  *
@@ -139,6 +144,13 @@ function AgentTile({ a }: { a: AgentMetric }) {
           <div className={`font-mono ${a.error_rate > 0 ? "text-rose-300" : ""}`}>
             {pct(a.error_rate)}
           </div>
+        </div>
+      </div>
+
+      <div>
+        <div className="text-xs text-slate-500">cost</div>
+        <div className="font-mono text-sm text-emerald-300">
+          {fmtCost(a.tokens.cost_usd ?? 0)}
         </div>
       </div>
 
