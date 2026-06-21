@@ -69,32 +69,52 @@ def _split_frontmatter(text: str) -> tuple[Optional[str], str]:
         return m.group(1), ""
     return None, text
 
-# A *top-level* (no leading indent) ``key: value`` line whose plain-scalar value itself
-# contains a colon — e.g. ``original_request: Prove in Lean 4: ... ``. To YAML the second
-# colon reads as a nested mapping ("mapping values are not allowed here") and the whole
-# block fails to parse. The negative lookahead skips values the planner already quoted or
-# that open a block/flow/anchor (``| > " ' [ { & *``), and the leading-anchor ``^`` means
-# indented block-scalar content (e.g. the ``scaffold: |`` body, which legitimately holds
-# colons) is never touched.
-_SCALAR_COLON_RE = re.compile(r"""^([A-Za-z_][\w-]*):[ \t]+(?![|>&*"'\[{])(.*:.*\S)\s*$""")
+# A ``key: value`` line — at any indent, optionally a ``- `` list-item mapping — whose
+# plain-scalar value itself contains a colon (e.g. ``original_request: Prove in Lean 4: …``
+# or, nested under an option, ``summary: split into two steps: a then b``). To YAML the
+# second colon reads as a nested mapping ("mapping values are not allowed here") and the
+# whole block fails to parse — taking the typed sub-goals down with it. The negative
+# lookahead skips values the planner already quoted or that open a block/flow/anchor
+# (``| > " ' [ { & *``). Block-scalar bodies (the ``scaffold: |`` proof text, whose
+# ``have h : T := …`` lines also look like ``key: value``) are excluded structurally in
+# :func:`_sanitize_frontmatter`, not by this regex.
+_SCALAR_COLON_RE = re.compile(
+    r"""^(?P<prefix>\s*(?:-\s+)?)(?P<key>[A-Za-z_][\w-]*):[ \t]+(?![|>&*"'\[{])(?P<val>.*:.*\S)\s*$"""
+)
+# A line that *introduces* a block scalar (``key: |`` / ``key: >`` with optional chomping
+# indicator), at any indent and possibly as a list item. Its body is every following line
+# that is blank or indented deeper than the introducer — and must be left untouched.
+_BLOCK_SCALAR_RE = re.compile(r"""^(?P<indent>\s*)(?:-\s+)?[A-Za-z_][\w-]*:[ \t]*[|>][+-]?\d*[ \t]*$""")
 
 
 def _sanitize_frontmatter(raw: str) -> str:
-    """Quote top-level scalar values that carry an unescaped colon.
+    """Quote scalar values (top-level OR nested) that carry an unescaped colon.
 
-    A recovery pass for the common planner failure where an LLM copies a request like
-    ``Prove in Lean 4: ...`` verbatim into a frontmatter scalar, producing YAML that
-    ``safe_load`` rejects. We re-emit only the offending *top-level* lines as double-
-    quoted scalars (escaping any embedded quote/backslash), leaving every other line —
-    lists, block scalars, nested mappings — byte-for-byte unchanged.
+    A recovery pass for the common planner failure where an LLM writes a value like
+    ``Prove in Lean 4: ...`` or ``summary: two steps: a then b`` into a frontmatter scalar,
+    producing YAML that ``safe_load`` rejects. We re-emit only the offending ``key: value``
+    lines as double-quoted scalars (escaping any embedded quote/backslash), at any indent,
+    while structurally skipping ``|``/``>`` block-scalar bodies (e.g. the ``scaffold`` proof
+    text, which legitimately holds colons) so they pass through byte-for-byte.
     """
     out: list[str] = []
+    block_indent: Optional[int] = None  # indent of an open block scalar's introducer, or None
     for line in raw.splitlines():
+        if block_indent is not None:
+            # Inside a block scalar: body is blank lines or deeper-indented content.
+            if line.strip() == "" or (len(line) - len(line.lstrip())) > block_indent:
+                out.append(line)
+                continue
+            block_indent = None  # dedented to introducer level or shallower → block closed
+        bm = _BLOCK_SCALAR_RE.match(line)
+        if bm:
+            block_indent = len(bm.group("indent"))
+            out.append(line)
+            continue
         m = _SCALAR_COLON_RE.match(line)
         if m:
-            key, val = m.group(1), m.group(2).rstrip()
-            val = val.replace("\\", "\\\\").replace('"', '\\"')
-            out.append(f'{key}: "{val}"')
+            val = m.group("val").rstrip().replace("\\", "\\\\").replace('"', '\\"')
+            out.append(f'{m.group("prefix")}{m.group("key")}: "{val}"')
         else:
             out.append(line)
     return "\n".join(out)

@@ -29,7 +29,7 @@ from crewai import Agent, Crew, Process, Task
 from hyperion.agents.registry import AgentRecord, build_tools, load_agent
 from hyperion.config import settings
 from hyperion.crews.plan_contract import parse_plan, update_plan_frontmatter
-from hyperion.crews.workflows import WorkflowNode, topo_sort
+from hyperion.crews.workflows import WorkflowNode, expand_per_subgoal, topo_sort
 from hyperion.llms import make_agent_llm
 
 logger = logging.getLogger(__name__)
@@ -288,6 +288,15 @@ def _plan_task(request: str, agent: Agent, context_brief: str | None = None) -> 
         description=_esc(
             f"The user has requested:\n\n{request}\n"
             f"{brief_block}\n"
+            "If this is a Lean theorem-proving/decomposition task for the lean-prove "
+            "workflow, the runner fans the prover chain out over the plan's active "
+            "sub-goals, so plan.md may use one OR several active sub-goals. Decompose into "
+            "as many `have <id> : <proposition> := sorry` steps as the proof needs. Each "
+            "sub-goal is proved independently and then composed, so every `have` type must "
+            "be self-contained (provable without the other haves) and the closing lines "
+            "must derive the target from them. For natural-language math/word problems, "
+            "first formalize the final answer as a Lean proposition; use a single "
+            "final-proposition sub-goal when the goal is trivial.\n"
             "Create a structured plan in plan.md in the workspace."
         ),
         expected_output="plan.md written to the task workspace.",
@@ -508,7 +517,7 @@ def _strip_fenced_block(raw: str) -> str:
     return (match.group("body") if match else raw).strip()
 
 
-def _write_fallback_plan(task_id: str, result: Any) -> str | None:
+def _write_fallback_plan(task_id: str, result: Any, *, overwrite: bool = False) -> str | None:
     """Persist plan.md when the planner returned it as chat output.
 
     Agents are instructed to call ``workspace_write``, but live LLMs sometimes return the
@@ -516,7 +525,9 @@ def _write_fallback_plan(task_id: str, result: Any) -> str | None:
     materialize that answer if the tool write did not happen.
     """
     plan_path = settings.tasks_dir / task_id / "plan.md"
-    if plan_path.exists() or result is None:
+    if plan_path.exists() and not overwrite:
+        return str(plan_path)
+    if result is None:
         return str(plan_path) if plan_path.exists() else None
     raw = _raw_stage_output(result)
     if not raw:
@@ -532,6 +543,100 @@ def _write_fallback_plan(task_id: str, result: Any) -> str | None:
     except Exception as exc:
         logger.warning("Failed to write fallback plan.md: %s", exc)
         return None
+
+
+# ---------------------------------------------------------------------------
+# Path-B synthesizer: the runner owns the prompt + candidate capture so the
+# hand-off never depends on the agent calling the right tool (it is tool-less).
+# ---------------------------------------------------------------------------
+
+_LEMMA_SYNTHESIZER = "lemma_synthesizer"
+
+
+def _synth_subgoal_id(task_id: str, node: WorkflowNode) -> str:
+    """The sub-goal id a synthesize node serves — mirrors ``lean_handlers._subgoal_id``.
+
+    A bare sub-goal id in ``instruction`` (hand-fanned workflows) wins; else the
+    ``<node>__<sg>`` clone suffix the runtime fan-out adds; else the first active
+    sub-goal (single-chain happy path), or ``"0"`` when the plan has no typed sub-goals.
+    """
+    subs = parse_plan(task_id).active_subtasks()
+    ids = {s.id for s in subs}
+    if node.instruction and node.instruction.strip() in ids:
+        return node.instruction.strip()
+    if "__" in node.id:
+        return node.id.rsplit("__", 1)[-1]
+    return subs[0].id if subs else "0"
+
+
+def _synthesize_instruction(task_id: str, node: WorkflowNode, request: str) -> str:
+    """Build the Path-B synthesis prompt for ``node``, with its exact sub-goal embedded.
+
+    The runner owns this prompt (rather than the static node instruction) so the tool-less
+    synthesizer never has to read plan.md, and so expanded and single-chain runs share one
+    contract. The goal type comes from the plan's typed sub-goal, degrading to the prose
+    request when the plan has none."""
+    from hyperion.crews.lean_handlers import _prose_to_goal_type  # local: avoid import cycle
+
+    sg_id = _synth_subgoal_id(task_id, node)
+    subs = parse_plan(task_id).active_subtasks()
+    lean_type = next(
+        (s.lean_type for s in subs if s.id == sg_id and s.lean_type), ""
+    ) or _prose_to_goal_type(request)
+    return (
+        "Prove this Lean 4 proposition with a complete, self-contained proof and NO "
+        f"`sorry`:\n\n    {lean_type}\n\n"
+        "Write a `theorem`/`lemma` whose type is exactly that proposition and whose proof "
+        "closes it. Use ONLY core Lean 4 (Nat and tactics like rfl, simp, decide, omega, "
+        "induction). Add NO `import` lines — Mathlib is unavailable, so any import fails "
+        "verification. The `source` field must be just the declaration: no import lines, no "
+        "leading blank lines, and no characters after the final proof token. Call no tools; "
+        "return ONLY this JSON object as your entire final answer:\n"
+        '{"source": <full Lean source>, "statement": <the theorem/lemma signature line>, '
+        '"proof_term": <the proof>, "origin": "synthesize"}'
+    )
+
+
+def _extract_json_object(text: str) -> dict | None:
+    """First balanced ``{...}`` in ``text`` that parses as a JSON object, or None.
+
+    Uses ``raw_decode`` (string-aware) so braces inside Lean source — ``by { rfl }``,
+    set-builder, anonymous constructors — don't fool a naive brace counter, and
+    ``strict=False`` so literal newlines inside the multi-line ``source`` are accepted."""
+    if not text:
+        return None
+    decoder = json.JSONDecoder(strict=False)
+    start = text.find("{")
+    while start != -1:
+        try:
+            obj, _end = decoder.raw_decode(text, start)
+            if isinstance(obj, dict):
+                return obj
+        except ValueError:
+            pass
+        start = text.find("{", start + 1)
+    return None
+
+
+def _capture_lemma_candidate(task_id: str, node: WorkflowNode, result: Any) -> None:
+    """Persist the synthesizer's final-answer JSON to ``candidate_b:<sg>`` deterministically.
+
+    The tool-less synthesizer returns its candidate as plain text, so the runner — not a
+    tool call the agent might skip or misdirect — is the load-bearing write. No-op when the
+    key is already populated (e.g. the eval harness staged it) or the answer carries no
+    parseable ``source``; verify then simply finds no Path-B candidate, exactly as before.
+    """
+    from hyperion.memory.context_store import context_get, context_put
+
+    sg_id = _synth_subgoal_id(task_id, node)
+    key = f"candidate_b:{sg_id}"
+    if context_get(task_id, key):
+        return
+    cand = _extract_json_object(_raw_stage_output(result))
+    if cand and cand.get("source"):
+        cand.setdefault("origin", "synthesize")
+        context_put(task_id, key, cand)
+        logger.info("Captured Path-B candidate for sub-goal %s from synthesizer output", sg_id)
 
 
 # ---------------------------------------------------------------------------
@@ -808,13 +913,18 @@ async def _execute_workflow(
     progress_callback: Callable[[str], None] | None,
     depth: int = 0,
     run_meta: bool = True,
+    expanded: bool = False,
 ) -> dict[str, Any]:
     """Run a workflow's nodes wave-by-wave from ``start_index``. Shared by the
     straight-through path (start 0) and the post-approval resume path. Within
     each wave, nodes that share the same upstream dependencies run concurrently
     via ``asyncio.gather``; waves execute sequentially (each wave waits for the
     previous to finish). Pauses before any gated node; returns done/failed/
-    awaiting_* dicts the API persists."""
+    awaiting_* dicts the API persists.
+
+    ``expanded`` marks a re-entry whose ``workflow`` has already been fanned out
+    per sub-goal (see :func:`expand_per_subgoal`); it suppresses a second expansion
+    when ``skeleton_check`` re-runs on the expanded graph."""
     ordered = topo_sort(workflow.nodes)
     waves = _wave_groups(ordered)
     implicit_gate_id = _implicit_gate_node_id(ordered)
@@ -933,10 +1043,19 @@ async def _execute_workflow(
                     return n.id, res
                 rec = load_agent(n.agent)
                 agt = build_agent(rec, task_id, node_id=n.id)
-                tsk = _node_task(n, rec, agt, request, context_brief, fb)
+                # Path-B synthesizer: the runner injects the per-sub-goal prompt and
+                # captures the candidate, so the hand-off never rides on a tool call.
+                is_synth = n.agent == _LEMMA_SYNTHESIZER
+                task_node = (
+                    n.model_copy(update={"instruction": _synthesize_instruction(task_id, n, request)})
+                    if is_synth else n
+                )
+                tsk = _node_task(task_node, rec, agt, request, context_brief, fb)
                 result = await _run_stage(
                     task_id, request, n.id, [agt], [tsk], progress_callback, deadline
                 )
+                if is_synth:
+                    _capture_lemma_candidate(task_id, n, result)
                 return n.id, result
 
             def _record_node(n: WorkflowNode) -> None:
@@ -976,6 +1095,104 @@ async def _execute_workflow(
                 wave_results = dict(wave_pairs)
                 for node in firing:
                     _record_node(node)
+
+            # ---- Prover skeleton gate: failed scaffold revises the decomposer ----
+            # Phase 1's Lean skeleton check replaces the old "critic needs_review"
+            # signal for prover plans. A real kernel failure means the plan/formalization
+            # is malformed, so do not fall through to retrieve/synthesize. Re-run the
+            # plan node(s) with the Lean diagnostics, then restart from skeleton_check.
+            failed_skeletons = [
+                (node_id, res)
+                for node_id, res in wave_results.items()
+                if isinstance(res, dict)
+                and res.get("handler") == "skeleton_check"
+                and res.get("ok") is False
+            ]
+            if failed_skeletons:
+                if revise_count >= _MAX_REVISIONS:
+                    errors = failed_skeletons[0][1].get("errors") or []
+                    return _failed(
+                        task_id,
+                        "skeleton_check failed after revision budget: "
+                        + "; ".join(str(e) for e in errors),
+                        routing,
+                    )
+                plan_nodes = [n for n in ordered if n.kind == "plan"]
+                if not plan_nodes:
+                    return _failed(task_id, "skeleton_check failed and no plan node can revise it", routing)
+                errors = failed_skeletons[0][1].get("errors") or []
+                revise_request = (
+                    request
+                    + "\n\nRevise the Lean decomposition. The previous scaffold failed "
+                    "skeleton type-checking with these Lean diagnostics:\n"
+                    + "\n".join(str(e) for e in errors)
+                    + "\nReturn a corrected plan.md with a valid formal Lean target, "
+                    "a have-chain scaffold, and exact Lean subgoal types."
+                )
+                if progress_callback:
+                    progress_callback(
+                        f"[skeleton_check] failed; revising decomposer "
+                        f"({revise_count + 1}/{_MAX_REVISIONS})"
+                    )
+                for pn in plan_nodes:
+                    record = load_agent(pn.agent)
+                    agent = build_agent(record, task_id, node_id=pn.id)
+                    tsk = _node_task(pn, record, agent, revise_request, context_brief, feedback)
+                    plan_result = await _run_stage(
+                        task_id, request, pn.id, [agent], [tsk], progress_callback, deadline
+                    )
+                    _write_fallback_plan(task_id, plan_result, overwrite=True)
+                ids = [n.id for n in ordered]
+                skeleton_index = ids.index(failed_skeletons[0][0]) if failed_skeletons[0][0] in ids else 0
+                return await _execute_workflow(
+                    task_id, request, workflow,
+                    start_index=skeleton_index, skip_first_gate=True, hitl=hitl,
+                    revise_count=revise_count + 1, caps=caps,
+                    context_brief=context_brief, deadline=deadline, wall=wall,
+                    progress_callback=progress_callback, depth=depth, run_meta=run_meta,
+                )
+
+            # ---- Prover fan-out: a passed skeleton with >1 sub-goal needs one
+            # retrieve/synthesize/verify chain PER sub-goal. The shipped DAG ships a
+            # single chain; expand it now that the plan (and its active sub-goals) is
+            # known, then re-enter from the cloned roots. Single-sub-goal plans (and
+            # non-prover workflows) leave the DAG untouched. ``expanded`` guards against
+            # re-expanding when skeleton_check re-runs on the already-fanned graph.
+            if not expanded and any(
+                isinstance(res, dict)
+                and res.get("handler") == "skeleton_check"
+                and res.get("ok") is True
+                for res in wave_results.values()
+            ):
+                subs = parse_plan(task_id).active_subtasks()
+                if len(subs) > 1:
+                    fanned = expand_per_subgoal(
+                        workflow, [(s.id, s.lean_type or "") for s in subs]
+                    )
+                    if fanned is not None:
+                        exp_ordered = topo_sort(fanned.nodes)
+                        # Start at the first cloned root (upstream == [skeleton_check]),
+                        # so decompose + skeleton_check (already run) are skipped.
+                        start_id = next(
+                            (n.id for n in exp_ordered
+                             if "skeleton_check" in n.upstream),
+                            None,
+                        )
+                        if start_id is not None:
+                            if progress_callback:
+                                progress_callback(
+                                    f"[expand] fanning prover chain over "
+                                    f"{len(subs)} sub-goals"
+                                )
+                            return await _execute_workflow(
+                                task_id, request, fanned,
+                                start_index=[n.id for n in exp_ordered].index(start_id),
+                                skip_first_gate=True, hitl=hitl,
+                                revise_count=revise_count, caps=caps,
+                                context_brief=context_brief, deadline=deadline, wall=wall,
+                                progress_callback=progress_callback, depth=depth,
+                                run_meta=run_meta, expanded=True,
+                            )
 
             # ---- Post-plan checks: affordance pause + record context brief --
             for node in firing:

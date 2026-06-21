@@ -209,14 +209,36 @@ def _indent_tactic_body(body: str) -> str:
     return "\n".join(f"  {line}" if line.strip() else line for line in body.strip().splitlines())
 
 
+# Lean-3 / Mathlib habit LLM decomposers reliably emit: a comma separating tactics
+# (``have h : T := sorry,``). Lean 4 tactic blocks are newline/``;``-separated — a comma
+# at end of a tactic line makes the kernel reject the whole block ("unexpected token ','").
+_TRAILING_COMMA_RE = re.compile(r",[ \t]*$", re.MULTILINE)
+
+
+def _sanitize_scaffold(scaffold: str) -> str:
+    """Scrub the trailing-comma tactic separator decomposers carry over from Lean 3.
+
+    Mechanical and idempotent (mirrors :func:`_sanitize_lean_source`): strips a comma at
+    the end of a tactic line so an otherwise-valid have-chain skeleton isn't failed by a
+    dialect tic the prompt can't reliably suppress. Scoped to *end-of-line* commas, which
+    in a have-chain scaffold are always the stray separator (commas inside terms/types sit
+    mid-line), so a clean scaffold passes through unchanged.
+    """
+    if not scaffold:
+        return scaffold
+    return _TRAILING_COMMA_RE.sub("", scaffold)
+
+
 def _scaffold_as_command(scaffold: str, goal_type: str) -> str:
     """Coerce a planner scaffold into a Lean command.
 
     Live planners often emit the body of a ``by`` proof (`have …; exact …`) rather than
     a top-level declaration. The verifier runs files, so that body must be wrapped in an
-    ``example : goal := by`` command for skeleton/final checks.
+    ``example : goal := by`` command for skeleton/final checks. The scaffold is scrubbed of
+    Lean-3 trailing-comma separators first (see :func:`_sanitize_scaffold`) so the same
+    fix-up covers both the skeleton check and the final ``bank`` assembly.
     """
-    s = (scaffold or "").strip()
+    s = _sanitize_scaffold((scaffold or "").strip())
     if not s:
         return s
     if _looks_like_declaration(s):
@@ -592,15 +614,18 @@ async def skeleton_check_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     scaffold = parse_plan(ctx.task_id).scaffold
     if not scaffold:
         ctx.put("skeleton_ok", None)
+        ctx.put("skeleton_errors", ["no scaffold in plan"])
         return {"handler": "skeleton_check", "ok": None, "reason": "no scaffold in plan"}
     sg_id = _subgoal_id(ctx)
     res = verify_lean(_scaffold_as_command(scaffold, _goal_type(ctx, sg_id)), mode="skeleton")
     if not res["infra_ok"]:
         # Inconclusive ≠ failure: degrade to "proceed" rather than blocking on a blip.
         ctx.put("skeleton_ok", None)
+        ctx.put("skeleton_errors", res["errors"])
         return {"handler": "skeleton_check", "ok": None, "infra_ok": False,
                 "errors": res["errors"]}
     ctx.put("skeleton_ok", res["ok"])
+    ctx.put("skeleton_errors", res["errors"])
     return {"handler": "skeleton_check", "ok": res["ok"], "errors": res["errors"]}
 
 
@@ -1260,6 +1285,17 @@ async def bank_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
         result_path = settings.tasks_dir / ctx.task_id / "artifacts" / "result.lean"
         result_path.parent.mkdir(parents=True, exist_ok=True)
         result_path.write_text(assembled, encoding="utf-8")
+        ctx.put("final_verify", {
+            "ok": final_ok,
+            "infra_ok": res["infra_ok"],
+            "errors": final_errors,
+            "result_path": str(result_path),
+        })
+        if final_ok is not True:
+            raise ProofFailed(
+                "assembled result.lean failed final verification: "
+                + "; ".join(final_errors or ["verifier unavailable"])
+            )
 
     # Store each winning lemma (loud writes — surface failures). Prefer the ABSTRACTED
     # form (§Phase 5): the abstractor's most-general type-checking generalization is what

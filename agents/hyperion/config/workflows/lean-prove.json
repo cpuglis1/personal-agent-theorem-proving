@@ -5,8 +5,8 @@
   "nodes": [
     {
       "id": "decompose",
-      "handler": "lean_decompose",
-      "kind": "native",
+      "agent": "decomposer",
+      "kind": "plan",
       "upstream": [],
       "gate_before": false,
       "instruction": null,

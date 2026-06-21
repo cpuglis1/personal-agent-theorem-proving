@@ -474,3 +474,136 @@ def _check_subworkflow_acyclic(
             walk(child, (*path, wf_id))
 
     walk(record.id, ())
+
+
+# ---------------------------------------------------------------------------
+# Per-sub-goal DAG expansion (prover fan-out)
+# ---------------------------------------------------------------------------
+
+
+def _forward_reachable(nodes: list[WorkflowNode], roots: set[str]) -> set[str]:
+    """Ids reachable by following edges *downstream* from ``roots`` (exclusive)."""
+    children: dict[str, list[str]] = {n.id: [] for n in nodes}
+    for n in nodes:
+        for u in n.upstream:
+            children.setdefault(u, []).append(n.id)
+    seen: set[str] = set()
+    stack = [c for r in roots for c in children.get(r, [])]
+    while stack:
+        nid = stack.pop()
+        if nid in seen:
+            continue
+        seen.add(nid)
+        stack.extend(children.get(nid, []))
+    return seen
+
+
+def _backward_reachable(nodes: list[WorkflowNode], sinks: set[str]) -> set[str]:
+    """Ids reachable by following ``upstream`` edges from ``sinks`` (exclusive)."""
+    by_id = {n.id: n for n in nodes}
+    seen: set[str] = set()
+    stack = [u for s in sinks for u in by_id[s].upstream if s in by_id]
+    while stack:
+        nid = stack.pop()
+        if nid in seen:
+            continue
+        seen.add(nid)
+        stack.extend(by_id[nid].upstream if nid in by_id else [])
+    return seen
+
+
+def expand_per_subgoal(
+    record: WorkflowRecord,
+    subgoals: list[tuple[str, str]],
+    *,
+    head_id: str = "skeleton_check",
+    tail_id: str = "bank",
+) -> Optional[WorkflowRecord]:
+    """Clone the per-sub-goal node chain once per sub-goal so a multi-``have`` scaffold
+    is actually executable on the otherwise single-chain prover DAG.
+
+    The "template" chain is every node strictly between ``head_id`` (``skeleton_check``)
+    and ``tail_id`` (``bank``) — retrieve‖synthesize→verify→compare/escalation→abstract/
+    bank_concept. Each template node is cloned per sub-goal with id ``<id>__<sg>`` and its
+    ``instruction`` set to the sub-goal id: native handlers read it via ``_subgoal_id``,
+    and the ``synthesize`` agent node is resolved by the runner, which owns the per-sub-goal
+    synthesis prompt and the deterministic ``candidate_b:<sg>`` capture. ``bank``'s template
+    upstreams fan in over all clones, so it only assembles once
+    every sub-goal is discharged.
+
+    Returns ``None`` (caller keeps the original DAG) when expansion does not apply:
+    fewer than two sub-goals, missing head/tail, duplicate/empty ids, or no template
+    nodes between head and tail.
+    """
+    by_id = {n.id: n for n in record.nodes}
+    if head_id not in by_id or tail_id not in by_id:
+        return None
+    sg_ids = [sg for sg, _ in subgoals]
+    if len(sg_ids) < 2 or len(set(sg_ids)) != len(sg_ids) or any(not sg for sg in sg_ids):
+        return None
+
+    template_ids = (
+        _forward_reachable(record.nodes, {head_id})
+        & _backward_reachable(record.nodes, {tail_id})
+    )
+    if not template_ids:
+        return None
+
+    # Already fanned out: a workflow that hand-authored one chain per sub-goal carries
+    # a sub-goal id in each template node's ``instruction`` (e.g. ``retrieve_h1``,
+    # ``instruction="h1"``). Re-expanding it would clone each existing chain N times and
+    # mis-assign sub-goal ids. The shipped single chain leaves native instructions unset
+    # and the synthesize instruction is a prompt, never a bare sub-goal id.
+    sg_set = set(sg_ids)
+    if any(
+        (by_id[t].instruction or "").strip() in sg_set for t in template_ids
+    ):
+        return None
+
+    new_nodes: list[WorkflowNode] = []
+    # 1. Fixed nodes (head, decompose, anything outside the template) pass through;
+    #    the tail fans its template upstreams in over every clone.
+    for n in record.nodes:
+        if n.id in template_ids:
+            continue
+        if n.id == tail_id:
+            fanned: list[str] = []
+            for u in n.upstream:
+                if u in template_ids:
+                    fanned.extend(f"{u}__{sg}" for sg in sg_ids)
+                else:
+                    fanned.append(u)
+            new_nodes.append(n.model_copy(update={"upstream": fanned}))
+        else:
+            new_nodes.append(n.model_copy())
+
+    # 2. One clone of each template node per sub-goal; intra-template upstreams are
+    #    rewired to the same sub-goal's clones, head/external upstreams kept as-is.
+    for sg_index, (sg, _lean_type) in enumerate(subgoals):
+        for n in record.nodes:
+            if n.id not in template_ids:
+                continue
+            upstream = [
+                f"{u}__{sg}" if u in template_ids else u for u in n.upstream
+            ]
+            # Every template clone carries its sub-goal id in ``instruction``: native
+            # handlers read it via ``_subgoal_id``; the synthesize agent node is resolved
+            # by the runner, which owns the per-sub-goal prompt + candidate capture.
+            instruction = sg
+            position = n.position
+            if position is not None:
+                position = position.model_copy(
+                    update={"x": position.x + 320.0 * sg_index}
+                )
+            new_nodes.append(
+                n.model_copy(
+                    update={
+                        "id": f"{n.id}__{sg}",
+                        "upstream": upstream,
+                        "instruction": instruction,
+                        "position": position,
+                    }
+                )
+            )
+
+    return record.model_copy(update={"nodes": new_nodes})

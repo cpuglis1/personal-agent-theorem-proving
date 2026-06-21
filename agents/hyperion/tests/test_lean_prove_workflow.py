@@ -20,6 +20,8 @@ skipped where ``lake`` is absent).
 from __future__ import annotations
 
 import contextlib
+import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -29,6 +31,7 @@ from lean_mock import mock_lean
 from hyperion.config import settings
 from hyperion.crews import lean_handlers, runner
 from hyperion.crews.lean_handlers import (
+    ProofFailed,
     ProofOutcome,
     lean_decompose_handler,
     abstract_handler,
@@ -117,12 +120,52 @@ async def test_native_decomposer_scaffold_wraps_for_skeleton_check(tmp_path):
     assert lean.call_args.kwargs["mode"] == "skeleton"
 
 
+def test_scaffold_lean3_trailing_commas_are_scrubbed():
+    """A decomposer scaffold with Lean-3 ``:= sorry,`` tactic separators is scrubbed to a
+    valid Lean 4 have-chain before skeleton/bank (the kernel rejects the comma form)."""
+    from hyperion.crews.lean_handlers import _scaffold_as_command, _sanitize_scaffold
+
+    scaffold = (
+        "example : 18 - 7 + 4 = 15 := by\n"
+        "  have h1 : 18 - 7 = 11 := sorry,\n"
+        "  have h2 : 11 + 4 = 15 := sorry,\n"
+        "  exact h2\n"
+    )
+    out = _scaffold_as_command(scaffold, "18 - 7 + 4 = 15")
+    assert "," not in out
+    assert "have h1 : 18 - 7 = 11 := sorry" in out
+    # Commas inside terms/types (mid-line) are preserved; clean scaffolds pass through.
+    keep = "have h : a = b := ⟨x, y⟩\nexact h"
+    assert _sanitize_scaffold(keep) == keep
+
+
 @pytest.mark.anyio
 async def test_shipped_lean_prove_mocked_workflow_runs_with_native_decompose(tmp_path):
-    """The shipped workflow no longer needs the decomposer agent in the smoke path."""
+    """The shipped workflow uses the decomposer plan node before native prover stages."""
 
     async def _fake_stage(task_id, request, stage, agents, tasks, cb, deadline):
-        if stage == "synthesize":
+        if stage == "decompose":
+            base = settings.tasks_dir / task_id
+            base.mkdir(parents=True, exist_ok=True)
+            (base / "plan.md").write_text(
+                "---\n"
+                f"task_id: {task_id}\n"
+                "task_type: code\n"
+                "selected_option: a\n"
+                "scaffold: |\n"
+                "  have h1 : True := sorry\n"
+                "  exact h1\n"
+                "options:\n"
+                "  - id: a\n"
+                "    summary: direct\n"
+                "    subtasks:\n"
+                "      - id: h1\n"
+                "        description: prove True\n"
+                "        lean_type: \"True\"\n"
+                "---\n",
+                encoding="utf-8",
+            )
+        elif stage == "synthesize":
             context_put(task_id, "candidate_b", {
                 "source": "theorem t_h1 : True := trivial",
                 "statement": "theorem t_h1 : True",
@@ -159,7 +202,28 @@ async def test_shipped_workflow_escalates_stall_and_banks_concept(tmp_path):
     final bank assembles through that proof."""
 
     async def _fake_stage(task_id, request, stage, agents, tasks, cb, deadline):
-        if stage == "synthesize":
+        if stage == "decompose":
+            base = settings.tasks_dir / task_id
+            base.mkdir(parents=True, exist_ok=True)
+            (base / "plan.md").write_text(
+                "---\n"
+                f"task_id: {task_id}\n"
+                "task_type: code\n"
+                "selected_option: a\n"
+                "scaffold: |\n"
+                "  have h1 : True := sorry\n"
+                "  exact h1\n"
+                "options:\n"
+                "  - id: a\n"
+                "    summary: direct\n"
+                "    subtasks:\n"
+                "      - id: h1\n"
+                "        description: prove True\n"
+                "        lean_type: \"True\"\n"
+                "---\n",
+                encoding="utf-8",
+            )
+        elif stage == "synthesize":
             context_put(task_id, "candidate_b", {
                 "source": "theorem t_h1 : True := by sorry",
                 "statement": "theorem t_h1 : True",
@@ -218,6 +282,68 @@ async def test_shipped_workflow_escalates_stall_and_banks_concept(tmp_path):
     assert lemma_store.call_count == 1
     text = (tmp_path / "native_escalate" / "artifacts" / "result.lean").read_text(encoding="utf-8")
     assert "sorry" not in text
+
+
+@pytest.mark.anyio
+async def test_skeleton_failure_revises_decomposer_before_sourcing(tmp_path):
+    """A bad formalization loops back to decompose instead of falling through to Path A/B."""
+    calls: list[str] = []
+
+    async def _fake_stage(task_id, request, stage, agents, tasks, cb, deadline):
+        calls.append(stage)
+        if stage == "decompose":
+            bad = calls.count("decompose") == 1
+            lean_type = "not Lean English prompt" if bad else "True"
+            base = settings.tasks_dir / task_id
+            base.mkdir(parents=True, exist_ok=True)
+            (base / "plan.md").write_text(
+                "---\n"
+                f"task_id: {task_id}\n"
+                "task_type: code\n"
+                "selected_option: a\n"
+                "scaffold: |\n"
+                f"  have h1 : {lean_type} := sorry\n"
+                "  exact h1\n"
+                "options:\n"
+                "  - id: a\n"
+                "    summary: direct\n"
+                "    subtasks:\n"
+                "      - id: h1\n"
+                "        description: prove target\n"
+                f"        lean_type: {lean_type!r}\n"
+                "---\n",
+                encoding="utf-8",
+            )
+        elif stage == "synthesize":
+            context_put(task_id, "candidate_b", {
+                "source": "theorem t_h1 : True := trivial",
+                "statement": "theorem t_h1 : True",
+                "proof_term": "trivial",
+                "origin": "synthesize",
+            })
+
+    def _verify(src, mode="full", **kwargs):
+        if "not Lean English prompt" in src:
+            return {"ok": False, "errors": ["bad formalization"], "infra_ok": True}
+        return {"ok": True, "errors": [], "infra_ok": True}
+
+    with patch.object(settings, "tasks_dir", tmp_path), \
+         patch.object(runner, "build_agent", MagicMock()), \
+         patch.object(runner, "load_agent", MagicMock()), \
+         patch.object(runner, "discover_context", MagicMock(return_value=None)), \
+         patch.object(runner, "_node_task", MagicMock()), \
+         patch.object(runner, "_run_stage", new=_fake_stage), \
+         patch.object(lean_handlers, "verify_lean", _verify), \
+         patch.object(lean_handlers, "retrieve_applicable_lemmas", lambda goal, **k: []), \
+         patch.object(lean_handlers, "propose_abstraction", AsyncMock(return_value=[])), \
+         patch("hyperion.memory.lemma_bank.store_lemma", MagicMock(return_value={"ok": True, "id": "pt", "error": None})), \
+         patch("hyperion.server.meta_tasks.run_meta_tasks", new=AsyncMock()):
+        result = await runner.run_task("revise_skeleton", "word problem", workflow="lean-prove")
+
+    assert result["status"] == "done", result
+    assert calls[:3] == ["decompose", "decompose", "synthesize"]
+    text = (tmp_path / "revise_skeleton" / "artifacts" / "result.lean").read_text(encoding="utf-8")
+    assert "not Lean English prompt" not in text
 
 
 # ---------------------------------------------------------------------------
@@ -540,6 +666,91 @@ async def test_end_to_end_two_sorry_run_produces_sorry_free_result(tmp_path):
     assert store.call_count == 2
 
 
+def test_capture_lemma_candidate_writes_namespaced_candidate(tmp_path):
+    """The runner deterministically captures the tool-less synthesizer's JSON final answer
+    into ``candidate_b:<sg>`` (sub-goal id from the ``instruction``/``__`` clone suffix), so
+    the Path-B hand-off never depends on the agent calling a tool. Was the live h2 failure."""
+    from hyperion.memory.context_store import context_get
+
+    with patch.object(settings, "tasks_dir", tmp_path):
+        (tmp_path / "cap").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "cap" / "plan.md").write_text(_PLAN_MD, encoding="utf-8")
+        node = WorkflowNode(id="synthesize__h2", kind="work", agent="lemma_synthesizer",
+                            instruction="h2", upstream=["skeleton_check"])
+        # Agent answered with prose + the JSON object (braces inside the Lean source).
+        result = SimpleNamespace(raw=(
+            'Thought: done\nFinal Answer: {"source": "theorem t : 11 + 4 = 15 := by\n'
+            '  rfl", "statement": "t : 11 + 4 = 15", "proof_term": "by { rfl }"}'
+        ))
+        runner._capture_lemma_candidate("cap", node, result)
+
+        cand = context_get("cap", "candidate_b:h2")
+        assert cand and cand["proof_term"] == "by { rfl }"
+        assert cand["origin"] == "synthesize"          # defaulted by the capturer
+        # Idempotent: a populated key is never overwritten.
+        runner._capture_lemma_candidate("cap", node, SimpleNamespace(raw="{}"))
+        assert context_get("cap", "candidate_b:h2")["proof_term"] == "by { rfl }"
+
+
+@pytest.mark.anyio
+async def test_shipped_single_chain_expands_per_subgoal_at_runtime(tmp_path):
+    """The shipped single-chain ``lean-prove`` workflow auto-fans-out when the plan has
+    >1 sub-goal: after skeleton_check passes, the runner clones the retrieve/synthesize/
+    verify/compare/abstract chain per sub-goal (``expand_per_subgoal``) so BOTH h1 and h2
+    are discharged and banked — the multi-``have`` scaffold the old single chain failed."""
+
+    async def _fake_stage(task_id, request, stage, agents, tasks, cb, deadline):
+        base = settings.tasks_dir / task_id
+        (base / "notes").mkdir(parents=True, exist_ok=True)
+        (base / "artifacts").mkdir(parents=True, exist_ok=True)
+        if stage == "decompose":
+            (base / "plan.md").write_text(_PLAN_MD, encoding="utf-8")
+        elif stage.startswith("synthesize__"):  # cloned per-sub-goal synth node
+            sg = stage.split("__", 1)[1]
+            # The tool-less synthesizer returns its candidate as a raw final answer (no
+            # context_put); the runner's _capture_lemma_candidate must persist it itself.
+            return SimpleNamespace(raw=json.dumps({
+                "source": f"theorem t_{sg} : G := by trivial",
+                "statement": f"theorem t_{sg} : G",
+                "proof_term": f"{sg}_synth_proof",
+                "origin": "synthesize",
+            }))
+
+    def _fake_retrieve(goal, **kwargs):
+        if goal.strip() == "P":  # only h1 has a banked lemma; h2 falls to Path B
+            return [{"statement": "lem_P", "proof_term": "lemP_proof", "lean_type": "P"}]
+        return []
+
+    store = MagicMock(return_value={"ok": True, "id": "pt", "error": None})
+    abstraction = AsyncMock(return_value=[{
+        "source": "theorem gen : G := by trivial", "statement": "theorem gen : G",
+        "proof_term": "by trivial", "lean_type": "∀ x, G"}])
+
+    with patch.object(settings, "tasks_dir", tmp_path), \
+         patch.object(runner, "build_agent", MagicMock()), \
+         patch.object(runner, "load_agent", MagicMock()), \
+         patch.object(runner, "discover_context", MagicMock(return_value=None)), \
+         patch.object(runner, "_node_task", MagicMock()), \
+         patch.object(runner, "_run_stage", new=_fake_stage), \
+         patch.object(lean_handlers, "retrieve_applicable_lemmas", _fake_retrieve), \
+         patch.object(lean_handlers, "propose_abstraction", abstraction), \
+         patch("hyperion.memory.lemma_bank.store_lemma", store), \
+         patch("hyperion.server.meta_tasks.run_meta_tasks", new=AsyncMock()), \
+         mock_lean(ok=True, targets=_VERIFY_TARGET):
+        # Real resolver — load the SHIPPED single-chain lean-prove from config.
+        result = await runner.run_task("prove_exp", "prove P ∧ Q", workflow="lean-prove")
+
+    assert result["status"] == "done", result
+    # The fan-out is visible in routing: per-sub-goal clones ran.
+    agents = result["routing"]["selected_agents"]
+    assert "verify__h1" in agents and "verify__h2" in agents, agents
+    text = (tmp_path / "prove_exp" / "artifacts" / "result.lean").read_text(encoding="utf-8")
+    assert "sorry" not in text
+    assert "lemP_proof" in text        # h1 via Path A
+    assert "h2_synth_proof" in text    # h2 via Path B
+    assert store.call_count == 2       # both sub-goals banked
+
+
 @pytest.mark.anyio
 async def test_bank_surfaces_a_failed_write(tmp_path):
     """A failed ``store_lemma`` (ok=False) is surfaced in the bank node's result
@@ -567,6 +778,46 @@ async def test_bank_surfaces_a_failed_write(tmp_path):
         assert res["n_banked"] == 0
         assert all(f["error"] == "qdrant down" for f in res["bank_failures"])
         assert (tmp_path / "prove2" / "artifacts" / "result.lean").exists()
+
+
+@pytest.mark.anyio
+async def test_bank_rejects_invalid_final_assembly(tmp_path):
+    """A node may discharge a subgoal, but the assembled result.lean is the final gate."""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        (tmp_path / "bad_final").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "bad_final" / "plan.md").write_text(
+            "---\n"
+            "task_id: bad_final\n"
+            "task_type: code\n"
+            "selected_option: a\n"
+            "scaffold: |\n"
+            "  have h1 : not Lean English := sorry\n"
+            "  exact h1\n"
+            "options:\n"
+            "  - id: a\n"
+            "    summary: bad\n"
+            "    subtasks:\n"
+            "      - id: h1\n"
+            "        description: bad\n"
+            "        lean_type: \"not Lean English\"\n"
+            "---\n",
+            encoding="utf-8",
+        )
+        context_put("bad_final", "discharged:h1",
+                    {"proof_term": "trivial", "statement": "bad", "path": "B"})
+        ctx = NativeNodeCtx(
+            task_id="bad_final",
+            node=WorkflowNode(id="bank", kind="native", handler="bank", upstream=[]),
+            request="word problem",
+            progress_callback=None,
+        )
+
+        with mock_lean(ok=False, targets=_VERIFY_TARGET):
+            with pytest.raises(ProofFailed):
+                await bank_handler(ctx)
+
+        final = context_get("bad_final", "final_verify")
+        assert final["ok"] is False
 
 
 # ---------------------------------------------------------------------------

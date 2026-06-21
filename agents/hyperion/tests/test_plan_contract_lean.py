@@ -168,8 +168,8 @@ def test_update_frontmatter_survives_unquoted_colon(tmp_path):
 
 
 def test_block_scalar_colons_are_not_mangled(tmp_path):
-    """The sanitizer only touches top-level scalars — indented block content with
-    colons (the scaffold body) must pass through byte-for-byte."""
+    """The sanitizer touches scalar values but never block-scalar bodies — indented
+    block content with colons (the scaffold body) must pass through byte-for-byte."""
     from hyperion.crews.plan_contract import _sanitize_frontmatter
 
     raw = (
@@ -181,6 +181,45 @@ def test_block_scalar_colons_are_not_mangled(tmp_path):
     out = _sanitize_frontmatter(raw)
     assert 'original_request: "a: b"' in out          # top-level scalar quoted
     assert "  theorem t (n : ℕ) : n = n := by" in out  # block body untouched
+
+
+# A real live failure (task 8f3a7726): a *nested* option ``summary`` carried an unquoted
+# colon ("two steps: subtraction and addition"), which the column-0-only sanitizer missed,
+# so the whole frontmatter failed to parse → options dropped → no per-sub-goal fan-out.
+_NESTED_COLON_PLAN = """---
+task_id: 1
+task_type: code
+scaffold: |
+  example : 18 - 7 + 4 = 15 := by
+    have h1 : 18 - 7 = 11 := sorry
+    have h2 : 11 + 4 = 15 := sorry
+    exact h2
+options:
+  - id: a
+    summary: Break the arithmetic into two steps: subtraction and addition.
+    subtasks:
+      - id: h1
+        description: Prove that 18 minus 7 equals 11.
+        lean_type: 18 - 7 = 11
+      - id: h2
+        description: Prove that 11 plus 4 equals 15.
+        lean_type: 11 + 4 = 15
+---
+prose
+"""
+
+
+def test_nested_option_summary_colon_recovers_subtasks(tmp_path):
+    """An unquoted colon in a nested option ``summary`` no longer sinks the whole plan:
+    the multi-sub-goal options survive so the runner can fan the prover chain out."""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        _write_plan(tmp_path, "t_nested", _NESTED_COLON_PLAN)
+        plan = parse_plan("t_nested")
+
+    assert [s.id for s in plan.active_subtasks()] == ["h1", "h2"]
+    assert plan.options[0].subtasks[1].lean_type == "11 + 4 = 15"
+    # Block-scalar scaffold body (its own ``have h : T`` colons) survives intact.
+    assert "have h2 : 11 + 4 = 15 := sorry" in (plan.scaffold or "")
 
 
 # ---------------------------------------------------------------------------
