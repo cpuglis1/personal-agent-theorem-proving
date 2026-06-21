@@ -45,7 +45,7 @@ from hyperion.config import settings
 from hyperion.crews.lemma_compare import build_triple, choose_winner, generality_score
 from hyperion.crews.native import NativeNodeCtx, register_native_handler
 from hyperion.crews.plan_contract import Subtask, parse_plan
-from hyperion.crews.soundness import soundness_ok
+from hyperion.crews.soundness import soundness_ok, source_declares_gap
 from hyperion.memory import lemma_bank
 from hyperion.tools.lean_verify import verify_lean
 from hyperion.tools.lemma_retrieval import _lemma_type, retrieve_applicable_lemmas
@@ -1238,6 +1238,315 @@ async def bank_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     }
 
 
+# ===========================================================================
+# Definition synthesis (PLAN-definition-synthesis Phase 2)
+# ---------------------------------------------------------------------------
+# The ONLY operation that extends the language L. When the normal path stalls on a
+# lemma, the system synthesizes a *new local definition* (vocabulary) + kernel-verified
+# *bridge lemmas* and (later, Phase 3) re-proves the theorem THROUGH that vocabulary.
+# Definitions may be invented freely (a conservative extension — a bad def can't make
+# anything false, only be useless); ALL soundness lives in the bridges, governed by the
+# Phase 0 contract. This section provides the proposer + degeneracy gates + the verifier
+# that elaborates the def and proves every bridge soundness-clean. Stall-detection and
+# DAG wiring are Phase 4; birth ablation is Phase 3.
+# ===========================================================================
+
+# A definition body that is literally ``True``/``False`` carries no content — the cheap
+# degeneracy gate rejects it before any proving budget is spent.
+_TRIVIAL_DEF_RHS_RE = re.compile(r":=\s*(True|False)\s*$")
+
+
+def _concept_id(candidate: dict[str, Any]) -> str:
+    """Deterministic id for a concept, keyed on its definition source (like the bank)."""
+    import hashlib
+
+    src = ((candidate.get("definition") or {}).get("source") or "").strip()
+    return hashlib.sha1(src.encode("utf-8")).hexdigest()[:16] if src else ""
+
+
+async def propose_definition(
+    stuck_lemma: str,
+    informal_proof: str,
+    lemma_plan: str,
+    formalized_lemmas: list[str],
+    lean_errors: list[str],
+    *,
+    n: int = 4,
+) -> list[dict[str, Any]]:
+    """Ask the ``definition_synthesizer`` agent for ``n`` concept candidates.
+
+    The :func:`propose_repair` / :func:`propose_abstraction` twin: a scoped, structured LLM
+    call reading model/persona from the ``definition_synthesizer`` agent record. Each
+    candidate is a *concept* — a new local definition (vocabulary) plus the bridge lemmas
+    that make it usable — aimed at the stuck lemma. The proposer may invent freely; the
+    kernel (def must elaborate) and the soundness contract (every bridge) judge it in
+    :func:`verify_concept_handler`, so a useless or unsound proposal can never sneak in.
+
+    Returns a list of candidate dicts ``{"definition": {"name", "source"}, "bridges":
+    [{"name", "source", "lean_type", "statement"}], "vacuity_probe"?}``. Returns ``[]`` on
+    any error so the caller degrades to "no concept synthesized" rather than crashing.
+    """
+    from hyperion.agents.registry import load_agent
+
+    try:
+        record = load_agent("definition_synthesizer")
+    except Exception as exc:  # missing record must not crash the controller
+        logger.warning("propose_definition: could not load agent (%s)", exc)
+        return []
+
+    system = f"{record.role}\n\n{record.goal}\n\n{record.backstory}"
+    user = (
+        f"The normal proof STALLED on this lemma:\n{stuck_lemma}\n\n"
+        f"Informal proof sketch:\n{informal_proof or '(none)'}\n\n"
+        f"Lemma plan:\n{lemma_plan or '(none)'}\n\n"
+        f"Already-formalized statements:\n" + ("\n".join(formalized_lemmas) or "(none)") + "\n\n"
+        f"Kernel diagnostics from the stall:\n" + ("\n".join(lean_errors) or "(none)") + "\n\n"
+        f"Invent up to {n} candidate CONCEPTS. Return ONLY a JSON array, each object "
+        '{"definition": {"name": <Lean ident>, "source": <full `def ...` source, NO sorry>}, '
+        '"bridges": [{"name": <Lean ident>, "source": <full `theorem ...` source, NO sorry>, '
+        '"lean_type": <the bare proposition>, "statement": <the signature line>}], '
+        '"vacuity_probe": <optional: a complete `example ... := by trivial` that SHOULD FAIL '
+        "if the definition is non-vacuous>}. No commentary, no fences."
+    )
+    try:
+        from openai import OpenAI
+
+        client = OpenAI(base_url=settings.litellm_base_url, api_key=settings.llm_api_key)
+        resp = client.chat.completions.create(
+            model=record.model_alias,
+            temperature=record.temperature,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+        )
+        text = (resp.choices[0].message.content or "").strip()
+        data = json.loads(text)
+    except Exception as exc:
+        logger.warning("propose_definition: LLM call failed (%s) — no candidates", exc)
+        return []
+
+    if not isinstance(data, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for d in data:
+        if not isinstance(d, dict):
+            continue
+        defn = d.get("definition")
+        if isinstance(defn, dict) and defn.get("source") and isinstance(d.get("bridges"), list):
+            out.append(d)
+    return out[:n]
+
+
+def definition_degeneracy_reasons(
+    candidate: dict[str, Any],
+    *,
+    parent_name: str = "",
+    parent_goal: str = "",
+) -> list[str]:
+    """Cheap, pre-proving degeneracy gates — kill bad definitions before spending budget.
+
+    Pure and offline-testable (no Lean): structural/textual checks only. The Lean-backed
+    non-vacuity probe (``example ... := by trivial`` must FAIL) runs in
+    :func:`verify_concept_handler`, which elaborates the definition anyway. Returns the
+    list of reasons the candidate is degenerate (empty ⇒ it passes the cheap gates).
+    """
+    reasons: list[str] = []
+    defn = candidate.get("definition") or {}
+    def_src = (defn.get("source") or "").strip()
+    bridges = candidate.get("bridges") or []
+
+    if not def_src:
+        reasons.append("empty definition source")
+        return reasons  # nothing else is meaningful
+    if source_declares_gap(def_src):
+        reasons.append("definition contains sorry/admit or a user-declared axiom")
+    if _TRIVIAL_DEF_RHS_RE.search(def_src):
+        reasons.append("definition body is literally True/False (no content)")
+    # Must not be defined IN TERMS OF the parent theorem (would be a renamed hypothesis,
+    # not a concept) — neither by name nor as a verbatim copy of the parent goal.
+    if parent_name and re.search(rf"\b{re.escape(parent_name)}\b", def_src):
+        reasons.append(f"definition mentions the parent theorem name {parent_name!r}")
+    if parent_goal:
+        norm = lambda s: re.sub(r"\s+", " ", s).strip()
+        rhs = def_src.split(":=", 1)[1] if ":=" in def_src else def_src
+        if norm(parent_goal) and norm(parent_goal) in norm(rhs):
+            reasons.append("definition is defeq to the parent goal (renamed hypothesis)")
+    if not bridges:
+        reasons.append("no bridge lemmas (≥1 required)")
+    for i, b in enumerate(bridges):
+        if not isinstance(b, dict) or not (b.get("source") or "").strip():
+            reasons.append(f"bridge {i} has no source")
+        elif source_declares_gap(b["source"]):
+            reasons.append(f"bridge {i} contains sorry/admit/axiom")
+        elif parent_name and re.search(rf"\b{re.escape(parent_name)}\b", b["source"]):
+            reasons.append(f"bridge {i} mentions the parent theorem name {parent_name!r}")
+    return reasons
+
+
+def _compose_concept_source(def_src: str, bridge_src: str) -> str:
+    """Source for proving/elaborating a bridge: the definition precedes the bridge so the
+    bridge (and its ``#print axioms``) sees the new vocabulary."""
+    return f"{def_src.strip()}\n\n{bridge_src.strip()}\n"
+
+
+async def synthesize_definition_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
+    """Native step: propose concept candidates for a stuck lemma + apply the cheap gates.
+
+    Reads the stall context from the blackboard (the goal type, informal sketch, lemma
+    plan, and the kernel diagnostics from the failed verify), asks
+    :func:`propose_definition` for ``settings.concept_candidates`` candidates, and keeps
+    only those that pass :func:`definition_degeneracy_reasons`. Survivors are written to
+    ``concept_candidates:<sg>`` for :func:`verify_concept_handler`. Proving is NOT done
+    here — that is the next node, so the cheap gates spend no proving budget.
+    """
+    sg_id = _subgoal_id(ctx)
+    goal = _goal_type(ctx, sg_id)
+    parent_name = ctx.get(_bb_key("parent_name", sg_id)) or ctx.get("parent_name") or ""
+    decision = ctx.get(_bb_key("verify_decision", sg_id)) or {}
+    lean_errors = ctx.get(_bb_key("stall_errors", sg_id)) or []
+    informal = ctx.get(_bb_key("informal_proof", sg_id)) or ctx.get("informal_proof") or ""
+    lemma_plan = ctx.get(_bb_key("lemma_plan", sg_id)) or ctx.get("lemma_plan") or ""
+    formalized = ctx.get(_bb_key("formalized_lemmas", sg_id)) or []
+
+    n = settings.concept_candidates
+    raw = await propose_definition(goal, informal, lemma_plan, formalized, lean_errors, n=n)
+
+    survivors: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for cand in raw:
+        reasons = definition_degeneracy_reasons(cand, parent_name=parent_name, parent_goal=goal)
+        cand = {**cand, "concept_id": _concept_id(cand)}
+        if reasons:
+            rejected.append({"concept_id": cand["concept_id"], "reasons": reasons})
+        else:
+            survivors.append(cand)
+
+    ctx.put(_bb_key("concept_candidates", sg_id), survivors)
+    ctx.put(
+        _bb_key("synthesize_definition", sg_id),
+        {"subgoal": sg_id, "n_proposed": len(raw), "n_survived": len(survivors),
+         "rejected": rejected, "decision_seen": bool(decision)},
+    )
+    ctx.progress(
+        f"[synthesize_definition] {sg_id}: {len(survivors)}/{len(raw)} candidate(s) passed gates"
+    )
+    return {
+        "handler": "synthesize_definition",
+        "subgoal": sg_id,
+        "ok": bool(survivors),
+        "n_proposed": len(raw),
+        "n_survived": len(survivors),
+    }
+
+
+async def verify_concept_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
+    """Native step: elaborate each candidate's definition + prove every bridge soundness-clean.
+
+    For each surviving candidate (in order): the definition must **elaborate** with no
+    ``sorry`` (it's a conservative extension — no proof obligation), it must pass the
+    Lean-backed non-vacuity probe when one is supplied (``example ... := by trivial`` must
+    FAIL), and EVERY bridge must close via :func:`prove_proposition` **soundness-clean**
+    (the Phase 0 ``#print axioms`` contract, scoped to the bridge's decl, with the
+    definition in scope). The first candidate that fully verifies is written to
+    ``verified_concept:<sg>`` — the package Phase 3 birth ablation re-proves the theorem
+    through. No bank write here (that's Phase 4).
+    """
+    sg_id = _subgoal_id(ctx)
+    candidates = ctx.get(_bb_key("concept_candidates", sg_id)) or []
+    weak = settings.prover_weak_path_b
+    strict = settings.prover_soundness_strict
+
+    verified: Optional[dict[str, Any]] = None
+    attempts: list[dict[str, Any]] = []
+
+    for cand in candidates:
+        cid = cand.get("concept_id") or _concept_id(cand)
+        defn = cand.get("definition") or {}
+        def_src = (defn.get("source") or "").strip()
+        record: dict[str, Any] = {"concept_id": cid, "def_ok": False, "vacuous": False,
+                                  "bridges": []}
+
+        # 1. Definition must elaborate (no sorry). Conservative: an infra outage is not a
+        #    rejection of the concept, just an un-decidable attempt.
+        def_res = verify_lean(def_src, mode="full")
+        if not def_res["infra_ok"]:
+            record["error"] = "verifier unavailable (definition elaboration)"
+            attempts.append(record)
+            continue
+        record["def_ok"] = bool(def_res["ok"])
+        if not def_res["ok"]:
+            record["error"] = "definition did not elaborate"
+            attempts.append(record)
+            continue
+
+        # 2. Non-vacuity probe (optional): the supplied `example ... := by trivial` must FAIL.
+        probe = (cand.get("vacuity_probe") or "").strip()
+        if probe:
+            probe_src = _compose_concept_source(def_src, probe)
+            probe_res = verify_lean(probe_src, mode="full")
+            if probe_res["infra_ok"] and probe_res["ok"]:
+                record["vacuous"] = True
+                record["error"] = "vacuity probe closed by trivial (definition is vacuous)"
+                attempts.append(record)
+                continue
+
+        # 3. Every bridge must close soundness-clean, with the definition in scope.
+        proven_bridges: list[dict[str, Any]] = []
+        all_ok = True
+        for b in cand.get("bridges") or []:
+            seed = _compose_concept_source(def_src, b.get("source") or "")
+            outcome = await prove_proposition(
+                b.get("lean_type") or "", seed, weak=weak, decl=b.get("name"),
+                strict_soundness=strict,
+            )
+            bridge_ok = outcome.won and bool(outcome.axioms_clean)
+            record["bridges"].append({
+                "name": b.get("name"), "closed": outcome.closed, "won": outcome.won,
+                "axioms_clean": outcome.axioms_clean, "repair_iters": outcome.repair_iters,
+            })
+            if not bridge_ok:
+                all_ok = False
+                break
+            proven_bridges.append({
+                "name": b.get("name"),
+                "source": outcome.weak_source or outcome.source,
+                "proof_term": outcome.proof_term,
+                "lean_type": b.get("lean_type") or "",
+                "statement": b.get("statement") or "",
+                "axioms": outcome.axioms,
+            })
+
+        record["all_bridges_ok"] = all_ok
+        attempts.append(record)
+        if all_ok and proven_bridges:
+            verified = {
+                "concept_id": cid,
+                "definition": {"name": defn.get("name"), "source": def_src},
+                "bridges": proven_bridges,
+                "origin": "synthesized",
+            }
+            break
+
+    ctx.put(_bb_key("verified_concept", sg_id), verified)
+    ctx.put(
+        _bb_key("verify_concept", sg_id),
+        {"subgoal": sg_id, "n_candidates": len(candidates), "attempts": attempts,
+         "verified": verified is not None},
+    )
+    ctx.progress(
+        f"[verify_concept] {sg_id}: "
+        + (f"verified concept {verified['concept_id']}" if verified else "no concept verified")
+    )
+    return {
+        "handler": "verify_concept",
+        "subgoal": sg_id,
+        "ok": verified is not None,
+        "concept_id": verified["concept_id"] if verified else None,
+        "n_candidates": len(candidates),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Registration (mirrors crews.native's echo registration)
 # ---------------------------------------------------------------------------
@@ -1249,3 +1558,5 @@ register_native_handler("verify", verify_handler)
 register_native_handler("compare", compare_handler)
 register_native_handler("abstract", abstract_handler)
 register_native_handler("bank", bank_handler)
+register_native_handler("synthesize_definition", synthesize_definition_handler)
+register_native_handler("verify_concept", verify_concept_handler)

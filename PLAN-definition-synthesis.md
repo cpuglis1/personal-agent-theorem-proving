@@ -18,7 +18,15 @@
 >   `decl` arg wires the Phase 0 soundness contract into the proving path — bridges/lemmas/ablation
 >   re-proofs supply a decl and get `axioms_clean`; the verify node's anonymous `example` sources do
 >   not. (Earlier the doc referenced `prove_proposition` as pre-existing substrate; it now exists.)
-> - **Phases 2-4: not yet implemented.** Next: Phase 2 definition synthesis.
+> - **Phase 2 — definition synthesis: DONE.** `config/agents/definition_synthesizer.json`,
+>   `propose_definition` (knob `concept_candidates=4`), `definition_degeneracy_reasons` (pure cheap
+>   gates), and native handlers `synthesize_definition_handler` (propose→gate→stage) +
+>   `verify_concept_handler` (elaborate def → non-vacuity probe → prove every bridge soundness-clean
+>   via `prove_proposition(decl=…)`). First fully-passing candidate → `verified_concept:<sg>`. No bank
+>   write yet (Phase 4). Tests `tests/test_concept_synthesis.py`; offline suite 304 passed.
+> - **Phases 3-4: not yet implemented.** Next: Phase 3 birth ablation. NOTE Phase 2 handlers are
+>   registered but NOT yet on the `lean-prove` DAG — stall-detection + the escalation branch + concept
+>   banking are Phase 4.
 
 ---
 

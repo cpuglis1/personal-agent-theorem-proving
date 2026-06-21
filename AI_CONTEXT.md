@@ -37,8 +37,25 @@
   `weak_source` (win-eligible), `proof_term`, `repair_iters`, `verdicts`, `axioms`/`axioms_clean`,
   and a `.won` property. Tests: `tests/test_prove_proposition.py` (8). Offline suite **290 passed**.
   Bridges/planned-lemmas/ablation re-proofs in Phases 2-4 call this primitive.
-- Next up: Phase 2 — definition synthesis (`definition_synthesizer` agent + `synthesize_definition`
-  / `verify_concept` handlers + degeneracy gates), per `PLAN-definition-synthesis.md`.
+- **Phase 2 DONE (definition synthesis).** The language-extending operation is wired (handlers
+  registered; DAG wiring + stall-detection are Phase 4):
+  - `config/agents/definition_synthesizer.json` — generalist concept former (`smart` alias, temp 0.5).
+  - `propose_definition(stuck_lemma, informal_proof, lemma_plan, formalized_lemmas, lean_errors, n)`
+    → `c` candidate concepts `{definition:{name,source}, bridges:[{name,source,lean_type,statement}],
+    vacuity_probe?}` (scoped LLM call, mirrors `propose_repair`/`propose_abstraction`). Knob
+    `concept_candidates=4`.
+  - `definition_degeneracy_reasons(candidate, *, parent_name, parent_goal)` — pure, offline gates:
+    no sorry/admit/axiom, not literal True/False, no parent-name mention, not defeq-to-parent (text),
+    ≥1 bridge, bridges gap-free.
+  - `synthesize_definition_handler` (native) — propose → gate → stage survivors to
+    `concept_candidates:<sg>`; spends no proving budget.
+  - `verify_concept_handler` (native) — elaborate def (no sorry) → Lean-backed non-vacuity probe
+    (`example := by trivial` must FAIL) → prove EVERY bridge via `prove_proposition(decl=bridge.name)`
+    soundness-clean (`won ∧ axioms_clean`); first fully-passing candidate → `verified_concept:<sg>`.
+    No bank write (Phase 4).
+  - Tests: `tests/test_concept_synthesis.py` (14). Offline suite **304 passed**.
+- Next up: Phase 3 — birth ablation (`birth_ablation_handler`: re-prove the theorem through vs.
+  without the concept at identical `B_ablate`; accept iff solves-with ∧ fails-without).
 - _(prior handoff)_ This handoff is for switching to Claude Code after the Codex session usage expired.
 - Docker is currently healthy. Running containers observed this session include `hyperion`, `hyperion-mcp`, `hyperion-ui`, `lean`, `litellm`, `qdrant`, `langfuse`, `searxng`, etc.
 - The Lean sidecar is healthy: `POST http://localhost:8900/verify` with `{"source":"theorem t : True := trivial","mode":"full"}` returned `{"ok":true,"errors":[],"elaborated_term":null}`.
@@ -105,8 +122,10 @@
   symbolic anti-unification, ablation discipline) remain valid follow-ons but are **no longer the
   headline**. Active sequence: Phase 0 soundness gate **[done]** → Phase 1 `prove_proposition`
   extraction **[done]** → Phase 2 definition synthesis (`definition_synthesizer` agent +
-  `synthesize_definition` / `verify_concept` handlers + degeneracy gates) → Phase 3 birth ablation →
-  Phase 4 DAG wiring + concept bank schema + stream-level promotion/pruning.
+  `synthesize_definition` / `verify_concept` handlers + degeneracy gates) **[done]** → Phase 3 birth
+  ablation → Phase 4 DAG wiring + concept bank schema + stream-level promotion/pruning.
+- [x] Definition synthesis (Phase 2): done. `definition_synthesizer` agent, `propose_definition`,
+  `definition_degeneracy_reasons`, `synthesize_definition`/`verify_concept` native handlers. Offline 304.
 - [x] Proving primitive (`prove_proposition`): done. Extracted from `verify_handler` Path B (no
   behavior change); `ProofOutcome` with strong/weak verdicts + soundness hook. Offline suite 290.
 - [x] Soundness contract (`sorryAx` gate): done. Sidecar `/axioms`, `lean_axioms`, `crews/soundness.py`,

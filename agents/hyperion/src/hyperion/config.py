@@ -194,6 +194,10 @@ class Settings(BaseSettings):
         "omega", "decide", "native_decide", "ring", "ring_nf", "linarith", "nlinarith",
         "polyrith", "norm_num", "aesop", "tauto", "simp_all", "field_simp",
     )
+    # Definition synthesis (PLAN-definition-synthesis Phase 2): how many concept candidates
+    # (definition + bridge lemmas) the synthesizer proposes when the normal path stalls. The
+    # plan's `c`; cheap degeneracy gates prune most before any proving budget is spent.
+    concept_candidates: int = 4
     # Soundness contract strictness (the sorryAx gate; see crews/soundness.py). False
     # (default) tolerates the compiler-trusting native axioms (native_decide); True — the
     # recommended setting for HEADLINE runs — admits only the kernel base
