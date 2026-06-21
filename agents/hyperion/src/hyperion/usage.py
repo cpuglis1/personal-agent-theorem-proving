@@ -449,6 +449,11 @@ def _write_trace_event(
             started_at = start_time.isoformat()
         except Exception:
             started_at = None
+        try:
+            model_name = getattr(response_obj, "model", None) or response_obj.get("model")  # type: ignore[attr-defined]
+        except Exception:
+            model_name = None
+        model_name = model_name or kwargs.get("model", "")
 
         db_path = str(settings.tasks_dir / "state.db")
         with sqlite3.connect(db_path) as conn:
@@ -458,7 +463,7 @@ def _write_trace_event(
                     cost_usd, prompt_preview, response_preview, tools_used,
                     started_at, duration_ms)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (task_id, role, node_id, prompt_type, kwargs.get("model", ""),
+                (task_id, role, node_id, prompt_type, model_name,
                  in_tok, out_tok, cost,
                  prompt_preview, response_preview, tools_used,
                  started_at, duration_ms),

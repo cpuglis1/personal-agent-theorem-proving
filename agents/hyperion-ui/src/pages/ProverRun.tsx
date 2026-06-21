@@ -63,7 +63,7 @@ export default function ProverRun() {
 
       {/* Data-source controls */}
       <div className="card mb-4 flex flex-wrap items-center gap-3">
-        <span className="label mb-0">Data source</span>
+        <span className="label mb-0">Trace source</span>
         <div className="flex gap-1">
           <button
             className={`btn ${source === "fixture" ? "btn-primary" : ""}`}
@@ -77,7 +77,7 @@ export default function ProverRun() {
             onClick={() => setSource("live")}
             type="button"
           >
-            Live (:4100)
+            Live backend trace
           </button>
         </div>
         {source === "live" && (
@@ -99,8 +99,8 @@ export default function ProverRun() {
       {/* States */}
       {source === "live" && !id && (
         <div className="card text-sm text-slate-400">
-          Enter a task_id above (or submit a theorem) to load a live trace from the
-          backend.
+          Enter a task_id above (or submit a theorem) to load GET /tasks/&lt;id&gt;/trace
+          from the Hyperion backend at :4100.
         </div>
       )}
       {isLoading && <div className="card text-sm text-slate-400">Loading trace…</div>}
@@ -151,9 +151,19 @@ export default function ProverRun() {
           {prover.scaffold && (
             <section className="card">
               <h2 className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-300">
-                Scaffold
+                Decomposer output · scaffold and sub-goals
               </h2>
               <LeanCode code={prover.scaffold} label="decomposed skeleton (sorry placeholders)" />
+              {subgoalIds.length > 0 && (
+                <div className="mt-3 grid gap-2 text-xs">
+                  {subgoalIds.map((sid) => (
+                    <div key={sid} className="rounded border border-edge bg-slate-900/40 p-2">
+                      <span className="mr-2 font-mono text-sky-300">{sid}</span>
+                      <code className="text-slate-300">{subgoals[sid].lean_type}</code>
+                    </div>
+                  ))}
+                </div>
+              )}
             </section>
           )}
 

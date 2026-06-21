@@ -46,6 +46,7 @@ import logging
 import uuid
 import zipfile
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator, Literal, Optional
 
@@ -68,7 +69,7 @@ from hyperion import models_registry, scheduler, usage
 from hyperion.config import settings
 from hyperion.crews.plan_contract import parse_plan
 from hyperion.crews.runner import resume_task, run_task
-from hyperion.crews.workflows import WorkflowRecord
+from hyperion.crews.workflows import WorkflowRecord, load_workflow
 from hyperion.memory.episodic import store_episode
 from hyperion.server.affordances import Affordance, AffordanceOption
 from hyperion.server.webhooks import UnsafeCallbackURL, fire_callback, validate_callback_url
@@ -1111,11 +1112,17 @@ async def get_task_trace(task_id: str) -> dict:
             "SELECT request, status, routing FROM tasks WHERE task_id=?", (task_id,)
         ) as cur:
             row = await cur.fetchone()
-        if not row:
-            raise HTTPException(status_code=404, detail="Task not found")
-
-        request_text = row["request"] or ""
-        routing = json.loads(row["routing"]) if row["routing"] else None
+        if row:
+            request_text = row["request"] or ""
+            status = row["status"]
+            routing = json.loads(row["routing"]) if row["routing"] else None
+        else:
+            disk_item = _disk_task_item(task_id)
+            if not disk_item:
+                raise HTTPException(status_code=404, detail="Task not found")
+            request_text = disk_item["request"] or ""
+            status = disk_item["status"]
+            routing = _workflow_routing("lean-prove")
 
         async with db.execute(
             """SELECT agent_role, node_id, prompt_type, model, input_tokens, output_tokens,
@@ -1143,7 +1150,7 @@ async def get_task_trace(task_id: str) -> dict:
     try:
         from hyperion.eval.trace import trace_task
 
-        pt = trace_task(task_id, request=request_text, status=row["status"])
+        pt = trace_task(task_id, request=request_text, status=status)
         if pt.get("subgoals"):
             prover_trace = pt
     except Exception:
@@ -1152,7 +1159,7 @@ async def get_task_trace(task_id: str) -> dict:
     return {
         "task_id": task_id,
         "request": request_text,
-        "status": row["status"],
+        "status": status,
         "routing": routing,
         "events": events,
         "prover": prover_trace,
@@ -2152,6 +2159,58 @@ def _iso_utc(ts: Optional[str]) -> Optional[str]:
     return ts.replace(" ", "T", 1) + "Z"
 
 
+def _workflow_routing(workflow_id: str) -> Optional[dict]:
+    try:
+        wf = load_workflow(workflow_id)
+    except Exception:
+        return None
+    return {
+        "workflow": wf.id,
+        "selected_agents": [n.id for n in wf.nodes],
+        "skipped": [],
+        "dag": {n.id: n.upstream for n in wf.nodes},
+    }
+
+
+def _disk_task_item(task_id: str) -> Optional[dict]:
+    base = settings.tasks_dir / task_id
+    if not base.is_dir() or not (base / "plan.md").exists():
+        return None
+    try:
+        plan = parse_plan(task_id)
+    except Exception:
+        plan = None
+    request = (plan.original_request if plan else None) or task_id
+    result_lean = base / "artifacts" / "result.lean"
+    result_md = base / "artifacts" / "result.md"
+    status = "done" if result_lean.exists() or result_md.exists() else "failed"
+    updated = max(
+        [p.stat().st_mtime for p in (base / "context.json", result_lean, result_md, base / "plan.md") if p.exists()],
+        default=base.stat().st_mtime,
+    )
+    ts = datetime.utcfromtimestamp(updated).isoformat() + "Z"
+    return {
+        "task_id": task_id,
+        "status": status,
+        "request": request[:200],
+        "error": None if status == "done" else "CLI/local run did not produce result.lean",
+        "created_at": ts,
+        "updated_at": ts,
+        "hitl": "off",
+        "langfuse_url": _langfuse_session_url(task_id),
+        "source": "task-dir",
+    }
+
+
+def _disk_task_ids() -> list[str]:
+    if not settings.tasks_dir.exists():
+        return []
+    return [
+        p.name for p in settings.tasks_dir.iterdir()
+        if p.is_dir() and (p / "plan.md").exists() and (p / "context.json").exists()
+    ]
+
+
 @app.get("/tasks")
 async def list_tasks(limit: int = 50, offset: int = 0) -> dict:
     """Paginated run history, newest first, for the monitoring page."""
@@ -2159,16 +2218,15 @@ async def list_tasks(limit: int = 50, offset: int = 0) -> dict:
     offset = max(0, offset)
     async with _db() as db:
         db.row_factory = aiosqlite.Row
-        async with db.execute("SELECT COUNT(*) AS n FROM tasks") as cur:
-            total = (await cur.fetchone())["n"]
         async with db.execute(
             "SELECT task_id, status, request, error, created_at, updated_at, hitl "
-            "FROM tasks ORDER BY created_at DESC, rowid DESC LIMIT ? OFFSET ?",
-            (limit, offset),
+            "FROM tasks ORDER BY created_at DESC, rowid DESC",
         ) as cur:
             rows = await cur.fetchall()
     items = []
+    db_ids: set[str] = set()
     for r in rows:
+        db_ids.add(r["task_id"])
         items.append(
             {
                 "task_id": r["task_id"],
@@ -2181,7 +2239,15 @@ async def list_tasks(limit: int = 50, offset: int = 0) -> dict:
                 "langfuse_url": _langfuse_session_url(r["task_id"]),
             }
         )
-    return {"total": total, "limit": limit, "offset": offset, "items": items}
+    for tid in _disk_task_ids():
+        if tid in db_ids:
+            continue
+        item = _disk_task_item(tid)
+        if item:
+            items.append(item)
+    items.sort(key=lambda x: x.get("updated_at") or x.get("created_at") or "", reverse=True)
+    total = len(items)
+    return {"total": total, "limit": limit, "offset": offset, "items": items[offset: offset + limit]}
 
 
 @app.get("/metrics")

@@ -53,7 +53,7 @@ export const API_BASE =
  * running a whole other workflow as one step (`subworkflow`). A `subworkflow` node
  * sets `workflow` (a child workflow id) instead of `agent`.
  */
-export type NodeKind = "plan" | "work" | "synthesize" | "subworkflow";
+export type NodeKind = "plan" | "work" | "synthesize" | "subworkflow" | "native";
 
 /** Per-agent usage caps; `null` means "inherit the global cap / no override". */
 export interface Thresholds {
@@ -259,6 +259,7 @@ export interface WorkflowNode {
   id: string;
   agent: string | null;
   workflow?: string | null;
+  handler?: string | null;
   kind: NodeKind;
   upstream: string[];
   gate_before: boolean;
@@ -860,7 +861,7 @@ export function useUpdateThresholds() {
 export interface TraceEvent {
   agent_role: string; // the agent id, e.g. "planner", "researcher", "meta/title"
   node_id: string | null; // workflow node this call ran under (null for meta-prompt calls)
-  prompt_type: "user-facing" | "meta-prompt";
+  prompt_type: "user-facing" | "meta-prompt" | "native-stage";
   model: string | null;
   input_tokens: number;
   output_tokens: number;
@@ -882,6 +883,7 @@ export interface TraceResponse {
   status: string;
   routing: RoutingResult | null;
   events: TraceEvent[];
+  prover?: Record<string, unknown> | null;
 }
 
 /**

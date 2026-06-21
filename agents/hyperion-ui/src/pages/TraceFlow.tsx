@@ -136,6 +136,7 @@ interface AgentNodeData extends Record<string, unknown> {
   label: string; // primary label — the workflow node id (or the meta role label)
   agentLabel: string; // which agent ran this node (display name)
   kind: string; // node role: plan / work / synthesize (empty for meta)
+  handler: string;
   model: string;
   inputTokens: number;
   outputTokens: number;
@@ -146,8 +147,15 @@ interface AgentNodeData extends Record<string, unknown> {
   durationMs: number;
   callCount: number;
   rawEvents: TraceEvent[];
+  moduleIO: ModuleIO[];
   skipped: boolean; // node was in the workflow but did not fire this run
   skipReason: string | null;
+}
+
+interface ModuleIO {
+  title: string;
+  input: string;
+  output: string;
 }
 
 /** Tailwind accent classes per node kind, for the small role pill. */
@@ -155,6 +163,7 @@ const KIND_ACCENT: Record<string, string> = {
   plan: "bg-violet-900/50 text-violet-300",
   work: "bg-sky-900/50 text-sky-300",
   synthesize: "bg-emerald-900/50 text-emerald-300",
+  native: "bg-amber-900/50 text-amber-300",
 };
 
 /**
@@ -197,6 +206,7 @@ function AgentNodeCard({ data, selected }: NodeProps) {
           <span>↑ {fmtTokens(d.inputTokens)}</span>
           <span>↓ {fmtTokens(d.outputTokens)}</span>
           <span className="text-emerald-400">{fmtCost(d.costUsd)}</span>
+          {d.moduleIO.length > 0 && <span className="text-sky-300">I/O</span>}
         </div>
       )}
       <Handle type="source" position={Position.Bottom} className="!bg-slate-500" />
@@ -323,10 +333,11 @@ function DetailSidebar({
       />
       <SidebarHeader title={d.label} onClose={onClose} />
       <div className="flex-1 overflow-y-auto p-4 text-sm">
-        {/* Identity row: agent + kind */}
+        {/* Identity row: agent/native handler + kind */}
         <div className="mb-3 text-xs text-slate-400">
           {d.agentLabel}
           {d.kind && <span className="ml-2 text-slate-500">· {d.kind}</span>}
+          {d.handler && <span className="ml-2 text-slate-500">· handler: {d.handler}</span>}
         </div>
 
         {d.skipped ? (
@@ -336,9 +347,16 @@ function DetailSidebar({
           </div>
         ) : (
           <>
-            {/* Meta row */}
+            {/* Runtime row */}
             <div className="mb-4 flex flex-wrap gap-2 text-xs">
-              <span className="rounded bg-slate-800 px-2 py-1 text-slate-300">{d.model || "—"}</span>
+              <span className="rounded bg-slate-800 px-2 py-1 text-slate-300">
+                Model called: {modelCalledLabel(d)}
+              </span>
+              {d.handler && (
+                <span className="rounded bg-slate-800 px-2 py-1 text-slate-300">
+                  Handler: {d.handler}
+                </span>
+              )}
               <span className="rounded bg-slate-800 px-2 py-1 text-slate-300">{d.durationMs}ms</span>
               {d.callCount > 1 && (
                 <span className="rounded bg-slate-800 px-2 py-1 text-slate-300">
@@ -380,20 +398,79 @@ function DetailSidebar({
               </div>
             )}
 
-            {/* Per-call accordion */}
-            <div className="mb-1.5 text-xs text-slate-500">
-              {d.callCount === 1 ? "LLM call" : `LLM calls (${d.callCount} reasoning steps)`}
-            </div>
-            <div className="space-y-1.5">
-              {d.rawEvents.map((ev, i) => (
-                <CallItem key={i} ev={ev} index={i} total={d.rawEvents.length} />
-              ))}
-            </div>
+            {/* Deterministic module input/output. Native prover stages do not always
+                have LLM calls, so this is the source of truth for manual inspection. */}
+            {d.moduleIO.length > 0 && (
+              <div className="mb-5">
+                <div className="mb-1.5 text-xs text-slate-500">Native module input / output</div>
+                <div className="space-y-2">
+                  {d.moduleIO.map((io, i) => (
+                    <ModuleIOBlock key={`${io.title}-${i}`} io={io} />
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {d.rawEvents.length > 0 ? (
+              <>
+                <div className="mb-1.5 text-xs text-slate-500">
+                  {d.callCount === 1 ? "LLM call" : `LLM calls (${d.callCount} reasoning steps)`}
+                </div>
+                <div className="space-y-1.5">
+                  {d.rawEvents.map((ev, i) => (
+                    <CallItem key={i} ev={ev} index={i} total={d.rawEvents.length} />
+                  ))}
+                </div>
+              </>
+            ) : (
+              <div className="rounded border border-edge bg-slate-900/40 px-3 py-2 text-xs text-slate-500">
+                No LLM calls were recorded for this module.
+              </div>
+            )}
           </>
         )}
       </div>
     </aside>
   );
+}
+
+function ModuleIOBlock({ io }: { io: ModuleIO }) {
+  const [open, setOpen] = useState(true);
+  return (
+    <div className="rounded border border-edge text-xs">
+      <button
+        className="flex w-full items-center justify-between px-3 py-2 text-left hover:bg-slate-800/50"
+        onClick={() => setOpen((o) => !o)}
+        type="button"
+      >
+        <span className="font-medium text-slate-300">{io.title}</span>
+        <span className="text-slate-600">{open ? "▲" : "▼"}</span>
+      </button>
+      {open && (
+        <div className="grid gap-2 border-t border-edge p-3 md:grid-cols-2">
+          <div>
+            <div className="mb-1 text-[11px] text-slate-500">Input</div>
+            <pre className="max-h-96 overflow-y-auto whitespace-pre-wrap rounded bg-black/40 p-2 font-mono text-[11px] leading-relaxed text-slate-300">
+              {io.input || "(none)"}
+            </pre>
+          </div>
+          <div>
+            <div className="mb-1 text-[11px] text-slate-500">Output</div>
+            <pre className="max-h-96 overflow-y-auto whitespace-pre-wrap rounded bg-black/40 p-2 font-mono text-[11px] leading-relaxed text-slate-300">
+              {io.output || "(none)"}
+            </pre>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function modelCalledLabel(d: AgentNodeData): string {
+  if (d.kind === "native" || d.model === "native" || d.agentLabel.startsWith("native/")) {
+    return "none - native Python handler";
+  }
+  return d.model || "not recorded";
 }
 
 /**
@@ -611,6 +688,235 @@ function groupBy(
   return order.map((key) => ({ key, events: byKey[key] }));
 }
 
+function asObject(v: unknown): Record<string, unknown> {
+  return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
+}
+
+function pretty(v: unknown): string {
+  if (v == null || v === "") return "";
+  if (typeof v === "string") {
+    const trimmed = v.trim();
+    if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+      try {
+        return JSON.stringify(JSON.parse(trimmed), null, 2);
+      } catch {
+        return v;
+      }
+    }
+    return v;
+  }
+  try {
+    return JSON.stringify(v, null, 2);
+  } catch {
+    return String(v);
+  }
+}
+
+function nodeHandler(nodeId: string, workflowNode?: WorkflowRecord["nodes"][number]): string {
+  if (workflowNode?.handler) return workflowNode.handler;
+  if (nodeId.startsWith("synth_")) return "synthesize";
+  if (nodeId.startsWith("retrieve_")) return "retrieve";
+  if (nodeId.startsWith("verify_")) return "verify";
+  if (nodeId.startsWith("compare_")) return "compare";
+  if (nodeId.startsWith("abstract_")) return "abstract";
+  return nodeId;
+}
+
+function subgoalEntries(
+  data: TraceResponse,
+  workflowNode?: WorkflowRecord["nodes"][number],
+): [string, Record<string, unknown>][] {
+  const prover = asObject(data.prover);
+  const subgoals = asObject(prover.subgoals);
+  const entries = Object.entries(subgoals).map(([id, sg]) => [id, asObject(sg)] as [string, Record<string, unknown>]);
+  const wanted = workflowNode?.instruction?.trim();
+  return wanted ? entries.filter(([id]) => id === wanted) : entries;
+}
+
+function proverModuleIO(
+  data: TraceResponse,
+  nodeId: string,
+  workflowNode?: WorkflowRecord["nodes"][number],
+): ModuleIO[] {
+  const prover = asObject(data.prover);
+  if (!Object.keys(prover).length) return [];
+  const scaffold = prover.scaffold ?? null;
+  const resultLean = prover.result_lean ?? null;
+  const handler = nodeHandler(nodeId, workflowNode);
+  const goals = subgoalEntries(data, workflowNode);
+  const goalInput = goals.map(([id, sg]) => ({ id, lean_type: sg.lean_type }));
+  const io = (title: string, input: unknown, output: unknown): ModuleIO => ({
+    title,
+    input: pretty(input),
+    output: pretty(output),
+  });
+
+  if (handler === "lean_decompose" || nodeId === "decompose") {
+    return [
+      io(
+        "decompose",
+        { context_keys_read: ["request"], request: data.request },
+        {
+          context_keys_written: ["plan.md"],
+          informal_or_scaffold: scaffold,
+          subgoals: goalInput,
+          failure_reason: (prover.skeleton_ok === false ? "scaffold failed skeleton_check" : null),
+        },
+      ),
+    ];
+  }
+  if (handler === "skeleton_check") {
+    return [
+      io(
+        "skeleton_check",
+        { context_keys_read: ["plan.md"], scaffold },
+        {
+          context_keys_written: ["skeleton_ok", "skeleton_errors"],
+          skeleton_ok: prover.skeleton_ok,
+          verifier_response: { ok: prover.skeleton_ok ?? null, errors: prover.skeleton_errors ?? [] },
+          failure_reason: prover.skeleton_ok === false ? "Lean skeleton verifier rejected scaffold" : null,
+        },
+      ),
+    ];
+  }
+  if (handler === "retrieve") {
+    return goals.map(([id, sg]) =>
+      io(
+        `retrieve:${id}`,
+        { context_keys_read: [`concept_context:${id}`, "plan.md"], lean_type: sg.lean_type },
+        {
+          context_keys_written: [`candidate_a:${id}`, `candidates_a:${id}`, `concept_context:${id}`],
+          candidate_a: sg.candidate_a ?? null,
+          candidates_a: sg.candidates_a ?? [],
+          concept_context: sg.concept_context ?? [],
+          selected_candidate: sg.candidate_a ?? null,
+          failure_reason: sg.candidate_a ? null : "no applicable retrieved lemma",
+        },
+      ),
+    );
+  }
+  if (handler === "synthesize" || workflowNode?.kind === "synthesize" || workflowNode?.agent === "lemma_synthesizer") {
+    return goals.map(([id, sg]) =>
+      io(
+        `synthesize:${id}`,
+        { context_keys_read: ["plan.md", `concept_context:${id}`], lean_type: sg.lean_type, scaffold },
+        { context_keys_written: ["candidate_b"], candidate_b: sg.candidate_b ?? null },
+      ),
+    );
+  }
+  if (handler === "verify") {
+    return goals.map(([id, sg]) =>
+      io(
+        `verify:${id}`,
+        {
+          context_keys_read: [`candidate_a:${id}`, `candidates_a:${id}`, "candidate_b", `concept_context:${id}`],
+          candidate_a: sg.candidate_a ?? null,
+          candidates_a: sg.candidates_a ?? [],
+          candidate_b: sg.candidate_b ?? null,
+        },
+        {
+          context_keys_written: [`verified_a:${id}`, `verified_b:${id}`, `verify_decision:${id}`, `discharged:${id}`, `stall_errors:${id}`],
+          verify_decision: sg.verify_decision ?? null,
+          verifier_response: sg.verify_decision ?? null,
+          verified_a: sg.verified_a ?? null,
+          verified_b: sg.verified_b ?? null,
+          discharged: sg.discharged ?? null,
+          selected_candidate: sg.discharged ?? null,
+          stall_errors: sg.stall_errors ?? [],
+          failure_reason: sg.discharged ? null : sg.stall_errors ?? "no candidate verified",
+        },
+      ),
+    );
+  }
+  if (handler === "compare") {
+    return goals.map(([id, sg]) =>
+      io(
+        `compare:${id}`,
+        { context_keys_read: [`verified_a:${id}`, `verified_b:${id}`, `verify_decision:${id}`], verified_a: sg.verified_a ?? null, verified_b: sg.verified_b ?? null },
+        { context_keys_written: [`triple_log:${id}`], triple_log: sg.triple_log ?? null, discharged: sg.discharged ?? null, selected_candidate: sg.discharged ?? null },
+      ),
+    );
+  }
+  if (handler === "abstract") {
+    return goals.map(([id, sg]) =>
+      io(
+        `abstract:${id}`,
+        { context_keys_read: [`verified_b:${id}`, `discharged:${id}`], verified_b: sg.verified_b ?? null, discharged: sg.discharged ?? null },
+        { context_keys_written: [`abstracted:${id}`], abstracted: sg.abstracted ?? null, failure_reason: sg.abstracted ? null : "no verified fresh abstraction accepted" },
+      ),
+    );
+  }
+  if (handler === "escalation_gate") {
+    return goals.map(([id, sg]) =>
+      io(
+        `escalation_gate:${id}`,
+        { context_keys_read: [`verify_decision:${id}`, `discharged:${id}`, `stall_errors:${id}`], verify_decision: sg.verify_decision ?? null, discharged: sg.discharged ?? null },
+        { context_keys_written: [`escalated:${id}`], escalated: sg.escalated ?? null, stall_errors: sg.stall_errors ?? [], failure_reason: sg.escalated ? null : "normal proof discharged; escalation skipped" },
+      ),
+    );
+  }
+  if (handler === "synthesize_definition") {
+    return goals.map(([id, sg]) =>
+      io(
+        `synthesize_definition:${id}`,
+        { context_keys_read: [`escalated:${id}`, `stall_errors:${id}`, "plan.md"], escalated: sg.escalated ?? null, stall_errors: sg.stall_errors ?? [], lean_type: sg.lean_type },
+        { context_keys_written: [`synthesize_definition:${id}`, `concept_candidates:${id}`], synthesize_definition: sg.synthesize_definition ?? null, concept_candidates: sg.concept_candidates ?? [], failure_reason: sg.synthesize_definition ? null : "not escalated or no definition candidates" },
+      ),
+    );
+  }
+  if (handler === "verify_concept") {
+    return goals.map(([id, sg]) =>
+      io(
+        `verify_concept:${id}`,
+        { context_keys_read: [`concept_candidates:${id}`], concept_candidates: sg.concept_candidates ?? [] },
+        { context_keys_written: [`verify_concept:${id}`, `verified_concept:${id}`], verify_concept: sg.verify_concept ?? null, verified_concept: sg.verified_concept ?? null, verifier_response: sg.verify_concept ?? null, failure_reason: sg.verified_concept ? null : "no concept verified" },
+      ),
+    );
+  }
+  if (handler === "birth_ablation") {
+    return goals.map(([id, sg]) =>
+      io(
+        `birth_ablation:${id}`,
+        { context_keys_read: [`verified_concept:${id}`, `discharged:${id}`], verified_concept: sg.verified_concept ?? null, lean_type: sg.lean_type },
+        { context_keys_written: [`birth_ablation:${id}`, `accepted_concept:${id}`], birth_ablation: sg.birth_ablation ?? null, accepted_concept: sg.accepted_concept ?? null, selected_candidate: sg.accepted_concept ?? null, failure_reason: sg.accepted_concept ? null : "concept did not pass birth ablation" },
+      ),
+    );
+  }
+  if (handler === "bank_concept") {
+    return goals.map(([id, sg]) =>
+      io(
+        `bank_concept:${id}`,
+        { context_keys_read: [`accepted_concept:${id}`], accepted_concept: sg.accepted_concept ?? null },
+        { context_keys_written: [`bank_concept:${id}`, `discharged:${id}`], bank_concept: sg.bank_concept ?? null, discharged: sg.discharged ?? null, selected_candidate: sg.discharged ?? null },
+      ),
+    );
+  }
+  if (handler === "bank") {
+    return [
+      io(
+        "bank",
+        {
+          context_keys_read: [
+            "plan.md",
+            ...goals.map(([id]) => `discharged:${id}`),
+            ...goals.map(([id]) => `abstracted:${id}`),
+          ],
+          scaffold,
+          discharged: Object.fromEntries(goals.map(([id, sg]) => [id, sg.discharged ?? null])),
+          abstracted: Object.fromEntries(goals.map(([id, sg]) => [id, sg.abstracted ?? null])),
+        },
+        {
+          context_keys_written: ["artifacts/result.lean", "final_verify"],
+          result_lean: resultLean,
+          verifier_response: prover.final_verify ?? null,
+          failure_reason: asObject(prover.final_verify).ok === false ? "assembled result.lean failed final verification" : null,
+        },
+      ),
+    ];
+  }
+  return [];
+}
+
 /**
  * Build the React Flow node/edge graph for a trace from the *real* workflow DAG.
  *
@@ -661,9 +967,12 @@ function buildGraph(
 
   // Node metadata (agent + kind) from the workflow definition, when available.
   // A subworkflow node has no agent — label it with the child workflow id instead.
+  const wfById: Record<string, WorkflowRecord["nodes"][number]> = {};
   const wfMeta: Record<string, { agent: string; kind: string }> = {};
-  for (const n of workflow?.nodes ?? [])
+  for (const n of workflow?.nodes ?? []) {
+    wfById[n.id] = n;
     wfMeta[n.id] = { agent: n.agent ?? (n.workflow ? `↳ ${n.workflow}` : ""), kind: n.kind };
+  }
 
   // Events grouped by the node they ran under.
   const eventsByNode: Record<string, TraceEvent[]> = {};
@@ -684,7 +993,12 @@ function buildGraph(
 
   // Helper: derive the agent that ran a node (workflow def first, else events).
   const agentOf = (nodeId: string): string => {
-    if (wfMeta[nodeId]) return roleToLabel(wfMeta[nodeId].agent);
+    if (wfMeta[nodeId]) {
+      const agent = wfMeta[nodeId].agent;
+      if (agent) return roleToLabel(agent);
+      const handler = wfById[nodeId]?.handler;
+      return handler ? `native/${handler}` : "native";
+    }
     const evs = eventsByNode[nodeId];
     if (evs && evs.length) return roleToLabel(evs[0].agent_role);
     return nodeId.startsWith("agent:") ? roleToLabel(nodeId.slice(6)) : "—";
@@ -708,15 +1022,18 @@ function buildGraph(
       const x = -totalW / 2 + i * (NODE_W + H_GAP);
       const evs = eventsForNode(nodeId);
       const skipped = nodeId in skippedReason && evs.length === 0;
+      const moduleIO = proverModuleIO(data, nodeId, wfById[nodeId]);
       nodes.push({
         id: `node__${nodeId}`,
         type: "agentNode",
         position: { x, y },
         data: {
           ...aggregateStats(evs),
+          moduleIO,
           label: nodeId,
           agentLabel: agentOf(nodeId),
           kind: wfMeta[nodeId]?.kind ?? "",
+          handler: wfById[nodeId]?.handler ?? "",
           skipped,
           skipReason: skippedReason[nodeId] ?? null,
         } satisfies AgentNodeData,
@@ -760,9 +1077,11 @@ function buildGraph(
       position: { x, y: metaY },
       data: {
         ...aggregateStats(g.events),
+        moduleIO: [],
         label: roleToLabel(g.key),
         agentLabel: roleToLabel(g.key),
         kind: "",
+        handler: "",
         skipped: false,
         skipReason: null,
       } satisfies AgentNodeData,
