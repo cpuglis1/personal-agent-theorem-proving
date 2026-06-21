@@ -35,7 +35,12 @@ services:
   # ---------------------------------------------------------------------------
   lean:
     build:
-      context: ./lean-sidecar
+      # Relative build contexts resolve against the COMPOSE PROJECT DIRECTORY, which is
+      # the dir of the FIRST `-f` file (ai-router/), NOT this file's dir. A bare
+      # `./lean-sidecar` therefore resolved to the non-existent `ai-router/lean-sidecar`
+      # and broke `make lean-rebuild`. Spell it relative to ai-router/ so it matches the
+      # identical `lean` block in ai-router/docker-compose.yml (the merge must agree).
+      context: ../agents/hyperion/lean-sidecar
       dockerfile: Dockerfile
     container_name: lean
     restart: unless-stopped
