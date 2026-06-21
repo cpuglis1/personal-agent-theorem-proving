@@ -52,12 +52,14 @@ def test_format_trace_renders_each_stage_label():
         "candidate_a:h1": {"origin": "retrieve", "path": "A", "lean_type": "P", "proof_term": "pa"},
         "verified_a:h1": {"path": "A"},
         "verify_decision:h1": {"mode": "deploy", "a_attempts": 1, "repair_iters": 0},
+        "escalated:h1": False,
         "triple_log:h1": {"winner_path": "A", "compared": False, "scores": {"a": 0.0}},
         "discharged:h1": {"origin": "retrieve", "path": "A", "proof_term": "pa"},
     }
     text = format_trace(collect_trace(request="prove P", blackboard=bb, plan=None,
                                       result_lean="theorem t : P := pa", status="done"))
     for label in ("retrieve", "synthesize", "verify", "compare", "abstract", "discharged",
+                  "definition synth", "birth ablation", "concept bank",
                   "result.lean", "sub-goal h1"):
         assert label in text
 
@@ -126,6 +128,20 @@ def test_aggregate_empty_is_all_zero():
     assert agg["path_a_necessary_rate"] == 0.0 and agg["n_path_b_gated"] == 0
 
 
+def test_aggregate_concepts_counts_certified_reuse(monkeypatch):
+    monkeypatch.setattr(settings, "concept_promote_k", 2)
+    concepts = [
+        {"concept_id": "c1", "necessity_hits": 2, "provisional": False, "bank_id": "pt1"},
+        {"concept_id": "c2", "necessity_hits": 1, "provisional": True},
+    ]
+    agg = thesis_curve.aggregate_concepts(concepts)
+    assert agg["n_concepts"] == 2
+    assert agg["banked_concepts"] == 1
+    assert agg["certified_reusable_concepts"] == 1
+    assert agg["certified_reusable_rate"] == pytest.approx(0.5)
+    assert agg["total_necessity_hits"] == 3
+
+
 def test_running_curve_only_advances_on_solved():
     # A, B, B, (unsolved skipped) → cumulative A-rate: 1/1, 1/2, 1/3.
     curve = thesis_curve.running_curve(_TRIPLES)
@@ -188,4 +204,6 @@ async def test_thesis_summary_over_demo_runs(tmp_path):
     agg = thesis_curve.aggregate(triples)
     assert agg["n_subgoals"] == 4
     assert agg["solved"] == 4
-    assert "running A win-rate" in thesis_curve.format_summary(triples)
+    summary = thesis_curve.format_summary(triples, [{"concept_id": "c1", "necessity_hits": 2, "provisional": False}])
+    assert "running A win-rate" in summary
+    assert "concepts" in summary

@@ -116,8 +116,11 @@ class Settings(BaseSettings):
     # Lean prover retrieval stores are deliberately split:
     # - skill_library: Hyperion-proved lemmas, instrumented for snowball ablations.
     # - mathlib_premises: static traced Mathlib corpus, populated separately.
+    # - concepts: synthesized definitions + verified bridge lemmas, provisionally
+    #   accepted by birth ablation and later promoted/pruned over theorem streams.
     qdrant_skill_library_collection: str = "skill_library"
     qdrant_mathlib_premises_collection: str = "mathlib_premises"
+    qdrant_concepts_collection: str = "concepts"
 
     # SearXNG
     searxng_url: str = "http://localhost:8888"
@@ -198,6 +201,11 @@ class Settings(BaseSettings):
     # (definition + bridge lemmas) the synthesizer proposes when the normal path stalls. The
     # plan's `c`; cheap degeneracy gates prune most before any proving budget is spent.
     concept_candidates: int = 4
+    # Stream-level certification knobs for synthesized concepts. Promotion/pruning is
+    # intentionally external to a single proof run; these settings are read by the concept
+    # bank helpers and future stream drivers.
+    concept_promote_k: int = 2
+    concept_prune_idle_m: int = 15
     # Soundness contract strictness (the sorryAx gate; see crews/soundness.py). False
     # (default) tolerates the compiler-trusting native axioms (native_decide); True — the
     # recommended setting for HEADLINE runs — admits only the kernel base

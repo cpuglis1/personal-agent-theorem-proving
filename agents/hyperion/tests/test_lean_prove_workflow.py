@@ -29,11 +29,13 @@ from lean_mock import mock_lean
 from hyperion.config import settings
 from hyperion.crews import lean_handlers, runner
 from hyperion.crews.lean_handlers import (
-    ProofFailed,
+    ProofOutcome,
     lean_decompose_handler,
     abstract_handler,
+    bank_concept_handler,
     bank_handler,
     compare_handler,
+    escalation_gate_handler,
     skeleton_check_handler,
     verify_handler,
 )
@@ -150,6 +152,74 @@ async def test_shipped_lean_prove_mocked_workflow_runs_with_native_decompose(tmp
     assert store.call_count == 1
 
 
+@pytest.mark.anyio
+async def test_shipped_workflow_escalates_stall_and_banks_concept(tmp_path):
+    """The registered definition-synthesis handlers are reachable from the shipped DAG:
+    normal verify stalls, the concept branch accepts, bank_concept stages Path C, and the
+    final bank assembles through that proof."""
+
+    async def _fake_stage(task_id, request, stage, agents, tasks, cb, deadline):
+        if stage == "synthesize":
+            context_put(task_id, "candidate_b", {
+                "source": "theorem t_h1 : True := by sorry",
+                "statement": "theorem t_h1 : True",
+                "proof_term": "by sorry",
+                "origin": "synthesize",
+                "lean_type": "True",
+            })
+
+    def _won(src="theorem t : True := by trivial"):
+        return ProofOutcome(
+            closed=True,
+            source=src,
+            weak_source=src,
+            proof_term="by trivial",
+            repair_iters=0,
+            axioms=[],
+            axioms_clean=True,
+        )
+
+    lost = ProofOutcome(closed=False, source=None, weak_source=None, proof_term=None,
+                        repair_iters=3, axioms=[], axioms_clean=None)
+    concept = {
+        "definition": {"name": "Useful", "source": "def Useful (p : Prop) : Prop := p"},
+        "bridges": [{"name": "Useful.intro", "source": "theorem Useful.intro : Useful True := by trivial",
+                     "lean_type": "Useful True", "statement": "Useful.intro : Useful True"}],
+    }
+    proof_through_concept = "theorem ablation_target : True := by trivial"
+    prove = AsyncMock(side_effect=[lost, _won(), _won(proof_through_concept), lost])
+    lemma_store = MagicMock(return_value={"ok": True, "id": "lemma", "error": None})
+    concept_store = MagicMock(return_value={"ok": True, "id": "concept", "error": None})
+
+    with patch.object(settings, "tasks_dir", tmp_path), \
+         patch.object(runner, "build_agent", MagicMock()), \
+         patch.object(runner, "load_agent", MagicMock()), \
+         patch.object(runner, "discover_context", MagicMock(return_value=None)), \
+         patch.object(runner, "_node_task", MagicMock()), \
+         patch.object(runner, "_run_stage", new=_fake_stage), \
+         patch.object(lean_handlers, "retrieve_applicable_lemmas", lambda goal, **k: []), \
+         patch.object(lean_handlers, "propose_definition", AsyncMock(return_value=[concept])), \
+         patch.object(lean_handlers, "prove_proposition", prove), \
+         patch.object(lean_handlers, "propose_abstraction", AsyncMock(return_value=[])), \
+         patch("hyperion.memory.lemma_bank.store_lemma", lemma_store), \
+         patch("hyperion.memory.concept_bank.store_concept", concept_store), \
+         patch("hyperion.server.meta_tasks.run_meta_tasks", new=AsyncMock()), \
+         mock_lean(ok=True, targets=_VERIFY_TARGET):
+        result = await runner.run_task("native_escalate", "Prove that True.", workflow="lean-prove")
+
+    assert result["status"] == "done", result
+    with patch.object(settings, "tasks_dir", tmp_path):
+        assert context_get("native_escalate", "escalated:h1") is True
+        accepted = context_get("native_escalate", "accepted_concept:h1")
+        assert accepted["concept_id"]
+        discharged = context_get("native_escalate", "discharged:h1")
+        assert discharged["path"] == "C"
+    concept_store.assert_called_once()
+    assert lemma_store.call_count == 1
+    text = (tmp_path / "native_escalate" / "artifacts" / "result.lean").read_text(encoding="utf-8")
+    assert "sorry" not in text
+
+
 # ---------------------------------------------------------------------------
 # verify controller — repair delegation + oracle-not-faked + cap (isolated)
 # ---------------------------------------------------------------------------
@@ -188,10 +258,9 @@ async def test_verify_delegates_repair_but_only_kernel_yields_pass(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_nonconverging_repair_aborts_at_cap(tmp_path):
+async def test_nonconverging_repair_stalls_at_cap(tmp_path):
     """A repair agent that never converges (kernel always fails) hits
-    ``cap_repair_iters`` exactly and fails the sub-goal cleanly (raises ProofFailed),
-    instead of spinning. Proves the cap fires."""
+    ``cap_repair_iters`` exactly and records a structured stall instead of spinning."""
     with patch.object(settings, "tasks_dir", tmp_path), \
          patch.object(settings, "cap_repair_iters", 3):
         ctx = _verify_ctx("v2")
@@ -201,14 +270,15 @@ async def test_nonconverging_repair_aborts_at_cap(tmp_path):
         repair = AsyncMock(return_value="example : G := by sorry")
         with patch.object(lean_handlers, "propose_repair", repair), \
              mock_lean(results=[{"ok": False}], targets=_VERIFY_TARGET):
-            with pytest.raises(ProofFailed):
-                await verify_handler(ctx)
+            res = await verify_handler(ctx)
 
         # One proposal per iteration, capped — no more, no fewer.
+        assert res["ok"] is False and res["stalled"] is True
         assert repair.await_count == 3
         decision = context_get("v2", "verify_decision:sg")
         assert decision["repair_iters"] == 3
         assert decision["winner_path"] is None
+        assert context_get("v2", "stall_errors:sg")
 
 
 @pytest.mark.anyio
@@ -226,6 +296,27 @@ async def test_path_a_wins_without_calling_repair(tmp_path):
         assert res["winner_path"] == "A"
         repair.assert_not_awaited()
         assert context_get("v3", "discharged:sg")["proof_term"] == "pa"
+
+
+def test_synthesized_candidate_includes_retrieved_concept_context(tmp_path):
+    with patch.object(settings, "tasks_dir", tmp_path):
+        ctx = _verify_ctx("concept-reuse")
+        context_put("concept-reuse", "candidate_b:sg", {
+            "source": "theorem t : Useful True := by trivial",
+            "statement": "t : Useful True",
+            "proof_term": "by trivial",
+        })
+        context_put("concept-reuse", "concept_context:sg", [{
+            "definition": {"name": "Useful", "source": "def Useful (p : Prop) : Prop := p"},
+            "bridges": [{"source": "theorem Useful.intro : Useful True := by trivial"}],
+        }])
+
+        cand = lean_handlers._synthesized_candidate(ctx, "sg")
+
+    assert cand is not None
+    assert cand["source"].startswith("def Useful")
+    assert "theorem Useful.intro" in cand["source"]
+    assert "theorem t : Useful True" in cand["source"]
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +338,69 @@ def test_retrieve_and_synthesize_share_a_wave():
     # verify genuinely depends on both sourcing nodes.
     verify_node = next(n for n in wf.nodes if n.id == "verify")
     assert set(verify_node.upstream) == {"retrieve", "synthesize"}
+    assert next(n for n in wf.nodes if n.id == "escalation_gate").upstream == ["verify"]
+    assert next(n for n in wf.nodes if n.id == "bank").upstream == ["abstract", "bank_concept"]
+
+
+@pytest.mark.anyio
+async def test_escalation_gate_routes_only_stalls(tmp_path):
+    with patch.object(settings, "tasks_dir", tmp_path):
+        context_put("eg", "verify_decision:sg", {"winner_path": None})
+        context_put("eg", "discharged:sg", None)
+        stalled = await escalation_gate_handler(NativeNodeCtx(
+            task_id="eg",
+            node=WorkflowNode(id="escalation_gate", kind="native", handler="escalation_gate",
+                              instruction="sg"),
+            request="prove G",
+            progress_callback=None,
+        ))
+        assert stalled["escalated"] is True
+        assert context_get("eg", "escalated:sg") is True
+
+        context_put("eg2", "verify_decision:sg", {"winner_path": "A"})
+        context_put("eg2", "discharged:sg", {"path": "A"})
+        normal = await escalation_gate_handler(NativeNodeCtx(
+            task_id="eg2",
+            node=WorkflowNode(id="escalation_gate", kind="native", handler="escalation_gate",
+                              instruction="sg"),
+            request="prove G",
+            progress_callback=None,
+        ))
+        assert normal["escalated"] is False
+        assert context_get("eg2", "escalated:sg") is False
+
+
+@pytest.mark.anyio
+async def test_bank_concept_persists_and_stages_discharge(tmp_path):
+    with patch.object(settings, "tasks_dir", tmp_path):
+        context_put("bc", "accepted_concept:sg", {
+            "concept_id": "c1",
+            "definition": {"name": "Balanced", "source": "def Balanced : Prop := True"},
+            "bridges": [],
+            "with_proof": "theorem ablation_target : G := by exact proofG",
+            "origin": "synthesized",
+            "provisional": True,
+            "necessity_hits": 0,
+            "times_won": 1,
+        })
+        store = MagicMock(return_value={"ok": True, "id": "cid", "error": None})
+        ctx = NativeNodeCtx(
+            task_id="bc",
+            node=WorkflowNode(id="bank_concept", kind="native", handler="bank_concept",
+                              instruction="sg"),
+            request="prove G",
+            progress_callback=None,
+        )
+        with patch("hyperion.memory.concept_bank.store_concept", store):
+            res = await bank_concept_handler(ctx)
+
+    assert res["ok"] is True
+    store.assert_called_once()
+    with patch.object(settings, "tasks_dir", tmp_path):
+        discharged = context_get("bc", "discharged:sg")
+    assert discharged["path"] == "C"
+    assert discharged["concept_id"] == "c1"
+    assert discharged["proof_term"] == "by exact proofG"
 
 
 # ---------------------------------------------------------------------------
@@ -465,7 +619,7 @@ def test_compare_and_abstract_run_between_verify_and_bank():
     assert wave_of["abstract"] > wave_of["compare"]
     assert wave_of["bank"] > wave_of["abstract"]
     bank = next(n for n in wf.nodes if n.id == "bank")
-    assert bank.upstream == ["abstract"]
+    assert bank.upstream == ["abstract", "bank_concept"]
 
 
 @pytest.mark.anyio

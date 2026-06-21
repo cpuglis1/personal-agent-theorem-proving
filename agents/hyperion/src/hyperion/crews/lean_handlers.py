@@ -46,7 +46,7 @@ from hyperion.crews.lemma_compare import build_triple, choose_winner, generality
 from hyperion.crews.native import NativeNodeCtx, register_native_handler
 from hyperion.crews.plan_contract import Subtask, parse_plan
 from hyperion.crews.soundness import soundness_ok, source_declares_gap
-from hyperion.memory import lemma_bank
+from hyperion.memory import concept_bank, lemma_bank
 from hyperion.tools.lean_verify import verify_lean
 from hyperion.tools.lemma_retrieval import _lemma_type, retrieve_applicable_lemmas
 
@@ -260,6 +260,11 @@ def _synthesized_candidate(ctx: NativeNodeCtx, sg_id: str) -> Optional[dict[str,
     # a core-provable goal isn't failed by the synthesizer's dialect (see the helper).
     if raw.get("source"):
         raw["source"] = _sanitize_lean_source(raw["source"])
+        concepts = ctx.get(_bb_key("concept_context", sg_id)) or []
+        if concepts:
+            preamble = "\n\n".join(_concept_preamble(c) for c in concepts if _concept_preamble(c))
+            if preamble:
+                raw["source"] = f"{preamble}\n\n{raw['source']}"
     return raw
 
 
@@ -543,6 +548,8 @@ async def retrieve_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     sg_id = _subgoal_id(ctx)
     goal_type = _goal_type(ctx, sg_id)
     lemmas = retrieve_applicable_lemmas(goal_type)
+    concepts = concept_bank.retrieve_concepts(goal_type)
+    ctx.put(_bb_key("concept_context", sg_id), concepts)
     candidates = [_candidate_from_lemma(goal_type, lem) for lem in lemmas]
     # Depth axis: also stage ONE composition of the top-k banked lemmas, appended AFTER the
     # single-lemma candidates. verify tries singles first, so a goal that any one lemma closes
@@ -555,13 +562,14 @@ async def retrieve_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     ctx.put(_bb_key("candidate_a", sg_id), top)
     ctx.put(_bb_key("candidates_a", sg_id), candidates)
     ctx.progress(
-        f"[retrieve] {sg_id}: {len(lemmas)} applicable lemma(s)"
+        f"[retrieve] {sg_id}: {len(lemmas)} applicable lemma(s), {len(concepts)} concept(s)"
         f"{f' (+1 composition of {len(top_k)})' if len(top_k) >= 2 else ''}"
     )
     return {
         "handler": "retrieve",
         "subgoal": sg_id,
         "n_candidates": len(candidates),
+        "n_concepts": len(concepts),
         "has_candidate": top is not None,
     }
 
@@ -801,8 +809,9 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
          proposal per iteration to the ``repair`` agent (:func:`propose_repair`) and re-check
          it, up to ``settings.cap_repair_iters`` — yielding the verified Path-B lemma
          (``verified_b``).
-      3. Nothing verifies ⇒ raise :class:`ProofFailed` (fail the run cleanly; never report
-         a discharge that didn't happen).
+      3. Nothing verifies ⇒ record a structured stall. The Phase-4 definition-synthesis
+         branch may then try to birth a concept and write ``discharged:<sg>``; the final
+         bank step remains the hard proof-completion gate.
 
     DEPLOY (``prover_research_mode`` False, default) is exploit-first: it short-circuits
     once Path A closes and never pays to verify Path B — the historical behavior. RESEARCH
@@ -916,14 +925,22 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
 
     ctx.put(_bb_key("verify_decision", sg_id), decision)
     if winner is None:
-        # Clean failure: record the trace, then fail the run (no faked discharge).
+        # Clean stall: record the trace and let the Phase-4 escalation branch try to
+        # discharge the goal. ``bank`` raises later if no branch produced a proof.
         ctx.put(_bb_key("discharged", sg_id), None)
+        ctx.put(_bb_key("stall_errors", sg_id), [
+            f"no candidate closed after {decision['a_attempts']} Path-A attempt(s) "
+            f"and {decision['repair_iters']} repair iteration(s)"
+        ])
         ctx.progress(f"[verify] {sg_id}: no path closed the goal (gave up)")
-        raise ProofFailed(
-            f"sub-goal {sg_id!r}: no candidate closed after "
-            f"{decision['a_attempts']} Path-A attempt(s) and "
-            f"{decision['repair_iters']} repair iteration(s)"
-        )
+        return {
+            "handler": "verify",
+            "subgoal": sg_id,
+            "ok": False,
+            "winner_path": None,
+            "stalled": True,
+            "decision": decision,
+        }
 
     winner["lean_type"] = winner.get("lean_type") or goal
     ctx.put(_bb_key("discharged", sg_id), winner)
@@ -934,6 +951,43 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
         "ok": True,
         "winner_path": winner["path"],
         "decision": decision,
+    }
+
+
+async def escalation_gate_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
+    """Route a normal proof stall into definition synthesis.
+
+    The workflow engine is a pure DAG, not a conditional graph. This handler therefore
+    writes the branch predicate to the blackboard and the downstream definition-synthesis
+    nodes no-op when it is false. It also normalizes the context fields that the concept
+    proposer reads.
+    """
+    sg_id = _subgoal_id(ctx)
+    goal = _goal_type(ctx, sg_id)
+    decision = ctx.get(_bb_key("verify_decision", sg_id)) or {}
+    discharged = ctx.get(_bb_key("discharged", sg_id))
+    stalled = discharged is None and decision.get("winner_path") is None
+    if stalled:
+        ctx.put(_bb_key("escalated", sg_id), True)
+        ctx.put(_bb_key("stall_errors", sg_id), ctx.get(_bb_key("stall_errors", sg_id)) or [
+            f"normal prover stalled on {sg_id}"
+        ])
+        ctx.put(_bb_key("informal_proof", sg_id), ctx.get(_bb_key("informal_proof", sg_id)) or ctx.request)
+        ctx.put(_bb_key("lemma_plan", sg_id), ctx.get(_bb_key("lemma_plan", sg_id)) or "")
+        ctx.put(_bb_key("formalized_lemmas", sg_id), ctx.get(_bb_key("formalized_lemmas", sg_id)) or [])
+        ctx.put(_bb_key("parent_name", sg_id), ctx.get(_bb_key("parent_name", sg_id)) or "target")
+    else:
+        ctx.put(_bb_key("escalated", sg_id), False)
+    ctx.progress(
+        f"[escalation_gate] {sg_id}: "
+        + ("stalled; routing to definition synthesis" if stalled else "normal proof discharged; skipped")
+    )
+    return {
+        "handler": "escalation_gate",
+        "subgoal": sg_id,
+        "ok": True,
+        "escalated": bool(stalled),
+        "goal": goal,
     }
 
 
@@ -1179,6 +1233,15 @@ async def bank_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
         candidate_ids.append("0")  # always probe the happy-path fallback id too
     discharged = {sid: ctx.get(_bb_key("discharged", sid)) for sid in candidate_ids}
     discharged = {k: v for k, v in discharged.items() if v}
+    if ctx.node.instruction and ctx.node.instruction in candidate_ids:
+        required_ids = [ctx.node.instruction]
+    else:
+        required_ids = [s.id for s in subtasks] or (["0"] if candidate_ids else [])
+    missing = [sid for sid in required_ids if sid not in discharged]
+    if missing:
+        raise ProofFailed(
+            "cannot assemble result.lean; undischarged sub-goal(s): " + ", ".join(missing)
+        )
 
     scaffold = plan.scaffold or ""
     assembled_body = _assemble(scaffold, subtasks, discharged) if scaffold else ""
@@ -1401,6 +1464,19 @@ async def synthesize_definition_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     here — that is the next node, so the cheap gates spend no proving budget.
     """
     sg_id = _subgoal_id(ctx)
+    escalated = ctx.get(_bb_key("escalated", sg_id))
+    if escalated is False:
+        ctx.put(_bb_key("concept_candidates", sg_id), [])
+        ctx.put(_bb_key("synthesize_definition", sg_id),
+                {"subgoal": sg_id, "skipped": True, "reason": "not escalated"})
+        ctx.progress(f"[synthesize_definition] {sg_id}: skipped (not escalated)")
+        return {
+            "handler": "synthesize_definition",
+            "subgoal": sg_id,
+            "ok": False,
+            "skipped": True,
+            "reason": "not escalated",
+        }
     goal = _goal_type(ctx, sg_id)
     parent_name = ctx.get(_bb_key("parent_name", sg_id)) or ctx.get("parent_name") or ""
     decision = ctx.get(_bb_key("verify_decision", sg_id)) or {}
@@ -1579,7 +1655,7 @@ async def birth_ablation_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     package is staged at ``accepted_concept:<sg>`` with provisional bank fields
     (``necessity_hits``/``times_won``/``provisional``) for Phase 4 banking + promotion.
 
-    No bank write here (Phase 4); this only decides causal acceptance.
+    No bank write here; ``bank_concept`` persists only concepts that pass this causal test.
     """
     sg_id = _subgoal_id(ctx)
     goal = _goal_type(ctx, sg_id)
@@ -1651,6 +1727,60 @@ async def birth_ablation_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     }
 
 
+async def bank_concept_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
+    """Persist an accepted concept and expose its with-arm proof as a discharge.
+
+    The final ``bank`` handler still owns result.lean assembly and lemma banking. This
+    step only makes the language-extension branch visible to that existing path:
+    accepted concepts are stored in the ``concepts`` collection, and their birth proof is
+    staged as ``discharged:<sg>`` with path ``"C"``.
+    """
+    sg_id = _subgoal_id(ctx)
+    goal = _goal_type(ctx, sg_id)
+    accepted = ctx.get(_bb_key("accepted_concept", sg_id))
+    if not accepted:
+        ctx.put(_bb_key("bank_concept", sg_id),
+                {"subgoal": sg_id, "banked": False, "reason": "no accepted concept"})
+        ctx.progress(f"[bank_concept] {sg_id}: no accepted concept")
+        return {"handler": "bank_concept", "subgoal": sg_id, "ok": False,
+                "banked": False, "reason": "no accepted concept"}
+
+    store = concept_bank.store_concept(accepted, source_goal=ctx.request, theorem_id=ctx.task_id)
+    if store["ok"]:
+        accepted = {**accepted, "bank_id": store["id"]}
+        ctx.put(_bb_key("accepted_concept", sg_id), accepted)
+
+    definition = accepted.get("definition") or {}
+    discharged = {
+        "source": accepted.get("with_proof") or "",
+        "statement": f"theorem {_ABLATION_DECL} : {goal}",
+        "proof_term": _bare_proof_term({"source": accepted.get("with_proof") or ""})
+        or accepted.get("with_proof") or "",
+        "origin": "concept",
+        "path": "C",
+        "lean_type": goal,
+        "concept_id": accepted.get("concept_id"),
+        "definition_name": definition.get("name"),
+        "times_won": int(accepted.get("times_won") or 1),
+        "necessity_hits": int(accepted.get("necessity_hits") or 0),
+    }
+    ctx.put(_bb_key("discharged", sg_id), discharged)
+    result = {
+        "subgoal": sg_id,
+        "banked": store["ok"],
+        "store": store,
+        "concept_id": accepted.get("concept_id"),
+        "discharged": True,
+    }
+    ctx.put(_bb_key("bank_concept", sg_id), result)
+    ctx.progress(
+        f"[bank_concept] {sg_id}: "
+        + (f"banked concept {accepted.get('concept_id')}" if store["ok"]
+           else f"concept write failed ({store['error']})")
+    )
+    return {"handler": "bank_concept", "subgoal": sg_id, "ok": store["ok"], **result}
+
+
 # ---------------------------------------------------------------------------
 # Registration (mirrors crews.native's echo registration)
 # ---------------------------------------------------------------------------
@@ -1659,9 +1789,11 @@ register_native_handler("retrieve", retrieve_handler)
 register_native_handler("lean_decompose", lean_decompose_handler)
 register_native_handler("skeleton_check", skeleton_check_handler)
 register_native_handler("verify", verify_handler)
+register_native_handler("escalation_gate", escalation_gate_handler)
 register_native_handler("compare", compare_handler)
 register_native_handler("abstract", abstract_handler)
 register_native_handler("bank", bank_handler)
 register_native_handler("synthesize_definition", synthesize_definition_handler)
 register_native_handler("verify_concept", verify_concept_handler)
 register_native_handler("birth_ablation", birth_ablation_handler)
+register_native_handler("bank_concept", bank_concept_handler)

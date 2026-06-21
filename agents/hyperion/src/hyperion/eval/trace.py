@@ -25,6 +25,9 @@ from hyperion.memory.context_store import context_get
 _PER_SG_KEYS = (
     "candidate_a", "candidates_a", "candidate_b",
     "verified_a", "verified_b", "verify_decision",
+    "escalated", "synthesize_definition", "concept_candidates",
+    "verify_concept", "verified_concept", "birth_ablation",
+    "accepted_concept", "bank_concept",
     "triple_log", "discharged", "abstracted",
 )
 
@@ -141,6 +144,21 @@ def format_trace(trace: dict[str, Any]) -> str:
         out.append(
             f"  compare           : winner=Path {tl.get('winner_path')}  "
             f"compared={tl.get('compared')}  scores={tl.get('scores')}"
+        )
+        out.append(
+            f"  definition synth  : escalated={bool(e.get('escalated'))} "
+            f"candidates={len(e.get('concept_candidates') or [])} "
+            f"verified={_flag(e.get('verified_concept') is not None)}"
+        )
+        ba = e.get("birth_ablation") or {}
+        out.append(
+            f"  birth ablation    : pass={_flag(ba.get('accept'))} "
+            f"concept_id={ba.get('concept_id')}"
+        )
+        bc = e.get("bank_concept") or {}
+        out.append(
+            f"  concept bank      : banked={_flag(bc.get('banked'))} "
+            f"necessity_hits={(e.get('accepted_concept') or {}).get('necessity_hits')}"
         )
         ab = e.get("abstracted")
         if ab is None:

@@ -49,6 +49,25 @@ def load_triples(task_ids: Optional[Iterable[str]] = None) -> list[dict[str, Any
     return triples
 
 
+def load_concepts(task_ids: Optional[Iterable[str]] = None) -> list[dict[str, Any]]:
+    """Load every ``accepted_concept:<sg>`` record from run blackboards."""
+    if task_ids is None:
+        base = settings.tasks_dir
+        task_ids = [p.name for p in base.iterdir() if p.is_dir()] if base.exists() else []
+
+    concepts: list[dict[str, Any]] = []
+    for tid in sorted(task_ids):
+        ctx_path = settings.tasks_dir / tid / "context.json"
+        try:
+            data = json.loads(ctx_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        for key in sorted(data):
+            if key.startswith("accepted_concept:") and isinstance(data[key], dict):
+                concepts.append({**data[key], "task_id": tid, "subgoal": key.split(":", 1)[1]})
+    return concepts
+
+
 def aggregate(triples: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate triple logs into the thesis read-out metrics. Pure.
 
@@ -94,6 +113,27 @@ def aggregate(triples: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def aggregate_concepts(concepts: list[dict[str, Any]]) -> dict[str, Any]:
+    """Aggregate synthesized-concept reuse/certification metrics. Pure."""
+    n = len(concepts)
+    certified = [
+        c for c in concepts
+        if int(c.get("necessity_hits") or 0) >= settings.concept_promote_k
+        or c.get("provisional") is False
+    ]
+    banked = [c for c in concepts if c.get("bank_id") or c.get("banked")]
+    hits = [int(c.get("necessity_hits") or 0) for c in concepts]
+    return {
+        "n_concepts": n,
+        "banked_concepts": len(banked),
+        "certified_reusable_concepts": len(certified),
+        "certified_reusable_rate": (len(certified) / n) if n else 0.0,
+        "total_necessity_hits": sum(hits),
+        "max_necessity_hits": max(hits) if hits else 0,
+        "provisional_concepts": sum(1 for c in concepts if c.get("provisional", True)),
+    }
+
+
 def running_curve(triples: list[dict[str, Any]]) -> list[float]:
     """Cumulative Path-A (retrieval) win-rate after each *solved* sub-goal, in order.
 
@@ -133,9 +173,10 @@ def depth_curve(triples: list[dict[str, Any]]) -> list[float]:
     return curve
 
 
-def format_summary(triples: list[dict[str, Any]]) -> str:
+def format_summary(triples: list[dict[str, Any]], concepts: Optional[list[dict[str, Any]]] = None) -> str:
     """Render the aggregate + running curve as a short text block."""
     agg = aggregate(triples)
+    cagg = aggregate_concepts(concepts or [])
     curve = running_curve(triples)
     dcurve = depth_curve(triples)
     hist = ", ".join(f"d{d}:{agg['depth_histogram'][d]}" for d in sorted(agg["depth_histogram"]))
@@ -153,6 +194,10 @@ def format_summary(triples: list[dict[str, Any]]) -> str:
         f"weak Path B ({agg['path_a_necessary_rate']:.0%})  |  B gated out: {agg['n_path_b_gated']}",
         f"  running A win-rate  : {[round(x, 2) for x in curve]}",
         f"  running mean depth  : {[round(x, 2) for x in dcurve]}",
+        f"  concepts            : {cagg['n_concepts']} born, "
+        f"{cagg['certified_reusable_concepts']} certified reusable "
+        f"({cagg['certified_reusable_rate']:.0%}), "
+        f"necessity hits {cagg['total_necessity_hits']}",
         "  (thesis: BOTH curves trend UP — win-rate = reuse fires, depth = bank compounds)",
     ]
     return "\n".join(lines)

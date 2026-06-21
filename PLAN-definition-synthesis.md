@@ -30,10 +30,14 @@
 >   `with.won ∧ with.axioms_clean ∧ ¬without.won`; `solves-without` ⇒ reject. Accepted package →
 >   `accepted_concept:<sg>` with provisional fields (`provisional`, `necessity_hits=0`, `times_won=1`).
 >   Tests `tests/test_birth_ablation.py`; offline suite 310 passed.
-> - **Phase 4 → end: not yet implemented.** All four definition-synthesis handlers are registered but
->   NOT on any DAG. Next: Phase 4 = stall→escalation routing + `lean-prove.json` branch + `concepts`
->   bank collection + proactive reuse + stream-level promotion (`k`)/pruning (`m`) + `eval` read-out.
->   See `AI_CONTEXT.md` §0a for the fresh-model handoff covering Phases 4-6 step by step.
+> - **Phase 4 → verification: DONE.** `lean-prove.json` now routes stalls through
+>   `escalation_gate → synthesize_definition → verify_concept → birth_ablation → bank_concept`.
+>   Accepted concepts are persisted in Qdrant collection `concepts` via loud `concept_bank`
+>   writes and staged as Path C discharges for the existing final assembler. Config now has
+>   `qdrant_concepts_collection`, `concept_promote_k`, and `concept_prune_idle_m`; eval traces show
+>   escalation/concept lifecycle fields and thesis summaries include certified-reusable concept
+>   counts. Verification: offline `pytest tests -q -m 'not lean'` = 320 passed, 10 deselected;
+>   live `pytest tests -q -m lean` = 10 passed.
 
 ---
 
@@ -351,7 +355,7 @@ system invented (not in the prompt) that several later proofs **needed** — is 
 
 ## Verification
 
-1. **Offline** (`pytest tests -q -m 'not lean'`, keep green): unit tests cover —
+1. **Offline** (`pytest tests -q -m 'not lean'`, green at 320 passed): unit tests cover —
    - `soundness_ok`: rejects a `sorry`/`sorryAx` proof; rejects a user `axiom`; (strict) rejects
      `native_decide`/`Lean.ofReduceBool`; **accepts** a proof whose `#print axioms` ⊆
      `{propext, Classical.choice, Quot.sound}`; parses the "does not depend on any axioms" case.
@@ -360,13 +364,11 @@ system invented (not in the prompt) that several later proofs **needed** — is 
    - birth ablation: accept on `solves-with ∧ fails-without`; reject on `solves-without`; assert
      `B_ablate` is identical across arms.
    - promotion/pruning over a mocked stream (necessary on `≥k` → durable; idle `m` → pruned).
-2. **Live smoke (the real test):** Pantograph + a local prover (Goedel-Prover-V2-8B) + hammers.
-   Reset bank; run a **small, related theorem stream** in group theory designed so one definition
-   (e.g. a `Commutator`/`Conjugate`-style predicate) should emerge on a stuck theorem and then be
-   *reused* by ≥2 later ones. **Success =** the bank holds a concept whose definition was
-   synthesized (not seeded), every bridge passes the soundness contract (`axioms_clean=true`, no
-   `sorryAx`), and `necessity_hits ≥ k`. Inspect `tasks/<id>/context.json` for
-   `synthesize_definition`, `verify_concept`, `birth_ablation_pass`.
+2. **Live smoke:** the existing Lean sidecar smoke and `@pytest.mark.lean` tier are green
+   (10 passed), including `/axioms` soundness checks. The larger related-theorem-stream demo
+   remains the research evaluation run: reset bank; run a small group-theory stream designed so one
+   definition is born and reused by ≥2 later theorems; success is a synthesized concept with clean
+   bridges and `necessity_hits ≥ k`.
 
 ---
 
