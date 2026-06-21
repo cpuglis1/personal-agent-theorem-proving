@@ -24,9 +24,16 @@
 >   `verify_concept_handler` (elaborate def → non-vacuity probe → prove every bridge soundness-clean
 >   via `prove_proposition(decl=…)`). First fully-passing candidate → `verified_concept:<sg>`. No bank
 >   write yet (Phase 4). Tests `tests/test_concept_synthesis.py`; offline suite 304 passed.
-> - **Phases 3-4: not yet implemented.** Next: Phase 3 birth ablation. NOTE Phase 2 handlers are
->   registered but NOT yet on the `lean-prove` DAG — stall-detection + the escalation branch + concept
->   banking are Phase 4.
+> - **Phase 3 — birth ablation: DONE.** `birth_ablation_handler` (registered) re-proves the sub-goal
+>   WITH the concept's `def + bridges` in scope vs WITHOUT, at an identical budget (same
+>   `cap_repair_iters`, weak gate, goal — only the in-scope vocabulary differs). Accept iff
+>   `with.won ∧ with.axioms_clean ∧ ¬without.won`; `solves-without` ⇒ reject. Accepted package →
+>   `accepted_concept:<sg>` with provisional fields (`provisional`, `necessity_hits=0`, `times_won=1`).
+>   Tests `tests/test_birth_ablation.py`; offline suite 310 passed.
+> - **Phase 4 → end: not yet implemented.** All four definition-synthesis handlers are registered but
+>   NOT on any DAG. Next: Phase 4 = stall→escalation routing + `lean-prove.json` branch + `concepts`
+>   bank collection + proactive reuse + stream-level promotion (`k`)/pruning (`m`) + `eval` read-out.
+>   See `AI_CONTEXT.md` §0a for the fresh-model handoff covering Phases 4-6 step by step.
 
 ---
 

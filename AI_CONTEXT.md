@@ -54,8 +54,93 @@
     soundness-clean (`won ∧ axioms_clean`); first fully-passing candidate → `verified_concept:<sg>`.
     No bank write (Phase 4).
   - Tests: `tests/test_concept_synthesis.py` (14). Offline suite **304 passed**.
-- Next up: Phase 3 — birth ablation (`birth_ablation_handler`: re-prove the theorem through vs.
-  without the concept at identical `B_ablate`; accept iff solves-with ∧ fails-without).
+- **Phase 3 DONE (birth ablation — the same-budget causal test).** `birth_ablation_handler` (native,
+  registered) reads `verified_concept:<sg>` and re-proves the sub-goal twice at an IDENTICAL budget
+  (`settings.cap_repair_iters` repair rounds, same weak gate, same goal): the WITH arm has the
+  concept's `def + bridges` in scope (`_concept_preamble`), the WITHOUT arm does not. Both arms call
+  `prove_proposition(goal, seed, weak=…, max_repair=budget, decl="ablation_target", strict_soundness=…)`
+  — only the in-scope vocabulary differs. **Accept iff `with.won ∧ with.axioms_clean ∧ ¬without.won`**;
+  `solves-without` ⇒ reject (crutch/redundant). On accept, stages `accepted_concept:<sg>` = the concept
+  plus provisional bank fields (`provisional=True`, `necessity_hits=0`, `times_won=1`, `with_proof`).
+  Writes the full `birth_ablation:<sg>` trace either way. Tests `tests/test_birth_ablation.py` (6).
+  Offline suite **310 passed**.
+
+---
+
+## 0a. HANDOFF FOR A FRESH MODEL — Phases 4 → end
+
+> Phases 0-3 are committed on branch `postwork-eval-observability`. The four definition-synthesis
+> native handlers exist and are registered (`synthesize_definition`, `verify_concept`,
+> `birth_ablation`) BUT are **not yet on any workflow DAG** — they only run when a node references
+> them. `prove_proposition` is the shared proving kernel; `crews/soundness.soundness_ok` is the
+> `sorryAx` gate; read `PLAN-definition-synthesis.md` (authoritative) §Workflow, §Architecture changes,
+> §Acceptance, §Evaluation before starting. Keep every change additive + offline-test-first; never
+> treat `infra_ok=False` as a verdict; keep lemma/concept bank writes loud.
+
+**Phase 4 — DAG wiring + concept bank + stream-level promotion/pruning** (the big one):
+1. **Stall detection / escalation.** Today `verify_handler` raises `ProofFailed` when no path closes.
+   Change the *control flow* (not necessarily verify itself) so a stall ROUTES to escalation instead
+   of hard-failing: the cleanest seam is a new native `escalation_gate` node (or a flag the runner
+   honors) that fires `synthesize_definition` only when `verify` produced no `discharged:<sg>` after
+   the repair budget (`r`) and `B_normal` is spent. Populate the blackboard keys the Phase-2 handlers
+   read: `stall_errors:<sg>` (from `verify_decision`), `informal_proof:<sg>`, `lemma_plan:<sg>`,
+   `formalized_lemmas:<sg>`, `parent_name:<sg>` (so degeneracy gates can reject parent-shaped defs).
+2. **DAG edit** `config/workflows/lean-prove.json`: add the branch after verify/repair:
+   `… → verify →(stall)→ synthesize_definition → verify_concept → birth_ablation →(accept)→ bank`.
+   Note these are extra native nodes sharing the per-sub-goal blackboard (namespaced via node
+   `instruction = <sg id>`, exactly like the existing prover nodes). Keep the normal path unchanged
+   when no stall.
+3. **Concept bank.** Extend `memory/lemma_bank.py` (or add `memory/concept_bank.py`) + a Qdrant
+   collection `concepts` storing `(concept_id, definition{name,source}, bridges[], origin, times_won,
+   necessity_hits, provisional)`. Add config `qdrant_concepts_collection="concepts"`. Make
+   `bank_handler` (or a new `bank_concept` step) write `accepted_concept:<sg>` there with **loud**
+   `StoreResult` like the lemma bank. Retrieval: prefer symbolic `exact?`/`apply?` over banked
+   concepts (unifiability, not embedding similarity) — vector recall is a fallback.
+4. **Proactive reuse.** On the normal path, consult the concept bank: surface a banked concept's
+   `def + bridges` into scope so a later theorem can prove THROUGH it without re-inventing. This is
+   what makes reuse compound (the whole thesis).
+5. **Stream-level promotion / pruning** (NOT a per-run node — a driver over `tasks/*`): promote a
+   provisional concept to durable when it is causally necessary (same with/without birth-ablation test)
+   on **≥ k distinct LATER theorems** (`necessity_hits ≥ k`); prune a concept unused across the next
+   **m** theorems. Add knobs `concept_promote_k=2`, `concept_prune_idle_m=15`. CRITICAL DISCIPLINE
+   (§Evaluation): promotion stats must NOT feed back into synthesis/selection — grading on your own
+   yardstick voids the result. Birth signal (helped the trigger) and certification (multi-theorem
+   necessity) stay independent.
+6. **Observability** `eval/trace.py`: add stage labels (`synthesize_definition`, `verify_concept`,
+   `birth_ablation`) + fields (`escalated`, `concept_id`, `birth_ablation_pass`, `axioms_clean`,
+   `necessity_hits`). `eval/thesis_curve.py` already aggregates triples — add a concepts read-out
+   (certified-reusable-concept count/rate/budget — the DEPENDENT VARIABLE of the whole study).
+
+**Phase 5 — Verification** (per plan §Verification):
+- Offline (`pytest -m 'not lean'`, keep green): promotion/pruning over a MOCKED stream (necessary on
+  ≥k → durable; idle m → pruned); the escalation routing (stall → synthesize → … ) with mocked LLM
+  + Lean; concept bank store/retrieve. Reuse `lean_mock.mock_lean` + `AsyncMock` patching of
+  `lean_handlers.propose_definition` / `prove_proposition` (see `tests/test_concept_synthesis.py`,
+  `tests/test_birth_ablation.py` for the patterns).
+- Live smoke (the real test): reset bank; run a small RELATED group-theory theorem stream designed so
+  one definition (e.g. a `Commutator`/`Conjugate` predicate) emerges on a stuck theorem and is reused
+  by ≥2 later ones. **Success =** bank holds a concept whose definition was *synthesized* (not seeded),
+  every bridge `axioms_clean` with no `sorryAx`, and `necessity_hits ≥ k`. Inspect
+  `tasks/<id>/context.json` for `synthesize_definition`/`verify_concept`/`birth_ablation`.
+
+**Phase 6 / out of scope (follow-ons, don't build now):** full RL self-play of conjecturer/prover;
+depth-steering as an explicit objective; MDL/compression of the bank; extrinsic-transfer harness vs
+held-out human theorems (NNG / textbook section); RAG over an informal corpus at proposal time;
+migrating Path-B `verify_handler` fully onto `prove_proposition` (it's the steady-state fallback).
+
+**Environment gotchas the next model WILL hit** (proven this session):
+- Live Lean tier needs the sidecar up: `make lean-rebuild` (now FIXED — see commit `87eba19`).
+- Docker Desktop's `docker-credential-desktop` helper returns exit 1 for buildkit's key
+  (`registry-1.docker.io`) while exit 0 for the classic key. If a build fails on "error getting
+  credentials" for a base image, run `docker pull <base-image>` once (classic creds path works), then
+  rebuild — buildkit then resolves metadata from local cache. Do NOT rewrite the user's
+  `~/.docker/config.json`.
+- `_subgoal_id` returns the node `instruction` (sub-goal id), else first active plan subtask, else
+  `"0"`. Blackboard keys are `<base>:<sg>` via `_bb_key`. In handler tests set `WorkflowNode(...,
+  instruction="root")` to pin the namespace.
+
+---
+
 - _(prior handoff)_ This handoff is for switching to Claude Code after the Codex session usage expired.
 - Docker is currently healthy. Running containers observed this session include `hyperion`, `hyperion-mcp`, `hyperion-ui`, `lean`, `litellm`, `qdrant`, `langfuse`, `searxng`, etc.
 - The Lean sidecar is healthy: `POST http://localhost:8900/verify` with `{"source":"theorem t : True := trivial","mode":"full"}` returned `{"ok":true,"errors":[],"elaborated_term":null}`.
@@ -123,7 +208,13 @@
   headline**. Active sequence: Phase 0 soundness gate **[done]** → Phase 1 `prove_proposition`
   extraction **[done]** → Phase 2 definition synthesis (`definition_synthesizer` agent +
   `synthesize_definition` / `verify_concept` handlers + degeneracy gates) **[done]** → Phase 3 birth
-  ablation → Phase 4 DAG wiring + concept bank schema + stream-level promotion/pruning.
+  ablation **[done]** → Phase 4 DAG wiring + concept bank schema + stream-level promotion/pruning **[NEXT]**.
+- [ ] **Phase 4 (NEXT): DAG wiring + concept bank + promotion/pruning.** See §0a for the full
+  step-by-step handoff. Stall→escalation routing, `lean-prove.json` branch, `concepts` Qdrant
+  collection + loud bank write, proactive reuse on the normal path, stream-level promotion (`k=2`) /
+  pruning (`m=15`), `eval/trace.py` + `thesis_curve.py` concept read-out.
+- [x] Birth ablation (Phase 3): done. `birth_ablation_handler` same-budget with/without causal test;
+  accept iff solves-with (clean) ∧ fails-without → `accepted_concept:<sg>`. Offline 310.
 - [x] Definition synthesis (Phase 2): done. `definition_synthesizer` agent, `propose_definition`,
   `definition_degeneracy_reasons`, `synthesize_definition`/`verify_concept` native handlers. Offline 304.
 - [x] Proving primitive (`prove_proposition`): done. Extracted from `verify_handler` Path B (no

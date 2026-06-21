@@ -1547,6 +1547,110 @@ async def verify_concept_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     }
 
 
+# ===========================================================================
+# Birth ablation (PLAN-definition-synthesis Phase 3) — same-budget causal test
+# ---------------------------------------------------------------------------
+# A concept is provisionally accepted ONLY if it *caused* the proof: re-prove the goal
+# THROUGH the package and WITHOUT it at an IDENTICAL budget; accept iff solves-WITH
+# (soundness-clean) AND fails-WITHOUT. solves-without ⇒ the concept caused nothing ⇒
+# reject (crutch/redundant). The budget must be exactly equal across arms or the causal
+# claim collapses — both arms call prove_proposition with the same max_repair, weak gate,
+# and goal; only the in-scope vocabulary differs.
+# ===========================================================================
+
+_ABLATION_DECL = "ablation_target"
+
+
+def _concept_preamble(concept: dict[str, Any]) -> str:
+    """The definition + all bridge sources, the vocabulary the WITH-arm proves through."""
+    def_src = ((concept.get("definition") or {}).get("source") or "").strip()
+    bridges = "\n\n".join((b.get("source") or "").strip() for b in concept.get("bridges") or [])
+    return f"{def_src}\n\n{bridges}".strip()
+
+
+async def birth_ablation_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
+    """Native step: the same-budget with/without causal test for a verified concept.
+
+    Reads ``verified_concept:<sg>`` and re-proves the sub-goal twice at an identical
+    budget (``settings.cap_repair_iters`` repair rounds, same weak gate, same goal):
+    the WITH arm has the concept's definition + bridges in scope, the WITHOUT arm does
+    not. Accept (provisionally) iff the WITH arm solves soundness-clean AND the WITHOUT
+    arm fails. ``solves-without`` ⇒ reject (the concept caused nothing). The accepted
+    package is staged at ``accepted_concept:<sg>`` with provisional bank fields
+    (``necessity_hits``/``times_won``/``provisional``) for Phase 4 banking + promotion.
+
+    No bank write here (Phase 4); this only decides causal acceptance.
+    """
+    sg_id = _subgoal_id(ctx)
+    goal = _goal_type(ctx, sg_id)
+    concept = ctx.get(_bb_key("verified_concept", sg_id))
+    if not concept:
+        ctx.put(_bb_key("birth_ablation", sg_id),
+                {"subgoal": sg_id, "ran": False, "reason": "no verified concept"})
+        ctx.progress(f"[birth_ablation] {sg_id}: no verified concept to test")
+        return {"handler": "birth_ablation", "subgoal": sg_id, "ok": False,
+                "birth_ablation_pass": False, "reason": "no verified concept"}
+
+    weak = settings.prover_weak_path_b
+    strict = settings.prover_soundness_strict
+    budget = settings.cap_repair_iters  # IDENTICAL across arms — B_ablate
+    target = f"theorem {_ABLATION_DECL} : {goal} := by sorry"
+    with_seed = f"{_concept_preamble(concept)}\n\n{target}\n"
+    without_seed = f"{target}\n"
+
+    # Same call shape both arms; the ONLY difference is whether the vocabulary is in scope.
+    with_out = await prove_proposition(
+        goal, with_seed, weak=weak, max_repair=budget, decl=_ABLATION_DECL,
+        strict_soundness=strict,
+    )
+    without_out = await prove_proposition(
+        goal, without_seed, weak=weak, max_repair=budget, decl=_ABLATION_DECL,
+        strict_soundness=strict,
+    )
+
+    with_solves = with_out.won and bool(with_out.axioms_clean)
+    without_solves = without_out.won
+    accept = with_solves and not without_solves
+    reject_reason = (
+        None if accept
+        else "solves without the concept (crutch/redundant)" if without_solves
+        else "with-arm did not solve soundness-clean"
+    )
+
+    result = {
+        "subgoal": sg_id, "ran": True, "concept_id": concept.get("concept_id"),
+        "budget": budget, "weak": weak,
+        "with_solves": with_solves, "without_solves": without_solves,
+        "with_axioms_clean": with_out.axioms_clean,
+        "with_repair_iters": with_out.repair_iters,
+        "without_repair_iters": without_out.repair_iters,
+        "accept": accept, "reject_reason": reject_reason,
+    }
+    ctx.put(_bb_key("birth_ablation", sg_id), result)
+
+    if accept:
+        accepted = {
+            **concept,
+            "with_proof": with_out.weak_source or with_out.source,
+            "birth_ablation": {"budget": budget, "with_repair_iters": with_out.repair_iters},
+            "provisional": True,
+            "necessity_hits": 0,   # later, distinct theorems that need it (Phase 4 promotion)
+            "times_won": 1,        # this birth
+        }
+        ctx.put(_bb_key("accepted_concept", sg_id), accepted)
+
+    ctx.progress(
+        f"[birth_ablation] {sg_id}: "
+        + (f"ACCEPT concept {concept.get('concept_id')}" if accept
+           else f"reject ({reject_reason})")
+    )
+    return {
+        "handler": "birth_ablation", "subgoal": sg_id, "ok": accept,
+        "birth_ablation_pass": accept, "concept_id": concept.get("concept_id"),
+        "with_solves": with_solves, "without_solves": without_solves,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Registration (mirrors crews.native's echo registration)
 # ---------------------------------------------------------------------------
@@ -1560,3 +1664,4 @@ register_native_handler("abstract", abstract_handler)
 register_native_handler("bank", bank_handler)
 register_native_handler("synthesize_definition", synthesize_definition_handler)
 register_native_handler("verify_concept", verify_concept_handler)
+register_native_handler("birth_ablation", birth_ablation_handler)
