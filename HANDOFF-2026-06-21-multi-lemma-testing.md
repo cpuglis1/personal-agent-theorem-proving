@@ -4,14 +4,44 @@ Date: 2026-06-21
 Branch: `postwork-eval-observability`
 Prereqs: see `LEAN-PROVE-PIPELINE.md` for the architecture + the 2026-06-21 changes.
 
-## Goal of the next session
+## Status after the stress run
 
-The per-sub-goal fan-out + tool-less synthesizer + parse robustness are landed and
-**live-validated on one problem** (`13b6236d`, `18 - 7 + 4 = 15` → banked 2/2,
-`final_verify ok`). Now stress the path across **3–5 distinctly different multi-lemma
-problems** to (a) confirm the fan-out generalizes and (b) characterize the one open issue —
-**decomposer closing-tactic variance** (sometimes a clean `exact h2`, sometimes a fragile
-`exact h2.trans (h1.symm ▸ rfl)` that fails skeleton).
+The per-sub-goal fan-out + tool-less synthesizer + parse robustness are now
+**live-validated across the full 10-case matrix** below: five different multi-lemma
+problems, each with a hinted and bare prompt. After the 2026-06-21 follow-up hardening,
+all 10 runs reached `final_verify ok: True`.
+
+Follow-up fixes landed during the stress run:
+
+- `plan_contract.py`: when `options[].subtasks[]` is missing, recover sub-goals from
+  scaffold `have h : T := sorry` holes. This fixed P3-bare plans that had a useful
+  scaffold but no structured options.
+- `lean_handlers.py`: canonicalize `.trans` chain closings such as
+  `exact h2.trans h1.symm` to `exact h2`, extending the earlier `▸` closing scrub.
+- `lean_handlers.py`: missing scaffold is now a real skeleton/decomposer failure, not an
+  inconclusive verifier result. This prevents false-green prover runs with no final
+  scaffold assembly.
+- `plan_contract.py`: malformed Lean string literal scalars such as
+  `lean_type: "ab" ++ "cd" = "abcd"` are escaped/quoted during YAML recovery. This fixed
+  the string-conjunction cases.
+
+Validation task IDs:
+
+| Case | Task | Result | Closing |
+| --- | --- | --- | --- |
+| P1-hint | `bfb7b90b` | done, `final_verify ok` | `exact h2` |
+| P1-bare | `8decb496` | done, `final_verify ok` | source had `exact h2.trans h1.symm`; assembled as `exact h2` |
+| P2-hint | `acb7e3b1` | done, `final_verify ok` | `exact ⟨h1, h2⟩` |
+| P2-bare | `e097f052` | done, `final_verify ok` | `exact And.intro h1 h2` |
+| P3-hint | `9b1cdbd1` | done, `final_verify ok` | `exact h2` |
+| P3-bare | `de6a507a` | done, `final_verify ok` | source had `▸`; assembled as `exact h2` |
+| P4-hint | `a1d4af92` | done, `final_verify ok` | `exact ⟨h1, h2⟩` |
+| P4-bare | `fee8cb6f` | done, `final_verify ok` | `exact And.intro h1 h2` |
+| P5-hint | `60cc7df7` | done, `final_verify ok` | `exact ⟨h1, h2⟩` |
+| P5-bare | `e02cb3d0` | done, `final_verify ok` | `exact And.intro h1 h2` |
+
+Tests: `344 passed` via `agents/hyperion/.venv/bin/pytest agents/hyperion/tests`.
+UI build: `npm run build` passed in `agents/hyperion-ui`.
 
 ## Environment
 
@@ -74,19 +104,18 @@ are banned from *winning*), and so the **composition** styles differ (defeq chai
 - `banked N/N` and `final_verify ok`;
 - any synthesizer candidate that failed verify and why (e.g. trailing `.`, banned tactic).
 
-## If the open issue bites (it will, without the hint)
+## If closing/output variance bites again
 
 **Update (2026-06-21): the mechanical fix below is landed.**
 `lean_handlers.py::_canonicalize_closing` (run from `_sanitize_scaffold`, covering both
-skeleton check and `bank`) rewrites a `▸`-cast closing tactic to `exact <last_have>`,
-kernel-arbitrated and idempotent (test: `test_scaffold_fragile_cast_closing_is_canonicalized`).
-The remaining options stay listed in case the fan-out stress run surfaces a closing the
-mechanical scrub doesn't cover.
+skeleton check and `bank`) rewrites `▸`-cast and `.trans` chain closings to
+`exact <last_have>`, kernel-arbitrated and idempotent
+(test: `test_scaffold_fragile_cast_closing_is_canonicalized`).
 
 Decomposer closing-tactic quality is the next reliability target. Options, cheapest first:
 - **Prompt:** constrain the closing line to `exact <final_have>` / `exact ⟨…⟩` / `calc`,
   explicitly forbidding `▸` term-mode casts. (Prompt-only is unreliable — we've seen it.)
-- **Mechanical (DONE):** detect a `▸`/over-clever closing in `_sanitize_scaffold` and
+- **Mechanical (DONE):** detect a `▸`/`.trans` over-clever closing in `_sanitize_scaffold` and
   rewrite the trivial defeq case to `exact <last_have>` (deterministic, like the comma scrub).
 - **Structural:** have the decomposer emit only the `have` holes and let a deterministic
   closer synthesize the composition (separate native step).

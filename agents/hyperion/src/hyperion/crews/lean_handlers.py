@@ -230,19 +230,19 @@ _TRAILING_COMMA_RE = re.compile(r",[ \t]*$", re.MULTILINE)
 # the skeleton type-check (the revision budget then gives up). These match the chain's
 # closing tactic and the trailing ``have`` identifier so we can rewrite the fragile close.
 _HAVE_ID_RE = re.compile(r"^\s*have\s+([A-Za-z_][A-Za-z0-9_']*)\b", re.MULTILINE)
-_FRAGILE_CLOSE_RE = re.compile(r"([ \t]*)exact\b[^\n]*▸")
+_FRAGILE_CLOSE_RE = re.compile(r"([ \t]*)exact\b[^\n]*(?:▸|\.trans\b)")
 
 
 def _canonicalize_closing(scaffold: str) -> str:
-    """Rewrite an over-clever ``▸``-cast closing tactic to the canonical ``exact <last_have>``.
+    """Rewrite over-clever chain closings to the canonical ``exact <last_have>``.
 
-    Only fires when the chain's *last* tactic line is an ``exact`` carrying a ``▸`` cast and
-    the scaffold has at least one ``have``; it then replaces that line with
-    ``exact <final have id>``. The kernel still arbitrates (skeleton check + the final
-    ``bank`` verify), so this can only swap a known-fragile closing for the canonical one —
-    never turn a failing proof into a false green. Conjunction closings (``exact ⟨h1, h2⟩``)
-    and already-canonical ``exact h2`` carry no ``▸`` and pass through untouched. Idempotent:
-    the rewritten ``exact <id>`` has no ``▸``, so a second pass is a no-op.
+    Only fires when the chain's *last* tactic line is an ``exact`` carrying either a ``▸``
+    cast or a transitivity composition (e.g. ``exact h2.trans h1.symm``) and the scaffold
+    has at least one ``have``; it then replaces that line with ``exact <final have id>``.
+    The kernel still arbitrates (skeleton check + final ``bank`` verify), so this can only
+    swap a known-fragile closing for the canonical one, never manufacture a false green.
+    Conjunction closings (``exact ⟨h1, h2⟩``) and already-canonical ``exact h2`` pass
+    through untouched. Idempotent: the rewritten ``exact <id>`` has no fragile marker.
     """
     have_ids = _HAVE_ID_RE.findall(scaffold)
     if not have_ids:
@@ -662,9 +662,9 @@ async def skeleton_check_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     """
     scaffold = parse_plan(ctx.task_id).scaffold
     if not scaffold:
-        ctx.put("skeleton_ok", None)
+        ctx.put("skeleton_ok", False)
         ctx.put("skeleton_errors", ["no scaffold in plan"])
-        return {"handler": "skeleton_check", "ok": None, "reason": "no scaffold in plan"}
+        return {"handler": "skeleton_check", "ok": False, "errors": ["no scaffold in plan"]}
     sg_id = _subgoal_id(ctx)
     res = verify_lean(_scaffold_as_command(scaffold, _goal_type(ctx, sg_id)), mode="skeleton")
     if not res["infra_ok"]:

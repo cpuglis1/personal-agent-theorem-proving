@@ -87,8 +87,13 @@ per-sub-goal status.
 
 ## Validation
 
-- **336 tests pass** (`.venv/bin/uv run pytest -q`), incl. runtime fan-out e2e, the
-  deterministic candidate capture, the scaffold/colon scrubs.
+- **344 tests pass** (`agents/hyperion/.venv/bin/pytest agents/hyperion/tests`), incl.
+  runtime fan-out e2e, deterministic candidate capture, scaffold/colon/string-literal
+  YAML scrubs, scaffold-only subtask recovery, and missing-scaffold failure behavior.
+- **Live 10-case matrix passes** (hinted + bare prompts for arithmetic chains,
+  arithmetic conjunction, exponent chain, boolean conjunction, and string conjunction).
+  All reached `final_verify ok: True`; task IDs are recorded in
+  `HANDOFF-2026-06-21-multi-lemma-testing.md`.
 - **Live, kernel-verified** (task `13b6236d`, "18 − 7 + 4 = 15"): fan-out over h1/h2, both
   discharged via Path B, `banked 2/2 lemma(s)`, `final_verify ok: True`:
   ```lean
@@ -105,12 +110,27 @@ The decomposer alternated between the correct `exact h2` and a fragile
 `exact h2.trans (h1.symm ▸ rfl)` whose `▸` cast failed skeleton (the revision budget then
 gave up). Fixed with the same mechanical, kernel-arbitrated approach as the comma scrub:
 `lean_handlers.py::_canonicalize_closing` (run from `_sanitize_scaffold`, so it covers both
-skeleton check and `bank` assembly) rewrites a `▸`-cast closing tactic — the chain's last
-non-blank line — to the canonical `exact <last_have>`. It fires only on a `▸`-carrying
-`exact`, so clean chain closes (`exact h2`) and conjunction closes (`exact ⟨h1, h2⟩`) pass
-through untouched, and it's idempotent. The kernel still arbitrates (skeleton + final
+skeleton check and `bank` assembly) rewrites a `▸`-cast or `.trans` chain closing tactic —
+the chain's last non-blank line — to the canonical `exact <last_have>`. Clean chain closes
+(`exact h2`) and conjunction closes (`exact ⟨h1, h2⟩` / `exact And.intro h1 h2`) pass through
+untouched, and the scrub is idempotent. The kernel still arbitrates (skeleton + final
 `bank` verify), so it can only swap a known-fragile closing for the canonical one, never
 manufacture a false green.
+
+## Scaffold contract recovery
+
+Two decomposer contract gaps surfaced in the matrix and are mechanically covered:
+
+- If the decomposer emits a useful scaffold but omits `options[].subtasks[]`,
+  `PlanFrontmatter.active_subtasks()` recovers typed sub-goals from the scaffold's
+  `have h : T := sorry` holes so fan-out still runs.
+- If the decomposer emits Lean string literal expressions as malformed YAML scalars
+  (`lean_type: "ab" ++ "cd" = "abcd"`), `_sanitize_frontmatter` escapes and quotes the
+  whole Lean expression so the scaffold/options are not dropped.
+
+Missing scaffold is now a real skeleton/decomposer failure (`ok=False`) rather than an
+inconclusive verifier result; this prevents false-green runs that bank a fallback single
+lemma without a final scaffold theorem.
 
 ## Constraints worth knowing for new test goals
 

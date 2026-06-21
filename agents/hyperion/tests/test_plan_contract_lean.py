@@ -63,6 +63,56 @@ def test_reads_lean_type_and_scaffold(tmp_path):
     assert [s.lean_type for s in subs] == ["P", "Q"]
 
 
+def test_recovers_active_subtasks_from_scaffold_when_options_missing(tmp_path):
+    """A scaffold-only prover plan still fans out over its typed ``have`` holes."""
+    scaffold_only = """---
+task_type: code
+scaffold: "example : 2 ^ 3 + 1 = 9 := by\\n  have h1 : 2 ^ 3 = 8 := sorry,\\n  have h2 : 8 + 1 = 9 := sorry,\\n  exact h2 ▸ h1"
+---
+body
+"""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        _write_plan(tmp_path, "t_scaffold_only", scaffold_only)
+        plan = parse_plan("t_scaffold_only")
+
+    subs = plan.active_subtasks()
+    assert [s.id for s in subs] == ["h1", "h2"]
+    assert [s.lean_type for s in subs] == ["2 ^ 3 = 8", "8 + 1 = 9"]
+
+
+def test_string_literal_lean_type_scalars_are_recovered(tmp_path):
+    """Lean string expressions can look partly quoted to YAML but must parse as one scalar."""
+    string_plan = """---
+task_type: code
+scaffold: |
+  example : ("ab" ++ "cd" = "abcd") ∧ ("x" ++ "yz" = "xyz") := by
+    have h1 : "ab" ++ "cd" = "abcd" := rfl;
+    have h2 : "x" ++ "yz" = "xyz" := rfl;
+    exact ⟨h1, h2⟩
+options:
+  - id: a
+    summary: string conjunction
+    subtasks:
+      - id: h1
+        description: first concatenation
+        lean_type: "ab" ++ "cd" = "abcd"
+      - id: h2
+        description: second concatenation
+        lean_type: "x" ++ "yz" = "xyz"
+---
+body
+"""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        _write_plan(tmp_path, "t_string_literals", string_plan)
+        plan = parse_plan("t_string_literals")
+
+    assert plan.scaffold is not None
+    assert [s.lean_type for s in plan.active_subtasks()] == [
+        '"ab" ++ "cd" = "abcd"',
+        '"x" ++ "yz" = "xyz"',
+    ]
+
+
 def test_old_plan_without_lean_type_or_scaffold_still_validates(tmp_path):
     """A pre-prover plan (no lean_type, no scaffold) parses with safe defaults."""
     legacy = """---

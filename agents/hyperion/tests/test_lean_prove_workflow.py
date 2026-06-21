@@ -120,6 +120,28 @@ async def test_native_decomposer_scaffold_wraps_for_skeleton_check(tmp_path):
     assert lean.call_args.kwargs["mode"] == "skeleton"
 
 
+@pytest.mark.anyio
+async def test_skeleton_check_missing_scaffold_is_decomposer_failure(tmp_path):
+    """A no-scaffold prover plan must revise/fail, not continue as a fake single-goal run."""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        task_dir = tmp_path / "missing_scaffold"
+        task_dir.mkdir(parents=True)
+        (task_dir / "plan.md").write_text("---\ncontext_brief: prose only\n---\n", encoding="utf-8")
+        check = WorkflowNode(
+            id="skeleton_check", kind="native", handler="skeleton_check", upstream=["decompose"]
+        )
+        ctx = NativeNodeCtx(
+            task_id="missing_scaffold",
+            node=check,
+            request="Prove that True.",
+            progress_callback=None,
+        )
+        res = await skeleton_check_handler(ctx)
+
+    assert res["ok"] is False
+    assert res["errors"] == ["no scaffold in plan"]
+
+
 def test_scaffold_lean3_trailing_commas_are_scrubbed():
     """A decomposer scaffold with Lean-3 ``:= sorry,`` tactic separators is scrubbed to a
     valid Lean 4 have-chain before skeleton/bank (the kernel rejects the comma form)."""
@@ -163,7 +185,16 @@ def test_scaffold_fragile_cast_closing_is_canonicalized():
     )
     assert _sanitize_scaffold(indented).splitlines()[-1] == "  exact h2"
 
-    # Clean chain close and ``And.intro`` conjunction close carry no ``▸`` — untouched.
+    # ``.trans`` without a ``▸`` is the same fragile chain-close family.
+    trans = (
+        "example : (20 - 5) + 3 = 18 := by\n"
+        "  have h1 : 20 - 5 = 15 := sorry\n"
+        "  have h2 : 15 + 3 = 18 := sorry\n"
+        "  exact h2.trans h1.symm\n"
+    )
+    assert _sanitize_scaffold(trans).splitlines()[-1] == "  exact h2"
+
+    # Clean chain close and ``And.intro`` conjunction close carry no fragile marker — untouched.
     clean_chain = "have h1 : 20 - 5 = 15 := sorry\nhave h2 : 15 + 3 = 18 := sorry\nexact h2"
     assert _sanitize_scaffold(clean_chain) == clean_chain
     conj = "have h1 : a := sorry\nhave h2 : b := sorry\nexact ⟨h1, h2⟩"

@@ -81,10 +81,17 @@ def _split_frontmatter(text: str) -> tuple[Optional[str], str]:
 _SCALAR_COLON_RE = re.compile(
     r"""^(?P<prefix>\s*(?:-\s+)?)(?P<key>[A-Za-z_][\w-]*):[ \t]+(?![|>&*"'\[{])(?P<val>.*:.*\S)\s*$"""
 )
+_LEAN_TYPE_RE = re.compile(
+    r"""^(?P<prefix>\s*(?:-\s+)?)(?P<key>lean_type):[ \t]+(?P<val>.+\S)\s*$"""
+)
 # A line that *introduces* a block scalar (``key: |`` / ``key: >`` with optional chomping
 # indicator), at any indent and possibly as a list item. Its body is every following line
 # that is blank or indented deeper than the introducer — and must be left untouched.
 _BLOCK_SCALAR_RE = re.compile(r"""^(?P<indent>\s*)(?:-\s+)?[A-Za-z_][\w-]*:[ \t]*[|>][+-]?\d*[ \t]*$""")
+_SCAFFOLD_HAVE_RE = re.compile(
+    r"""^\s*have\s+(?P<id>[A-Za-z_][\w']*)\s*:\s*(?P<lean_type>.*?)\s*:=\s*sorry\b""",
+    re.MULTILINE,
+)
 
 
 def _sanitize_frontmatter(raw: str) -> str:
@@ -110,6 +117,16 @@ def _sanitize_frontmatter(raw: str) -> str:
         if bm:
             block_indent = len(bm.group("indent"))
             out.append(line)
+            continue
+        lm = _LEAN_TYPE_RE.match(line)
+        if lm:
+            val = lm.group("val").rstrip()
+            try:
+                yaml.safe_load(f"x: {val}")
+                out.append(line)
+            except yaml.YAMLError:
+                escaped = val.replace("\\", "\\\\").replace('"', '\\"')
+                out.append(f'{lm.group("prefix")}{lm.group("key")}: "{escaped}"')
             continue
         m = _SCALAR_COLON_RE.match(line)
         if m:
@@ -264,14 +281,16 @@ class PlanFrontmatter(BaseModel):
         Resolution order:
           1. The option whose ``id`` matches ``selected_option``, if any.
           2. Otherwise the first option (the planner's default/preferred plan).
-          3. An empty list when no options exist at all.
+          3. Typed ``have`` holes recovered from ``scaffold`` when no options
+             exist at all.
+          4. An empty list when neither options nor typed scaffold holes exist.
 
         Returns:
             The list of :class:`Subtask` objects for the active option, or an
             empty list when there are no options.
         """
         if not self.options:
-            return []
+            return _subtasks_from_scaffold(self.scaffold or "")
         chosen = None
         if self.selected_option:
             # Find the explicitly selected option by id; may be None if the id
@@ -280,6 +299,24 @@ class PlanFrontmatter(BaseModel):
         # Fall back to the first option when nothing was selected or the
         # selection didn't resolve.
         return (chosen or self.options[0]).subtasks
+
+
+def _subtasks_from_scaffold(scaffold: str) -> list[Subtask]:
+    """Recover typed prover subtasks from a scaffold-only decomposer plan.
+
+    Decomposer output sometimes contains the useful have-chain scaffold but omits
+    ``options[].subtasks[]`` entirely. In that case, the scaffold itself is the
+    typed contract: every ``have hᵢ : T := sorry`` hole is an independently
+    dischargeable sub-goal. Recovering those holes preserves fan-out without
+    affecting normal structured plans.
+    """
+    out: list[Subtask] = []
+    for match in _SCAFFOLD_HAVE_RE.finditer(scaffold or ""):
+        sid = match.group("id").strip()
+        lean_type = match.group("lean_type").strip()
+        if sid and lean_type:
+            out.append(Subtask(id=sid, description=f"prove {lean_type}", lean_type=lean_type))
+    return out
 
 
 def _plan_path(task_id: str):
