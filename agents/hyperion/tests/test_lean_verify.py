@@ -17,7 +17,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hyperion.tools.lean_verify import LeanVerifyTool, verify_lean
+from hyperion.tools.lean_verify import LeanVerifyTool, lean_axioms, verify_lean
 
 
 def _resp(payload):
@@ -120,6 +120,73 @@ def test_tool_wrapper_coerces_bad_mode_to_full():
 
 
 # ---------------------------------------------------------------------------
+# Unit (offline) — lean_axioms client (the #print axioms soundness chokepoint)
+# ---------------------------------------------------------------------------
+
+
+def test_axioms_parses_dependency_list():
+    payload = {"ok": True, "axioms": ["propext", "Classical.choice", "Quot.sound"], "errors": []}
+    with patch("httpx.post", return_value=_resp(payload)):
+        res = lean_axioms("theorem t : True := trivial", "t")
+    assert res["ok"] is True
+    assert res["infra_ok"] is True
+    assert res["axioms"] == ["propext", "Classical.choice", "Quot.sound"]
+
+
+def test_axioms_empty_list_is_a_real_verdict():
+    payload = {"ok": True, "axioms": [], "errors": []}
+    with patch("httpx.post", return_value=_resp(payload)):
+        res = lean_axioms("theorem t : True := trivial", "t")
+    assert res["ok"] is True and res["infra_ok"] is True and res["axioms"] == []
+
+
+def test_axioms_sorryax_surfaces_in_list():
+    payload = {"ok": True, "axioms": ["sorryAx"], "errors": []}
+    with patch("httpx.post", return_value=_resp(payload)):
+        res = lean_axioms("theorem t : True := by sorry", "t")
+    assert res["ok"] is True
+    assert res["axioms"] == ["sorryAx"]  # interpretation (reject) is soundness.py's job
+
+
+def test_axioms_elaboration_failure_is_not_clean():
+    payload = {"ok": False, "axioms": [], "errors": ["unknown identifier 't'"]}
+    with patch("httpx.post", return_value=_resp(payload)):
+        res = lean_axioms("nonsense", "t")
+    assert res["infra_ok"] is True
+    assert res["ok"] is False
+    assert res["errors"] == ["unknown identifier 't'"]
+
+
+def test_axioms_service_down_degrades_distinctly():
+    with patch("httpx.post", side_effect=Exception("connection refused")):
+        res = lean_axioms("theorem t : True := trivial", "t")
+    assert res["infra_ok"] is False
+    assert res["ok"] is False
+    assert any("unavailable" in e for e in res["errors"])
+
+
+def test_axioms_malformed_payload_is_infra_failure():
+    with patch("httpx.post", return_value=_resp({"axioms": []})):  # missing bool ok
+        res = lean_axioms("whatever", "t")
+    assert res["infra_ok"] is False
+    assert res["ok"] is False
+
+
+def test_axioms_forwards_decl():
+    captured = {}
+
+    def _capture(url, json, timeout):  # noqa: A002
+        captured["url"] = url
+        captured["json"] = json
+        return _resp({"ok": True, "axioms": [], "errors": []})
+
+    with patch("httpx.post", side_effect=_capture):
+        lean_axioms("src", "MyThm")
+    assert captured["url"].endswith("/axioms")
+    assert captured["json"] == {"source": "src", "decl": "MyThm"}
+
+
+# ---------------------------------------------------------------------------
 # Integration (live Lean) — real sidecar; skipped unless `lake` is installed
 # ---------------------------------------------------------------------------
 
@@ -157,3 +224,22 @@ def test_real_warm_cache_latency_recorded(capsys):
     assert res["infra_ok"] is True
     # Surfaced for Post-work cap tuning (run with -s to see it).
     print(f"[lean-latency] warm full verify round-trip: {elapsed*1000:.1f} ms")
+
+
+@pytest.mark.lean
+def test_real_axioms_clean_proof():
+    res = lean_axioms("theorem t : True := trivial", "t")
+    assert res["infra_ok"] is True, "Lean sidecar must be reachable for the lean tier"
+    assert res["ok"] is True
+    # A trivial proof depends on no axioms (or only the sound base).
+    from hyperion.crews.soundness import axioms_clean
+
+    assert axioms_clean(res["axioms"], strict=True)
+
+
+@pytest.mark.lean
+def test_real_axioms_reports_sorryax_for_gap():
+    res = lean_axioms("theorem t : True := by sorry", "t")
+    assert res["infra_ok"] is True
+    assert res["ok"] is True
+    assert "sorryAx" in res["axioms"], "an unclosed hole must surface as sorryAx"

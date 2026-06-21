@@ -194,6 +194,12 @@ class Settings(BaseSettings):
         "omega", "decide", "native_decide", "ring", "ring_nf", "linarith", "nlinarith",
         "polyrith", "norm_num", "aesop", "tauto", "simp_all", "field_simp",
     )
+    # Soundness contract strictness (the sorryAx gate; see crews/soundness.py). False
+    # (default) tolerates the compiler-trusting native axioms (native_decide); True — the
+    # recommended setting for HEADLINE runs — admits only the kernel base
+    # {propext, Classical.choice, Quot.sound}, so trust rests on the kernel alone. Either
+    # way sorryAx and user-declared axioms are always rejected (gap == incomplete proof).
+    prover_soundness_strict: bool = False
     # Max nesting depth for subworkflow nodes (a node whose kind is "subworkflow"
     # runs another workflow). The top-level run is depth 0; a subworkflow node at
     # depth d runs its child at depth d+1, and the runner aborts (CapExceeded) once

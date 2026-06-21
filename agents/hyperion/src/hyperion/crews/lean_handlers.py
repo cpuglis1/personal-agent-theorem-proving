@@ -38,12 +38,14 @@ from __future__ import annotations
 import json
 import logging
 import re
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from hyperion.config import settings
 from hyperion.crews.lemma_compare import build_triple, choose_winner, generality_score
 from hyperion.crews.native import NativeNodeCtx, register_native_handler
 from hyperion.crews.plan_contract import Subtask, parse_plan
+from hyperion.crews.soundness import soundness_ok
 from hyperion.memory import lemma_bank
 from hyperion.tools.lean_verify import verify_lean
 from hyperion.tools.lemma_retrieval import _lemma_type, retrieve_applicable_lemmas
@@ -652,6 +654,142 @@ def _necessary_lemma_ids(goal_type: str, lemmas: list[dict[str, Any]]) -> list[s
     return necessary
 
 
+@dataclass
+class ProofOutcome:
+    """Result of proving one proposition via the kernel + bounded repair loop.
+
+    The reusable proving kernel's return value (see :func:`prove_proposition`). It carries
+    both verdicts the weak-prover regime needs:
+
+    Attributes:
+        closed: True iff some attempt closed the goal at *full strength* (any tactics).
+        source: The full-strength closing source — the counterfactual ``b_strong`` (could
+            a strong prover close it?), or None.
+        weak_source: The closing source that ALSO passes :func:`_uses_only_weak_tactics`
+            — the proof eligible to *win* under the snowball value claim. Equals ``source``
+            when ``weak=False``; None when only a strong proof closed under the weak gate.
+        proof_term: The bare proof body of the winning source (``weak_source or source``).
+        repair_iters: Repair rounds performed (each is one ``repair`` agent call).
+        verdicts: Per-attempt ``{"path": "seed"|"repair", "ok": bool}`` trace.
+        errors: Diagnostics from the last attempt (empty when the last attempt closed).
+        axioms / axioms_clean: The soundness contract result on the winning source when a
+            ``decl`` was supplied; otherwise ``[]`` / None (probe skipped). ``axioms_clean``
+            is the bridge/lemma/ablation acceptance gate (Phases 2-4).
+    """
+
+    closed: bool
+    source: Optional[str]
+    weak_source: Optional[str]
+    proof_term: Optional[str]
+    repair_iters: int
+    verdicts: list[dict[str, Any]] = field(default_factory=list)
+    errors: list[str] = field(default_factory=list)
+    axioms: list[str] = field(default_factory=list)
+    axioms_clean: Optional[bool] = None
+
+    @property
+    def won(self) -> bool:
+        """True iff a *win-eligible* (weak-gated) proof closed the goal."""
+        return self.weak_source is not None
+
+
+async def prove_proposition(
+    goal_type: str,
+    seed_source: str,
+    *,
+    weak: bool = False,
+    max_repair: Optional[int] = None,
+    decl: Optional[str] = None,
+    strict_soundness: Optional[bool] = None,
+) -> ProofOutcome:
+    """Prove ``goal_type`` from ``seed_source`` via the kernel + bounded repair loop.
+
+    The proving kernel extracted from ``verify_handler`` Path B, made callable on any goal
+    so bridge lemmas, planned lemmas, and the same-budget ablation re-proofs (Phases 2-4)
+    all share one path. Verify the seed; on failure (or weak-gate ineligibility) delegate
+    ONE repair proposal per round to the ``repair`` agent (:func:`propose_repair`) and
+    re-check it with the kernel, up to ``max_repair`` rounds (default
+    ``settings.cap_repair_iters``).
+
+    The verdict is ALWAYS the kernel's — a repair proposal can be arbitrarily creative and
+    still cannot fake a pass. Honors the weak-prover gate exactly as the verify node does:
+    ``source`` is the full-strength close (the counterfactual), ``weak_source`` additionally
+    passes the weak-tactic gate.
+
+    When ``decl`` is given, the soundness contract (:func:`soundness.soundness_ok`) runs on
+    the winning source and fills ``axioms``/``axioms_clean`` — the kernel-grounded acceptance
+    gate for bridges/lemmas. With no ``decl`` (the verify node's anonymous ``example``
+    sources) the axiom probe is skipped; full-mode verification already forbids ``sorry``.
+
+    Args:
+        goal_type: The proposition being proved (passed to the repair agent as context).
+        seed_source: The initial candidate source to verify (e.g. a synthesized proof).
+        weak: Enforce the weak-prover gate on win-eligibility (snowball value claim).
+        max_repair: Repair-round cap (defaults to ``settings.cap_repair_iters``).
+        decl: Declaration name to run the soundness contract against; None skips the probe.
+        strict_soundness: Override ``settings.prover_soundness_strict`` for the probe.
+
+    Returns:
+        A :class:`ProofOutcome`.
+    """
+    cap = settings.cap_repair_iters if max_repair is None else max_repair
+    verdicts: list[dict[str, Any]] = []
+    strong_source: Optional[str] = None
+    weak_source: Optional[str] = None
+
+    closed, errors = _full_verdict(seed_source)
+    verdicts.append({"path": "seed", "ok": closed})
+    if closed:
+        strong_source = seed_source
+        if not weak or _uses_only_weak_tactics(seed_source):
+            weak_source = seed_source
+
+    cur_source = seed_source
+    repair_iters = 0
+    # Repair while we lack a win-eligible proof — covers both "did not close" and "closed
+    # but gated out by the weak prover". A strong close is kept as the counterfactual.
+    if weak_source is None:
+        for _ in range(cap):
+            repair_iters += 1
+            cur_source = _sanitize_lean_source(
+                await propose_repair(goal_type, cur_source, errors, weak=weak)
+            )
+            closed, errors = _full_verdict(cur_source)
+            verdicts.append({"path": "repair", "ok": closed})
+            if not closed:
+                continue
+            if strong_source is None:
+                strong_source = cur_source
+            if not weak or _uses_only_weak_tactics(cur_source):
+                weak_source = cur_source
+                break
+
+    win = weak_source or strong_source
+    proof_term = _bare_proof_term({"source": win}) if win else None
+
+    axioms: list[str] = []
+    axioms_clean: Optional[bool] = None
+    if win is not None and decl is not None:
+        strict = (
+            settings.prover_soundness_strict if strict_soundness is None else strict_soundness
+        )
+        sres = soundness_ok(win, decl, strict=strict)
+        axioms = sres.axioms
+        axioms_clean = sres.ok
+
+    return ProofOutcome(
+        closed=strong_source is not None,
+        source=strong_source,
+        weak_source=weak_source,
+        proof_term=proof_term,
+        repair_iters=repair_iters,
+        verdicts=verdicts,
+        errors=errors,
+        axioms=axioms,
+        axioms_clean=axioms_clean,
+    )
+
+
 async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     """The native controller: kernel verdict + deterministic routing + bounded repair.
 
@@ -732,38 +870,33 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     if research or verified_a is None:
         cb = _synthesized_candidate(ctx, sg_id)
         if cb:
-            closed, errors = _full_verdict(cb["source"])
-            _record("B", closed)
-            if closed:
-                b_strong = {**cb, "path": "B"}
-                if not weak or _uses_only_weak_tactics(cb["source"]):
-                    verified_b = b_strong
-            if verified_b is None:
-                cur_source = cb["source"]
-                for _ in range(settings.cap_repair_iters):
-                    decision["repair_iters"] += 1
-                    cur_source = _sanitize_lean_source(
-                        await propose_repair(goal, cur_source, errors, weak=weak)
-                    )
-                    closed, errors = _full_verdict(cur_source)
-                    _record("B-repair", closed)
-                    if not closed:
-                        continue
-                    repaired = {
-                        "source": cur_source,
-                        "statement": cb.get("statement", ""),
-                        # Store the BARE proof body, not the whole declaration, so the
-                        # bank and the scaffold assembly get a term that fits a hole.
-                        "proof_term": _bare_proof_term({"source": cur_source}),
-                        "origin": "repair",
-                        "lean_type": cb.get("lean_type") or goal,
-                        "path": "B",
-                    }
-                    if b_strong is None:
-                        b_strong = repaired
-                    if not weak or _uses_only_weak_tactics(cur_source):
-                        verified_b = repaired
-                        break
+            # The proving kernel (verify + bounded repair + weak gate) is shared with the
+            # bridge/lemma/ablation paths via prove_proposition; the verify node owns only
+            # the blackboard wiring around it.
+            outcome = await prove_proposition(goal, cb["source"], weak=weak)
+            for v in outcome.verdicts:
+                _record("B" if v["path"] == "seed" else "B-repair", v["ok"])
+            decision["repair_iters"] += outcome.repair_iters
+
+            def _as_candidate(src: str) -> dict[str, Any]:
+                # The synthesized seed keeps the synthesizer's metadata; a repaired source
+                # is wrapped with the BARE proof body so the bank/scaffold get a hole-fitting
+                # term, mirroring the prior inline construction.
+                if src == cb["source"]:
+                    return {**cb, "path": "B"}
+                return {
+                    "source": src,
+                    "statement": cb.get("statement", ""),
+                    "proof_term": _bare_proof_term({"source": src}),
+                    "origin": "repair",
+                    "lean_type": cb.get("lean_type") or goal,
+                    "path": "B",
+                }
+
+            if outcome.source is not None:
+                b_strong = _as_candidate(outcome.source)
+            if outcome.weak_source is not None:
+                verified_b = _as_candidate(outcome.weak_source)
 
     # b_strong closed at full strength but no eligible (weak) proof won ⇒ the gate is what
     # forces Path A to carry the goal — the load-bearing signal of the weak-prover headline.

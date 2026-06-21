@@ -140,6 +140,82 @@ def verify_lean(
     }
 
 
+class AxiomsResult(TypedDict):
+    """The ``#print axioms`` verdict for one declaration — the soundness signal.
+
+    Attributes:
+        ok: True iff the source elaborated and a ``#print axioms`` verdict was found
+            for ``decl``. Meaningful only when ``infra_ok`` is True. When False the
+            axiom set is meaningless (e.g. the proof itself failed to elaborate, so the
+            decl does not exist) — inspect ``errors``.
+        axioms: The parsed dependency list (``[]`` for "does not depend on any axioms").
+            ``sorryAx`` appears here exactly when a hole was left unclosed — the same
+            list that ``crews/soundness`` checks against the standard sound base.
+        errors: Parsed compiler diagnostics, or the infra reason when unreachable.
+        infra_ok: False ⇒ the verifier service was unreachable/errored (retryable);
+            the verdict is meaningless. True ⇒ ``ok``/``axioms`` are a real verdict.
+    """
+
+    ok: bool
+    axioms: list[str]
+    errors: list[str]
+    infra_ok: bool
+
+
+def lean_axioms(
+    source: str,
+    decl: str,
+    *,
+    timeout: float | None = None,
+) -> AxiomsResult:
+    """Return the ``#print axioms`` dependency set for ``decl`` in ``source``.
+
+    The kernel-grounded soundness chokepoint: the sidecar appends
+    ``#print axioms <decl>`` and reports the axioms ``decl`` transitively depends on.
+    Same fail-soft contract as :func:`verify_lean` — a sidecar outage degrades to
+    ``infra_ok=False`` (retryable), never a false ``ok=False``.
+
+    Args:
+        source: The full Lean 4 source containing ``decl`` (typically an already-
+            verified proof).
+        decl: The declaration name to print axioms for.
+        timeout: Optional per-call HTTP timeout (defaults to ``_TIMEOUT_SECONDS``).
+
+    Returns:
+        An :class:`AxiomsResult`. Interpretation of the axiom set against the sound
+        base lives in :mod:`hyperion.crews.soundness`, not here.
+    """
+    url = f"{settings.lean_url}/axioms"
+    try:
+        resp = httpx.post(
+            url,
+            json={"source": source, "decl": decl},
+            timeout=timeout or _TIMEOUT_SECONDS,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.warning("Lean verifier unreachable (%s) — degrading (infra_ok=False)", exc)
+        return {"ok": False, "axioms": [], "errors": [f"lean verifier unavailable: {exc}"], "infra_ok": False}
+
+    if not isinstance(data, dict) or not isinstance(data.get("ok"), bool):
+        logger.warning("Lean verifier returned a malformed axioms payload: %r", data)
+        return {"ok": False, "axioms": [], "errors": ["malformed verifier response"], "infra_ok": False}
+
+    raw_axioms = data.get("axioms") or []
+    if not isinstance(raw_axioms, list):
+        raw_axioms = [raw_axioms]
+    raw_errors = data.get("errors") or []
+    if not isinstance(raw_errors, list):
+        raw_errors = [raw_errors]
+    return {
+        "ok": bool(data["ok"]),
+        "axioms": [str(a) for a in raw_axioms],
+        "errors": [str(e) for e in raw_errors],
+        "infra_ok": True,
+    }
+
+
 class LeanVerifyTool(BaseTool):
     """CrewAI tool wrapper around :func:`verify_lean` for agent use.
 

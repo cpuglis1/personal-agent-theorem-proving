@@ -1,7 +1,45 @@
 # Shared AI Context & Handoff State
 
 ## 0. Current Handoff Note
-- This handoff is for switching to Claude Code after the Codex session usage expired.
+- **NEW DIRECTION (active thrust): definition-mediated proving.** The research target is now
+  `PLAN-definition-synthesis.md` — the system proves normally and, *only when stalled*, synthesizes
+  a new local definition + kernel-verified bridge lemmas and proves *through* it; a definition is
+  accepted as a concept only when **causally necessary across multiple theorems** (birth ablation +
+  cross-theorem promotion). The existing prover/bank/necessity machinery is **reused as substrate**,
+  not discarded. `PLAN-definition-synthesis.md` is the authoritative roadmap; the older
+  `lean-prover-master-build-plan.md` / `hyperion-as-lean-prover-baseline.md` are the substrate's
+  build history.
+- **Phase 0 DONE (soundness foundation — the new baseline).** The non-negotiable `sorryAx` gate is
+  implemented and offline-green:
+  - Sidecar (`lean-sidecar/server.py`) has a new `POST /axioms {source, decl} -> {ok, axioms,
+    errors}` endpoint: it appends `#print axioms <decl>`, elaborates, and parses the dependency list
+    (handles single-line, line-wrapped, "does not depend on any axioms", `sorryAx`, and elaboration-
+    failure shapes). The `lake env lean` run is factored into `_run_lean` and shared with `/verify`.
+  - Client `tools/lean_verify.py` gained `lean_axioms(source, decl) -> AxiomsResult` with the same
+    fail-soft contract as `verify_lean` (infra-down ⇒ `infra_ok=False`, never a false `ok=False`).
+  - New `crews/soundness.py`: `axioms_clean(axioms, *, strict)` (subset of `SOUND_BASE = {propext,
+    Classical.choice, Quot.sound}`; lax also tolerates native `Lean.ofReduceBool` etc., strict does
+    not), `source_declares_gap(source)`, and `soundness_ok(source, decl, *, strict) ->
+    SoundnessResult`. This is the single chokepoint to call at every acceptance/banking point.
+  - Config knob `prover_soundness_strict: bool = False` (set True for headline runs).
+  - Tests: `tests/test_soundness.py` + new `lean_axioms` cases in `tests/test_lean_verify.py`. Offline
+    suite is green at **282 passed** (was 253). The `@pytest.mark.lean` live tier for `/axioms` +
+    `soundness_ok` is written but requires a sidecar **rebuild** (`make lean-rebuild`) to ship the new
+    endpoint — the running image predates it.
+  - **Decision (recorded):** stay on the existing sidecar for the soundness check now; a Pantograph
+    swap (plan's recommended interaction layer) is a later, isolated change.
+- **Phase 1 DONE (proving primitive extracted).** `prove_proposition(goal_type, seed_source, *,
+  weak=…, max_repair=…, decl=…, strict_soundness=…) -> ProofOutcome` now lives in
+  `crews/lean_handlers.py` — the reusable kernel (verify seed → bounded `propose_repair` loop →
+  weak-tactic gate → optional `soundness_ok` when a `decl` is supplied). `verify_handler` Path B was
+  re-pointed at it with **no behavior change** (a `_as_candidate` wrapper rebuilds the blackboard
+  dicts exactly as before). `ProofOutcome` carries `closed`/`source` (full-strength counterfactual),
+  `weak_source` (win-eligible), `proof_term`, `repair_iters`, `verdicts`, `axioms`/`axioms_clean`,
+  and a `.won` property. Tests: `tests/test_prove_proposition.py` (8). Offline suite **290 passed**.
+  Bridges/planned-lemmas/ablation re-proofs in Phases 2-4 call this primitive.
+- Next up: Phase 2 — definition synthesis (`definition_synthesizer` agent + `synthesize_definition`
+  / `verify_concept` handlers + degeneracy gates), per `PLAN-definition-synthesis.md`.
+- _(prior handoff)_ This handoff is for switching to Claude Code after the Codex session usage expired.
 - Docker is currently healthy. Running containers observed this session include `hyperion`, `hyperion-mcp`, `hyperion-ui`, `lean`, `litellm`, `qdrant`, `langfuse`, `searxng`, etc.
 - The Lean sidecar is healthy: `POST http://localhost:8900/verify` with `{"source":"theorem t : True := trivial","mode":"full"}` returned `{"ok":true,"errors":[],"elaborated_term":null}`.
 - Backend tests are green after the latest changes: `make hyperion-test` -> `253 passed, 69 warnings`.
@@ -62,6 +100,17 @@
 - **Dirty worktree warning:** There were already unrelated dirty files before this session, including Docker/sidecar/test files from prior work. Do not revert unrelated changes. Files definitely touched in this session include `lean_handlers.py`, `lemma_bank.py`, `lemma_retrieval.py`, `config.py`, `lean-prove.json`, and the tests listed above. `AI_CONTEXT.md` was also updated for this handoff.
 
 ## 4. Immediate Next Steps & Blockers
+- **Roadmap reprioritized under the definition-synthesis thrust (`PLAN-definition-synthesis.md`).**
+  The substrate items below (Mathlib ingestion, Lean-native retriever, local prover-model Path-B,
+  symbolic anti-unification, ablation discipline) remain valid follow-ons but are **no longer the
+  headline**. Active sequence: Phase 0 soundness gate **[done]** → Phase 1 `prove_proposition`
+  extraction **[done]** → Phase 2 definition synthesis (`definition_synthesizer` agent +
+  `synthesize_definition` / `verify_concept` handlers + degeneracy gates) → Phase 3 birth ablation →
+  Phase 4 DAG wiring + concept bank schema + stream-level promotion/pruning.
+- [x] Proving primitive (`prove_proposition`): done. Extracted from `verify_handler` Path B (no
+  behavior change); `ProofOutcome` with strong/weak verdicts + soundness hook. Offline suite 290.
+- [x] Soundness contract (`sorryAx` gate): done. Sidecar `/axioms`, `lean_axioms`, `crews/soundness.py`,
+  `prover_soundness_strict` knob; offline suite green at 282. Live `/axioms` tier needs `make lean-rebuild`.
 - [x] Deterministic decomposition: done. The former live blocker, decomposer/LiteLLM ReAct stall after `context_put`, is removed from the critical `lean-prove` smoke path.
 - [x] Live sidecar smoke: done. `theorem t : True := trivial` verifies on `http://localhost:8900/verify`.
 - [x] Backend tests: done. `make hyperion-test` -> `253 passed, 69 warnings`.
