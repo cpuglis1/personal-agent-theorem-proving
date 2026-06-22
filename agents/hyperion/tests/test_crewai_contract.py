@@ -80,6 +80,8 @@ def test_hyperion_llm_retries_once_on_fallback(monkeypatch):
     llm._hyperion_task_id = None        # no cap check on this path
     llm._hyperion_role = None
     llm._hyperion_fallback_model = "openai/fallback-model"
+    llm._hyperion_max_calls = None      # no iteration ceiling on this path
+    llm._hyperion_calls = 0
     llm.model = "openai/primary-model"
 
     # The parent call() fails on the primary model, succeeds on the fallback.
@@ -112,6 +114,8 @@ def test_hyperion_llm_never_retries_on_cap_exceeded(monkeypatch):
     llm._hyperion_task_id = "t1"
     llm._hyperion_role = "researcher"
     llm._hyperion_fallback_model = "openai/fallback-model"
+    llm._hyperion_max_calls = None
+    llm._hyperion_calls = 0
     llm.model = "openai/primary-model"
 
     # Force the cap gate (which runs before delegation) to raise CapExceeded.
@@ -128,3 +132,35 @@ def test_hyperion_llm_never_retries_on_cap_exceeded(monkeypatch):
     with pytest.raises(CapExceeded):
         llm.call([{"role": "user", "content": "hi"}])
     assert delegated["called"] is False
+
+
+def test_hyperion_llm_caps_iterations(monkeypatch):
+    """The per-instance iteration ceiling stops CrewAI 0.86's unbounded parse-error loop.
+
+    CrewAI's executor recurses on OutputParserException without honoring ``max_iter`` (a
+    tool-less agent whose raw output the ReAct parser can't read re-prompts forever — the
+    observed 56-call / 145k-token synth runaway). HyperionLLM enforces ``max_calls`` at the
+    completion layer the executor can't bypass: the first N calls delegate, the (N+1)-th
+    raises ``AgentIterationCapExceeded`` instead of delegating."""
+    from hyperion.llms import AgentIterationCapExceeded, HyperionLLM
+
+    llm = HyperionLLM.__new__(HyperionLLM)
+    llm._hyperion_task_id = None
+    llm._hyperion_role = "lemma_synthesizer"
+    llm._hyperion_fallback_model = None
+    llm._hyperion_max_calls = 4
+    llm._hyperion_calls = 0
+    llm.model = "openai/primary-model"
+
+    delegated = {"n": 0}
+    monkeypatch.setattr(
+        HyperionLLM.__bases__[0], "call",
+        lambda self, *a, **k: delegated.__setitem__("n", delegated["n"] + 1) or "ok",
+    )
+
+    # The ceiling allows exactly max_calls delegations, then aborts the loop.
+    for _ in range(4):
+        assert llm.call([{"role": "user", "content": "x"}]) == "ok"
+    with pytest.raises(AgentIterationCapExceeded):
+        llm.call([{"role": "user", "content": "x"}])
+    assert delegated["n"] == 4  # the capped call never reached the parent LLM

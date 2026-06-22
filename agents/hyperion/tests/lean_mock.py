@@ -42,6 +42,11 @@ def mock_lean(
 
     Yields the primary mock so a test can assert call count / arguments (e.g. that
     the verify controller called the oracle exactly N times).
+
+    Note: the deterministic closer battery (verify_handler / the runner's synth-skip) also
+    calls ``verify_lean``. A test that scripts a ``results`` sequence for the candidate/repair
+    path should patch ``lean_handlers._run_closer_battery`` to a no-op so the battery's probes
+    don't consume that sequence — see ``_no_battery`` in the prover tests.
     """
     seq = [dict(r) for r in results] if results is not None else None
 

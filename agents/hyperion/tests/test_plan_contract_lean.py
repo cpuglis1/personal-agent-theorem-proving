@@ -63,6 +63,39 @@ def test_reads_lean_type_and_scaffold(tmp_path):
     assert [s.lean_type for s in subs] == ["P", "Q"]
 
 
+_CLOSER_PLAN = """---
+task_id: t_closer
+task_type: code
+selected_option: a
+options:
+  - id: a
+    summary: rewrite chain
+    closer: exact h1.trans h2
+    subtasks:
+      - id: h1
+        description: expand
+        lean_type: "a = b"
+      - id: h2
+        description: simplify
+        lean_type: "b = c"
+---
+narrative
+"""
+
+
+def test_active_closer_reads_option_closer(tmp_path):
+    """The decomposer's composing tactic is exposed via ``active_closer`` for the
+    active option; a plan without one returns ``None`` (heuristic closer applies)."""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        _write_plan(tmp_path, "t_closer", _CLOSER_PLAN)
+        plan = parse_plan("t_closer")
+        _write_plan(tmp_path, "t1", _PROVER_PLAN)
+        plan_no_closer = parse_plan("t1")
+
+    assert plan.active_closer() == "exact h1.trans h2"
+    assert plan_no_closer.active_closer() is None
+
+
 def test_recovers_active_subtasks_from_scaffold_when_options_missing(tmp_path):
     """A scaffold-only prover plan still fans out over its typed ``have`` holes."""
     scaffold_only = """---

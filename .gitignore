@@ -44,6 +44,9 @@ CLAUDE.md
 # ── Docker volumes (never in repo) ────────────────────────────────────────────
 ai-router/volumes/
 
+# ── Prover run artifacts (per-task state.db / context.json / progress.log) ────
+ai-router/tasks/
+
 # ── Editor ────────────────────────────────────────────────────────────────────
 .vscode/
 .idea/

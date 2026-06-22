@@ -30,7 +30,7 @@ from hyperion.agents.registry import AgentRecord, build_tools, load_agent
 from hyperion.config import settings
 from hyperion.crews.plan_contract import parse_plan, update_plan_frontmatter
 from hyperion.crews.workflows import WorkflowNode, expand_per_subgoal, topo_sort
-from hyperion.llms import make_agent_llm
+from hyperion.llms import AgentIterationCapExceeded, make_agent_llm
 from hyperion.memory.context_store import context_get, context_put
 
 logger = logging.getLogger(__name__)
@@ -42,6 +42,13 @@ class CapExceeded(RuntimeError):
     into a ``failed`` task result rather than letting the crew run unbounded."""
 
     pass
+
+
+# Force-answer/ReAct margin added to a record's ``max_iter`` to get the hard completion-call
+# ceiling enforced in HyperionLLM. CrewAI normally makes ~max_iter + 1 calls (the extra is the
+# force-final-answer turn); the margin keeps that legitimate path from tripping the ceiling
+# while still cutting off the unbounded parse-error loop.
+_AGENT_CALL_MARGIN = 3
 
 
 @dataclass
@@ -246,6 +253,11 @@ def build_agent(record: AgentRecord, task_id: str, node_id: str | None = None) -
         top_p=record.top_p,
         max_tokens=record.max_tokens,
         fallback_alias=record.fallback_alias,
+        # Hard completion-call ceiling = the record's max_iter plus a small force-answer
+        # margin. CrewAI honors max_iter on the happy path; this backstops the parse-error
+        # loop it does NOT bound (see AgentIterationCapExceeded), without tripping legitimate
+        # tool-use iterations (which make ~max_iter + 1 calls).
+        max_calls=max(1, record.max_iter) + _AGENT_CALL_MARGIN,
     )
     return Agent(
         role=_esc(record.role),
@@ -307,10 +319,18 @@ def _plan_task(
             "sub-goals, so plan.md may use one OR several active sub-goals. Decompose into "
             "as many `have <id> : <proposition> := sorry` steps as the proof needs. Each "
             "sub-goal is proved independently and then composed, so every `have` type must "
-            "be self-contained (provable without the other haves) and the closing lines "
-            "must derive the target from them. For natural-language math/word problems, "
-            "first formalize the final answer as a Lean proposition; use a single "
-            "final-proposition sub-goal when the goal is trivial.\n"
+            "be self-contained (provable without the other haves).\n"
+            "State the composition explicitly: give the chosen option a `closer:` field "
+            "holding the SINGLE Lean tactic that derives the target from those haves — e.g. "
+            "`exact h1.trans h2` for a rewrite/equality chain, `linarith [h1, h2]` for "
+            "linear arithmetic, `exact ⟨h1, h2⟩` when the target is a conjunction, or "
+            "`exact h1` when there is one sub-goal whose type IS the target. The skeleton "
+            "the kernel checks is `have …; <closer>`, so the closer must type-check against "
+            "the haves (do NOT make the last `have` a tautology and expect `exact <last>` to "
+            "close a different target). When in doubt, prefer fewer sub-goals — a single "
+            "sub-goal equal to the target with closer `exact h1` is always valid. For "
+            "natural-language math/word problems, first formalize the final answer as a Lean "
+            "proposition.\n"
             "Create a structured plan in plan.md in the workspace."
         ),
         expected_output="plan.md written to the task workspace.",
@@ -624,6 +644,29 @@ def _synthesize_instruction(task_id: str, node: WorkflowNode, request: str) -> s
         '{"source": <full Lean source>, "statement": <the theorem/lemma signature line>, '
         '"proof_term": <the proof>, "origin": "synthesize"}'
     )
+
+
+def _battery_closes_subgoal(
+    task_id: str, node: WorkflowNode, request: str,
+    progress_callback: Callable[[str], None] | None,
+) -> bool:
+    """Whether the deterministic closer battery would *win-eligibly* close this sub-goal.
+
+    The runner's "battery first" gate: a pure-kernel (no-LLM) probe, run before paying for
+    the synthesizer. Delegates to :func:`lean_handlers.subgoal_battery_closes` against a
+    NativeNodeCtx built from the *original* node (its ``instruction`` names the sub-goal,
+    matching what verify resolves). Defensive: any failure returns False so the LLM synth
+    still runs — the battery is an optimization, never a correctness dependency."""
+    from hyperion.crews.lean_handlers import subgoal_battery_closes
+    from hyperion.crews.native import NativeNodeCtx
+
+    try:
+        ctx = NativeNodeCtx(task_id=task_id, node=node, request=request,
+                            progress_callback=progress_callback)
+        return subgoal_battery_closes(ctx)
+    except Exception:
+        logger.exception("battery pre-check failed for %s; running LLM synth", node.id)
+        return False
 
 
 def _extract_json_object(text: str) -> dict | None:
@@ -949,6 +992,7 @@ async def _execute_workflow(
     depth: int = 0,
     run_meta: bool = True,
     expanded: bool = False,
+    floor_applied: bool = False,
 ) -> dict[str, Any]:
     """Run a workflow's nodes wave-by-wave from ``start_index``. Shared by the
     straight-through path (start 0) and the post-approval resume path. Within
@@ -1087,6 +1131,13 @@ async def _execute_workflow(
                 # Path-B synthesizer: the runner injects the per-sub-goal prompt and
                 # captures the candidate, so the hand-off never rides on a tool call.
                 is_synth = n.agent == _LEMMA_SYNTHESIZER
+                if is_synth and _battery_closes_subgoal(task_id, n, node_request, progress_callback):
+                    # Most cost-effective first: the deterministic closer battery (kernel-only,
+                    # no LLM) would win-eligibly close this sub-goal, so skip the LLM synth
+                    # entirely — verify re-runs the same battery and discharges it. The synth
+                    # node is the *escalation* path, paid for only when the battery can't win.
+                    return n.id, {"node": n.id, "synth": "battery-skip",
+                                  "subgoal": _synth_subgoal_id(task_id, n)}
                 task_node = (
                     n.model_copy(update={"instruction": _synthesize_instruction(task_id, n, request)})
                     if is_synth else n
@@ -1100,9 +1151,23 @@ async def _execute_workflow(
                     fb,
                     lean_profile=context_get(task_id, "lean_profile") or settings.lean_profile,
                 )
-                result = await _run_stage(
-                    task_id, request, n.id, [agt], [tsk], progress_callback, deadline
-                )
+                try:
+                    result = await _run_stage(
+                        task_id, request, n.id, [agt], [tsk], progress_callback, deadline
+                    )
+                except AgentIterationCapExceeded as exc:
+                    # The LLM-layer ceiling fired (CrewAI's parse-error loop). For the synth a
+                    # capped run simply yields no candidate — verify then finds no Path-B seed
+                    # and routes to escalation, exactly like an ordinary miss. Any other agent
+                    # hitting the ceiling is a genuine runaway, so re-raise to fail the stage.
+                    if not is_synth:
+                        raise
+                    if progress_callback:
+                        progress_callback(
+                            f"[synthesize] {_synth_subgoal_id(task_id, n)}: {exc}; no candidate"
+                        )
+                    return n.id, {"node": n.id, "synth": "iter-capped",
+                                  "subgoal": _synth_subgoal_id(task_id, n)}
                 if is_synth:
                     _capture_lemma_candidate(task_id, n, result)
                 return n.id, result
@@ -1178,6 +1243,38 @@ async def _execute_workflow(
                     )
                 if revise_count >= _MAX_REVISIONS:
                     errors = failed_skeletons[0][1].get("errors") or []
+                    # (A) Identity-decomposition floor. The LLM's decomposition couldn't be
+                    # made to compose within the revision budget. Rather than fail the run on
+                    # the (mechanically trivial) skeleton step, fall back to the always-valid
+                    # identity scaffold — the whole goal as one sub-lemma closed by
+                    # ``exact h1`` — and let the prover attempt the goal directly. Decomposition
+                    # is thus a pure optimization on top of a baseline that always reaches the
+                    # prover. Applied at most once (``floor_applied``); if even the identity
+                    # scaffold won't type-check (e.g. a malformed formal target), fail for real.
+                    floor_goal = context_get(task_id, "formal_goal")
+                    if not floor_applied and floor_goal:
+                        from hyperion.crews.lean_handlers import write_identity_plan
+
+                        write_identity_plan(task_id, request, str(floor_goal))
+                        if progress_callback:
+                            progress_callback(
+                                "[skeleton_check] revision budget exhausted; "
+                                "falling back to identity decomposition"
+                            )
+                        ids = [n.id for n in ordered]
+                        skeleton_index = (
+                            ids.index(failed_skeletons[0][0])
+                            if failed_skeletons[0][0] in ids
+                            else 0
+                        )
+                        return await _execute_workflow(
+                            task_id, request, workflow,
+                            start_index=skeleton_index, skip_first_gate=True, hitl=hitl,
+                            revise_count=revise_count, caps=caps,
+                            context_brief=context_brief, deadline=deadline, wall=wall,
+                            progress_callback=progress_callback, depth=depth,
+                            run_meta=run_meta, floor_applied=True,
+                        )
                     return _failed(
                         task_id,
                         "skeleton_check failed after revision budget: "
@@ -1194,8 +1291,11 @@ async def _execute_workflow(
                     + "\n\nRevise the Lean decomposition. The previous scaffold failed "
                     "skeleton type-checking with these Lean diagnostics:\n"
                     + "\n".join(str(e) for e in errors)
-                    + "\nReturn a corrected plan.md with a valid formal Lean target, "
-                    "a have-chain scaffold, and exact Lean subgoal types."
+                    + "\nReturn a corrected plan.md with exact Lean subgoal types and a "
+                    "`closer:` tactic that actually composes them into the target (the "
+                    "skeleton `have …; <closer>` must type-check). If you cannot find a "
+                    "composing decomposition, use a single sub-goal whose type IS the target "
+                    "with closer `exact h1`."
                 )
                 if progress_callback:
                     progress_callback(
@@ -1226,6 +1326,7 @@ async def _execute_workflow(
                     revise_count=revise_count + 1, caps=caps,
                     context_brief=context_brief, deadline=deadline, wall=wall,
                     progress_callback=progress_callback, depth=depth, run_meta=run_meta,
+                    floor_applied=floor_applied,
                 )
 
             # ---- Prover fan-out: a passed skeleton with >1 sub-goal needs one
@@ -1267,7 +1368,7 @@ async def _execute_workflow(
                                 revise_count=revise_count, caps=caps,
                                 context_brief=context_brief, deadline=deadline, wall=wall,
                                 progress_callback=progress_callback, depth=depth,
-                                run_meta=run_meta, expanded=True,
+                                run_meta=run_meta, expanded=True, floor_applied=floor_applied,
                             )
 
             # ---- Post-plan checks: affordance pause + record context brief --

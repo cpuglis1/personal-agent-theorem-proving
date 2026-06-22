@@ -120,6 +120,11 @@ def _mocked(problem: Problem, tasks_root: Path):
         ep(patch.object(runner, "_run_stage", new=_fake_stage))
         ep(patch("hyperion.crews.workflows.resolve_workflow", new=MagicMock(return_value=wf)))
         ep(patch.object(lean_handlers, "retrieve_applicable_lemmas", _fake_retrieve))
+        # Disable the deterministic closer battery: the demo's content-aware fake verifier
+        # would let the battery close every sorry-free probe, skipping the very synth/repair/
+        # research mechanics these samples exist to demonstrate. The battery is exercised by
+        # its own tests and the real dev/train eval.
+        ep(patch.object(lean_handlers, "_run_closer_battery", return_value=(None, None, [])))
         ep(patch.object(lean_handlers, "propose_repair", repair))
         ep(patch.object(lean_handlers, "propose_abstraction", abstraction))
         ep(patch("hyperion.tools.lean_verify.verify_lean", side_effect=_fake_verify))

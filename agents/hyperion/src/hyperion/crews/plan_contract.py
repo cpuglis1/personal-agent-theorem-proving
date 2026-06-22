@@ -188,12 +188,30 @@ class PlanOption(BaseModel):
         subtasks: Ordered list of :class:`Subtask` items that make up the option.
         est_tool_calls: Optional planner estimate of tool calls required, used as
             a rough cost/effort signal. ``None`` when the planner omits it.
+        closer: The single Lean tactic that derives the target from the option's
+            sub-goal ``have``\\ s (e.g. ``exact h1.trans h2``, ``linarith [h1, h2]``,
+            ``exact ⟨h1, h2⟩``, or ``exact h1`` for a lone sub-goal that *is* the
+            target). The skeleton is ``have …; <closer>`` and the kernel arbitrates
+            whether it composes — so the decomposer is free to propose *any* closing
+            tactic, not just the two shapes the heuristic could guess. ``None`` when
+            the planner omits it, in which case the heuristic closer is used.
     """
 
     id: str
     summary: str = ""
     subtasks: list[Subtask] = Field(default_factory=list)
     est_tool_calls: Optional[int] = None
+    closer: Optional[str] = None
+
+    @field_validator("closer", mode="before")
+    @classmethod
+    def _coerce_closer(cls, v: Any) -> Optional[str]:
+        """Stringify a scalar ``closer`` (YAML may type ``exact h1`` oddly) and drop blanks."""
+        if v is None:
+            return None
+        s = v if isinstance(v, str) else str(v)
+        s = s.strip()
+        return s or None
 
 
 class PlanFrontmatter(BaseModel):
@@ -299,6 +317,18 @@ class PlanFrontmatter(BaseModel):
         # Fall back to the first option when nothing was selected or the
         # selection didn't resolve.
         return (chosen or self.options[0]).subtasks
+
+    def active_closer(self) -> Optional[str]:
+        """The closing tactic of whichever option is in effect, mirroring
+        :meth:`active_subtasks` resolution. ``None`` when there are no options or the
+        active option omitted ``closer`` — callers then fall back to the heuristic
+        closer derived from the goal shape."""
+        if not self.options:
+            return None
+        chosen = None
+        if self.selected_option:
+            chosen = next((o for o in self.options if o.id == self.selected_option), None)
+        return (chosen or self.options[0]).closer
 
 
 def _subtasks_from_scaffold(scaffold: str) -> list[Subtask]:

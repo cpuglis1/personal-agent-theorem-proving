@@ -56,6 +56,16 @@ from hyperion.memory.context_store import context_get, context_put
 _VERIFY_TARGET = ("hyperion.crews.lean_handlers.verify_lean",)
 
 
+def _no_battery():
+    """Disable the deterministic closer battery for a test.
+
+    The battery (verify_handler + the runner's synth-skip) calls ``verify_lean`` too, so it
+    would consume a scripted ``mock_lean(results=[...])`` sequence or close a goal the test
+    means to route through the LLM/repair path. Tests that script the candidate/repair path
+    patch the battery to "closes nothing"; the battery has its own dedicated tests."""
+    return patch.object(lean_handlers, "_run_closer_battery", return_value=(None, None, []))
+
+
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
@@ -332,44 +342,47 @@ def test_scaffold_lean3_trailing_commas_are_scrubbed():
     assert _sanitize_scaffold(keep) == keep
 
 
-def test_scaffold_fragile_cast_closing_is_canonicalized():
-    """A decomposer's over-clever ``▸``-cast closing is rewritten to ``exact <last_have>``;
-    clean chain/conjunction closings pass through untouched."""
+def test_scaffold_preserves_composed_closer():
+    """The decomposer's closing tactic is left intact — composition is the planner's own
+    ``closer`` and the kernel arbitrates it. A transitivity/``▸`` close is a legitimate
+    proposal (a bad one fails skeleton_check → revision → identity floor), NOT a tic to
+    rewrite to ``exact <last_have>`` (which silently changed the proof's meaning)."""
     from hyperion.crews.lean_handlers import _sanitize_scaffold
 
-    fragile = (
+    composed = (
         "have h1 : 20 - 5 = 15 := sorry\n"
         "have h2 : 15 + 3 = 18 := sorry\n"
         "exact h2.trans (h1.symm ▸ rfl)\n"
     )
-    out = _sanitize_scaffold(fragile)
-    assert "▸" not in out
-    assert out.splitlines()[-1] == "exact h2"
-    # Idempotent: a second pass is a no-op.
-    assert _sanitize_scaffold(out) == out
-
-    # Indentation on the closing line is preserved (body-of-``by`` scaffolds are indented).
-    indented = (
-        "  have h1 : 20 - 5 = 15 := sorry\n"
-        "  have h2 : 15 + 3 = 18 := sorry\n"
-        "  exact h2.trans (h1.symm ▸ rfl)\n"
-    )
-    assert _sanitize_scaffold(indented).splitlines()[-1] == "  exact h2"
-
-    # ``.trans`` without a ``▸`` is the same fragile chain-close family.
+    # Only the trailing-comma scrub runs; the closer survives verbatim.
+    assert _sanitize_scaffold(composed) == composed
     trans = (
         "example : (20 - 5) + 3 = 18 := by\n"
         "  have h1 : 20 - 5 = 15 := sorry\n"
         "  have h2 : 15 + 3 = 18 := sorry\n"
-        "  exact h2.trans h1.symm\n"
+        "  exact h1.trans h2\n"
     )
-    assert _sanitize_scaffold(trans).splitlines()[-1] == "  exact h2"
+    assert _sanitize_scaffold(trans) == trans
 
-    # Clean chain close and ``And.intro`` conjunction close carry no fragile marker — untouched.
+    # Clean chain close and conjunction close also pass through untouched.
     clean_chain = "have h1 : 20 - 5 = 15 := sorry\nhave h2 : 15 + 3 = 18 := sorry\nexact h2"
     assert _sanitize_scaffold(clean_chain) == clean_chain
     conj = "have h1 : a := sorry\nhave h2 : b := sorry\nexact ⟨h1, h2⟩"
     assert _sanitize_scaffold(conj) == conj
+
+
+def test_native_scaffold_uses_explicit_closer():
+    """The planner's ``closer`` is what closes the have-chain — not the goal-shape heuristic."""
+    from hyperion.crews.lean_handlers import _native_closing_for_subtasks
+    from hyperion.crews.plan_contract import Subtask
+
+    subs = [Subtask(id="h1", lean_type="a = b"), Subtask(id="h2", lean_type="b = c")]
+    # With an explicit closer, it is used verbatim (kernel arbitrates composition).
+    assert _native_closing_for_subtasks("a = c", subs, "exact h1.trans h2") == "exact h1.trans h2"
+    # Without one, the heuristic falls back to ``exact <last>`` (non-conjunction goal).
+    assert _native_closing_for_subtasks("a = c", subs) == "exact h2"
+    # A conjunction goal whose conjuncts match the subgoals still gets the anonymous ctor.
+    assert _native_closing_for_subtasks("a = b ∧ b = c", subs) == "exact ⟨h1, h2⟩"
 
 
 def test_sanitize_lean_source_scrubs_named_example_and_mathlibisms():
@@ -546,6 +559,7 @@ async def test_shipped_lean_prove_mocked_workflow_runs_with_native_decompose(tmp
          patch.object(lean_handlers, "propose_abstraction", AsyncMock(return_value=[])), \
          patch("hyperion.memory.lemma_bank.store_lemma", store), \
          patch("hyperion.server.meta_tasks.run_meta_tasks", new=AsyncMock()), \
+         _no_battery(), \
          mock_lean(ok=True, targets=_VERIFY_TARGET):
         result = await runner.run_task("native_full", "Prove that True.", workflow="lean-prove")
 
@@ -628,6 +642,7 @@ async def test_shipped_workflow_escalates_stall_and_banks_concept(tmp_path):
          patch("hyperion.memory.lemma_bank.store_lemma", lemma_store), \
          patch("hyperion.memory.concept_bank.store_concept", concept_store), \
          patch("hyperion.server.meta_tasks.run_meta_tasks", new=AsyncMock()), \
+         _no_battery(), \
          mock_lean(ok=True, targets=_VERIFY_TARGET):
         result = await runner.run_task("native_escalate", "Prove that True.", workflow="lean-prove")
 
@@ -701,7 +716,11 @@ async def test_skeleton_failure_revises_decomposer_before_sourcing(tmp_path):
         result = await runner.run_task("revise_skeleton", "word problem", workflow="lean-prove")
 
     assert result["status"] == "done", result
-    assert calls[:3] == ["decompose", "decompose", "synthesize"]
+    # The bad formalization revises the decomposer (two decompose passes) before sourcing.
+    assert calls[:2] == ["decompose", "decompose"]
+    # Battery-first: the revised goal (`True`) is closed by the deterministic closer battery
+    # (rfl), so the LLM synth node is skipped — the cost-effective path runs before the LLM.
+    assert "synthesize" not in calls
     text = (tmp_path / "revise_skeleton" / "artifacts" / "result.lean").read_text(encoding="utf-8")
     assert "not Lean English prompt" not in text
 
@@ -780,6 +799,7 @@ async def test_verify_delegates_repair_but_only_kernel_yields_pass(tmp_path):
 
         repair = AsyncMock(return_value="-- still broken\nexample : G := by sorry")
         with patch.object(lean_handlers, "propose_repair", repair), \
+             _no_battery(), \
              mock_lean(results=[{"ok": False}, {"ok": False}, {"ok": True}],
                        targets=_VERIFY_TARGET):
             res = await verify_handler(ctx)
@@ -1053,6 +1073,7 @@ def _mock_prover_run(tasks_dir):
          patch.object(lean_handlers, "propose_abstraction", abstraction), \
          patch("hyperion.memory.lemma_bank.store_lemma", store), \
          patch("hyperion.server.meta_tasks.run_meta_tasks", new=AsyncMock()), \
+         _no_battery(), \
          mock_lean(ok=True, targets=_VERIFY_TARGET):
         yield store
 
@@ -1146,6 +1167,7 @@ async def test_shipped_single_chain_expands_per_subgoal_at_runtime(tmp_path):
          patch.object(lean_handlers, "propose_abstraction", abstraction), \
          patch("hyperion.memory.lemma_bank.store_lemma", store), \
          patch("hyperion.server.meta_tasks.run_meta_tasks", new=AsyncMock()), \
+         _no_battery(), \
          mock_lean(ok=True, targets=_VERIFY_TARGET):
         # Real resolver — load the SHIPPED single-chain lean-prove from config.
         result = await runner.run_task("prove_exp", "prove P ∧ Q", workflow="lean-prove")
@@ -1515,6 +1537,93 @@ async def test_bank_preserves_winner_counters_on_store(tmp_path):
 
     assert store.call_args.kwargs["times_retrieved"] == 7
     assert store.call_args.kwargs["times_won"] == 4
+
+
+# ---------------------------------------------------------------------------
+# Deterministic closer battery (Path-B seed) — pure structure + live-kernel regime gating
+# ---------------------------------------------------------------------------
+
+
+def test_closer_battery_tactics_prefixes_intros_only_for_arrow_goals():
+    """∀/→ goals get a structural ``intros; <c>`` variant after each closer; a plain goal
+    gets the bare closers only. Primitives (``rfl``) lead so the cheapest closer is tried
+    first."""
+    from hyperion.crews.lean_handlers import _closer_battery_tactics
+
+    plain = _closer_battery_tactics("2 + 2 = 4")
+    assert plain[0] == "rfl"
+    assert not any(t.startswith("intros;") for t in plain)
+
+    arrow = _closer_battery_tactics("∀ y : ℕ, 7 * (3 * y + 2) = 21 * y + 14")
+    assert "intros; rfl" in arrow
+    assert "intros; ring" in arrow
+    # the bare closer still precedes its intros-prefixed variant
+    assert arrow.index("ring") < arrow.index("intros; ring")
+
+    impl = _closer_battery_tactics("p → p")
+    assert any(t.startswith("intros;") for t in impl)
+
+
+def test_subgoal_battery_closes_signals_win_eligible_only(tmp_path):
+    """The runner's battery-first gate is True iff the battery yields a *win-eligible*
+    (weak-gated) proof — i.e. exactly when verify would discharge the goal from the battery,
+    so skipping the LLM synth is safe. A strong-only close (weak_source None) does NOT skip."""
+    from hyperion.crews.lean_handlers import subgoal_battery_closes
+
+    node = WorkflowNode(id="synthesize", kind="work", agent="lemma_synthesizer", instruction="h1")
+    ctx = NativeNodeCtx(task_id="bat", node=node, request="0 + 0 = 0", progress_callback=None)
+
+    with patch.object(settings, "tasks_dir", tmp_path):
+        # win-eligible close → skip the LLM synth.
+        with patch.object(lean_handlers, "_run_closer_battery",
+                          return_value=("example : 0 + 0 = 0 := by rfl", "example : ... := by rfl", [])):
+            assert subgoal_battery_closes(ctx) is True
+        # strong-only close (weak gated out) → must NOT skip; the synth/composition must run.
+        with patch.object(lean_handlers, "_run_closer_battery",
+                          return_value=(None, "example : G := by norm_num", [])):
+            assert subgoal_battery_closes(ctx) is False
+        # nothing closes → run the synth.
+        with patch.object(lean_handlers, "_run_closer_battery", return_value=(None, None, [])):
+            assert subgoal_battery_closes(ctx) is False
+
+
+@pytest.mark.lean
+def test_closer_battery_strong_regime_wins_with_norm_num():
+    """STRONG regime (``weak=False``): a goal that needs ``norm_num`` closes, and the
+    win-eligible source equals the full-strength source (no gate)."""
+    from hyperion.crews.lean_handlers import _run_closer_battery
+
+    goal = "((1:ℚ)/2 + 1/3) * (1/2 - 1/3) = 5/36"
+    weak_source, strong_source, verdicts = _run_closer_battery(goal, weak=False, profile="mathlib")
+    assert strong_source is not None
+    assert weak_source == strong_source
+    assert any(v["ok"] for v in verdicts)
+
+
+@pytest.mark.lean
+def test_closer_battery_weak_regime_gates_strong_closer_but_keeps_counterfactual():
+    """WEAK regime is the thesis control: a non-trivial arithmetic goal closes at full
+    strength (``strong_source`` set — the ``b_strong`` counterfactual) but NO primitive wins
+    it (``weak_source`` None), so composition/definition must carry it. The gate is the same
+    ``_uses_only_weak_tactics`` Path B uses — not a hand label."""
+    from hyperion.crews.lean_handlers import _run_closer_battery
+
+    goal = "((1:ℚ)/2 + 1/3) * (1/2 - 1/3) = 5/36"
+    weak_source, strong_source, _ = _run_closer_battery(goal, weak=True, profile="mathlib")
+    assert strong_source is not None  # norm_num closes it at full strength
+    assert weak_source is None        # rfl / simp only [] do not — control holds
+
+
+@pytest.mark.lean
+def test_closer_battery_weak_regime_lets_primitive_win_honestly_trivial():
+    """WEAK regime: an honestly-trivial goal the kernel decides by computation is won by a
+    primitive (``rfl``) — the battery is allowed to close what is genuinely trivial."""
+    from hyperion.crews.lean_handlers import _run_closer_battery
+
+    weak_source, strong_source, _ = _run_closer_battery("2004 % 12 = 0", weak=True, profile="mathlib")
+    assert strong_source is not None
+    assert weak_source is not None
+    assert "by rfl" in weak_source or "by decide" in weak_source
 
 
 # ---------------------------------------------------------------------------

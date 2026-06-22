@@ -232,9 +232,17 @@ def _lean_type_key(text: str) -> str:
     return re.sub(r"\s+", "", (text or "").strip())
 
 
-def _native_closing_for_subtasks(goal: str, subtasks: list[Subtask]) -> str:
+def _native_closing_for_subtasks(
+    goal: str, subtasks: list[Subtask], explicit_closer: str | None = None
+) -> str:
     if not subtasks:
         return ""
+    # (B) Prefer the decomposer's own closing tactic when it supplied one. The kernel
+    # (skeleton_check, then the final bank verify) arbitrates whether it actually composes
+    # the sub-goals into the target, so any closer shape is allowed — `exact h1.trans h2`,
+    # `linarith [h1, h2]`, a `calc`, etc. — not just the two the heuristic below can guess.
+    if explicit_closer and explicit_closer.strip():
+        return explicit_closer.strip()
     conjuncts = _split_top_level_conjunction(goal)
     if len(conjuncts) == len(subtasks) and all(
         _lean_type_key(part) == _lean_type_key(sub.lean_type)
@@ -244,11 +252,13 @@ def _native_closing_for_subtasks(goal: str, subtasks: list[Subtask]) -> str:
     return f"exact {subtasks[-1].id}"
 
 
-def _native_scaffold_from_subtasks(ctx: NativeNodeCtx, subtasks: list[Subtask]) -> str:
+def _native_scaffold_from_subtasks(
+    ctx: NativeNodeCtx, subtasks: list[Subtask], closer: str | None = None
+) -> str:
     lines = [f"have {sub.id} : {sub.lean_type} := sorry" for sub in subtasks if sub.id and sub.lean_type]
     if not lines:
         return ""
-    close = _native_closing_for_subtasks(_target_goal_type(ctx), subtasks)
+    close = _native_closing_for_subtasks(_target_goal_type(ctx), subtasks, closer)
     return "\n".join([*lines, close]) + "\n"
 
 
@@ -304,21 +314,16 @@ async def formal_ingest_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     }
 
 
-async def lean_decompose_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
-    """Write a deterministic single-subgoal Lean plan for the prover workflow.
-
-    This keeps the critical ``lean-prove`` smoke path out of the agent/ReAct loop while
-    preserving the same ``plan.md`` contract consumed by skeleton/retrieve/synthesize.
-    Richer decomposition can return to the decomposer agent later; for now one typed
-    ``have`` is enough to make the native prover pipeline deterministic.
-    """
-    goal = _target_goal_type(ctx)
-    scaffold = f"have h1 : {goal} := sorry\nexact h1"
-    plan_md = (
+def _identity_plan_md(task_id: str, request: str, goal: str) -> str:
+    """The plan.md for the identity decomposition: the whole goal as one sub-lemma,
+    closed by ``exact h1``. This scaffold ALWAYS type-checks in skeleton mode (it is
+    literally ``have h1 : G := sorry; exact h1``), so it is both the deterministic
+    smoke-path plan and the guaranteed-valid floor for the skeleton gate."""
+    return (
         "---\n"
-        f"task_id: {ctx.task_id}\n"
+        f"task_id: {task_id}\n"
         "task_type: code\n"
-        f"original_request: {json.dumps(ctx.request)}\n"
+        f"original_request: {json.dumps(request)}\n"
         "selected_option: a\n"
         "scaffold: |\n"
         f"  have h1 : {goal} := sorry\n"
@@ -326,6 +331,7 @@ async def lean_decompose_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
         "options:\n"
         "  - id: a\n"
         "    summary: Prove the target proposition directly.\n"
+        "    closer: exact h1\n"
         "    subtasks:\n"
         "      - id: h1\n"
         "        description: Prove the target proposition.\n"
@@ -335,16 +341,38 @@ async def lean_decompose_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
         "\n"
         "Single-subgoal scaffold for the target proposition.\n"
     )
-    path = settings.tasks_dir / ctx.task_id / "plan.md"
+
+
+def write_identity_plan(task_id: str, request: str, goal: str) -> None:
+    """Persist the identity decomposition plan.md for ``task_id``.
+
+    Shared by the deterministic decomposer (:func:`lean_decompose_handler`) and the
+    skeleton-gate floor in the runner: when an LLM decomposition cannot be made to
+    compose, falling back to this single-hole scaffold lets the prover attempt the goal
+    directly instead of failing the run on the (mechanically trivial) skeleton step.
+    """
+    path = settings.tasks_dir / task_id / "plan.md"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(plan_md, encoding="utf-8")
+    path.write_text(_identity_plan_md(task_id, request, goal), encoding="utf-8")
+
+
+async def lean_decompose_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
+    """Write a deterministic single-subgoal Lean plan for the prover workflow.
+
+    This keeps the critical ``lean-prove`` smoke path out of the agent/ReAct loop while
+    preserving the same ``plan.md`` contract consumed by skeleton/retrieve/synthesize.
+    Richer decomposition can return to the decomposer agent later; for now one typed
+    ``have`` is enough to make the native prover pipeline deterministic.
+    """
+    goal = _target_goal_type(ctx)
+    write_identity_plan(ctx.task_id, ctx.request, goal)
     ctx.progress("[decompose] wrote deterministic single-subgoal Lean plan")
     return {
         "handler": "lean_decompose",
         "subgoals": 1,
         "selected_option": "a",
         "goal": goal,
-        "scaffold": scaffold,
+        "scaffold": f"have h1 : {goal} := sorry\nexact h1",
     }
 
 
@@ -393,58 +421,26 @@ def _indent_tactic_body(body: str) -> str:
 # at end of a tactic line makes the kernel reject the whole block ("unexpected token ','").
 _TRAILING_COMMA_RE = re.compile(r",[ \t]*$", re.MULTILINE)
 
-# A have-chain whose final step is definitionally equal to the goal closes with a plain
-# ``exact <last_have>``. Decomposers intermittently emit an over-clever term-mode cast
-# instead — ``exact h2.trans (h1.symm ▸ rfl)`` — whose ``▸`` rewrite is fragile and fails
-# the skeleton type-check (the revision budget then gives up). These match the chain's
-# closing tactic and the trailing ``have`` identifier so we can rewrite the fragile close.
-_HAVE_ID_RE = re.compile(r"^\s*have\s+([A-Za-z_][A-Za-z0-9_']*)\b", re.MULTILINE)
-_FRAGILE_CLOSE_RE = re.compile(r"([ \t]*)exact\b[^\n]*(?:▸|\.trans\b)")
-
-
-def _canonicalize_closing(scaffold: str) -> str:
-    """Rewrite over-clever chain closings to the canonical ``exact <last_have>``.
-
-    Only fires when the chain's *last* tactic line is an ``exact`` carrying either a ``▸``
-    cast or a transitivity composition (e.g. ``exact h2.trans h1.symm``) and the scaffold
-    has at least one ``have``; it then replaces that line with ``exact <final have id>``.
-    The kernel still arbitrates (skeleton check + final ``bank`` verify), so this can only
-    swap a known-fragile closing for the canonical one, never manufacture a false green.
-    Conjunction closings (``exact ⟨h1, h2⟩``) and already-canonical ``exact h2`` pass
-    through untouched. Idempotent: the rewritten ``exact <id>`` has no fragile marker.
-    """
-    have_ids = _HAVE_ID_RE.findall(scaffold)
-    if not have_ids:
-        return scaffold
-    trailing_nl = scaffold.endswith("\n")
-    lines = scaffold.splitlines()
-    for i in range(len(lines) - 1, -1, -1):  # the closing tactic is the last non-blank line
-        if not lines[i].strip():
-            continue
-        m = _FRAGILE_CLOSE_RE.match(lines[i])
-        if m:
-            lines[i] = f"{m.group(1)}exact {have_ids[-1]}"
-        break
-    out = "\n".join(lines)
-    return out + "\n" if trailing_nl else out
-
 
 def _sanitize_scaffold(scaffold: str) -> str:
     """Scrub decomposer dialect tics from a have-chain scaffold.
 
-    Mechanical and idempotent (mirrors :func:`_sanitize_lean_source`):
+    Mechanical and idempotent (mirrors :func:`_sanitize_lean_source`): strip a comma at the
+    end of a tactic line — a Lean-3 ``:= sorry,`` separator that makes the kernel reject the
+    whole block. Scoped to *end-of-line* commas, which in a have-chain are always the stray
+    separator (commas inside terms/types sit mid-line).
 
-    * strips a comma at the end of a tactic line — a Lean-3 ``:= sorry,`` separator that
-      makes the kernel reject the whole block. Scoped to *end-of-line* commas, which in a
-      have-chain are always the stray separator (commas inside terms/types sit mid-line);
-    * canonicalizes an over-clever ``▸``-cast closing tactic to ``exact <last_have>``
-      (see :func:`_canonicalize_closing`).
+    The closing tactic is left intact on purpose. Composition is now the decomposer's own
+    ``closer`` (see :meth:`PlanOption.active_closer`) and the kernel arbitrates whether it
+    discharges the goal — so a transitivity/``▸``/``calc`` close is a *legitimate* proposal,
+    not a tic to rewrite. A bad closer simply fails skeleton_check and triggers revision (and
+    ultimately the identity-decomposition floor), never a silent rewrite to ``exact <last>``.
 
     A clean scaffold passes through unchanged.
     """
     if not scaffold:
         return scaffold
-    return _canonicalize_closing(_TRAILING_COMMA_RE.sub("", scaffold))
+    return _TRAILING_COMMA_RE.sub("", scaffold)
 
 
 def _scaffold_as_command(scaffold: str, goal_type: str) -> str:
@@ -902,7 +898,7 @@ async def skeleton_check_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     """
     plan = parse_plan(ctx.task_id)
     subtasks = plan.active_subtasks()
-    scaffold = _native_scaffold_from_subtasks(ctx, subtasks) or (plan.scaffold or "")
+    scaffold = _native_scaffold_from_subtasks(ctx, subtasks, plan.active_closer()) or (plan.scaffold or "")
     if not scaffold:
         ctx.put("skeleton_ok", False)
         ctx.put("skeleton_errors", ["no scaffold in plan"])
@@ -1147,6 +1143,117 @@ async def prove_proposition(
     )
 
 
+# ---------------------------------------------------------------------------
+# Deterministic closer battery — the Path-B seed (regime-gated win-eligibility)
+# ---------------------------------------------------------------------------
+
+# Standard one-shot closers, cheapest/most-primitive first. Win-eligibility is NOT encoded
+# here — it is decided downstream by the SAME ``_uses_only_weak_tactics`` gate Path B uses
+# (one enforcement path, never a hand-labelled flag). Consequence (the thesis contract):
+#   • strong regime: every closer may WIN  → external/SOTA-comparison number.
+#   • weak regime  : only primitives (``rfl`` / structural ``intros`` / narrow ``simp only``)
+#     may win; the strong closers are still TRIED and recorded as the ``b_strong``
+#     counterfactual but are BANNED FROM WINNING — the control condition that forces
+#     composition + definition-mediation to carry the non-trivial goals.
+_BATTERY_CLOSERS = (
+    "rfl",            # primitive: kernel computation / definitional
+    "simp only []",   # primitive: narrow simp (weak-eligible)
+    "decide", "norm_num", "ring", "ring_nf", "omega",
+    "simp", "linarith", "nlinarith", "positivity", "aesop",
+)
+
+
+def _battery_source(goal_type: str, tactic: str) -> str:
+    """A bare ``example`` for one battery tactic — no ``import`` header.
+
+    Matches the convention of every other source builder here (e.g.
+    :func:`_compose_multi_source`): the Mathlib environment comes from ``profile='mathlib'``
+    (the sidecar strips imports against its hot ``import Mathlib`` BASE_ENV), and keeping the
+    source a bare declaration lets :func:`_bare_proof_term` recover ``by <tactic>`` as the
+    hole-fitting proof term (an ``import`` first line would defeat ``_looks_like_declaration``).
+    """
+    return f"example : {goal_type} := by {tactic}"
+
+
+def _closer_battery_tactics(goal_type: str) -> list[str]:
+    """The battery tactics for ``goal_type``, primitives first.
+
+    ∀/→ goals also get a structural-``intros`` prefix so a closer fires after binders are
+    introduced. ``intros`` is a no-op (not an error) on a non-arrow goal — verified live — so
+    the prefixed variant is always safe to try.
+    """
+    needs_intro = goal_type.strip().startswith("∀") or "→" in goal_type
+    out: list[str] = []
+    for c in _BATTERY_CLOSERS:
+        out.append(c)
+        if needs_intro:
+            out.append(f"intros; {c}")
+    return out
+
+
+def _run_closer_battery(
+    goal_type: str, *, weak: bool, profile: str | None
+) -> tuple[Optional[str], Optional[str], list[dict[str, Any]]]:
+    """Try the deterministic battery against the kernel; return (weak_source, strong_source,
+    verdicts).
+
+    ``strong_source`` is the first attempt that closes at full strength (the ``b_strong``
+    counterfactual / the strong-regime win); ``weak_source`` is the first close that ALSO
+    passes the :func:`_uses_only_weak_tactics` gate. Strong regime (``weak=False``) ⇒
+    ``weak_source == strong_source``. The kernel is the only judge — a tactic that does not
+    close is skipped; nothing is faked.
+    """
+    strong_source: Optional[str] = None
+    weak_source: Optional[str] = None
+    verdicts: list[dict[str, Any]] = []
+    for tac in _closer_battery_tactics(goal_type):
+        src = _battery_source(goal_type, tac)
+        closed, _errors = _full_verdict(src, profile=profile)
+        verdicts.append({"tactic": tac, "ok": closed})
+        if not closed:
+            continue
+        if strong_source is None:
+            strong_source = src
+        if not weak or _uses_only_weak_tactics(src):
+            weak_source = src
+            break
+    return weak_source, strong_source, verdicts
+
+
+def subgoal_battery_closes(ctx: NativeNodeCtx) -> bool:
+    """Whether the closer battery yields a *win-eligible* proof for this sub-goal — the
+    runner's "battery first" signal to skip the LLM synth node.
+
+    Pure kernel, no LLM. Resolves the goal/profile/regime exactly as :func:`verify_handler`
+    does and runs the SAME :func:`_run_closer_battery`, so a True here means verify will
+    discharge the goal from the battery without ever needing the synthesized seed. (The
+    battery is intentionally re-run in verify — both are cheap kernel calls — so verify stays
+    the single authoritative owner of ``verified_b``/``b_strong``.)"""
+    sg_id = _subgoal_id(ctx)
+    goal = _goal_type(ctx, sg_id)
+    profile = ctx.get("lean_profile", settings.lean_profile)
+    weak_source, _strong, _verdicts = _run_closer_battery(
+        goal, weak=settings.prover_weak_path_b, profile=profile
+    )
+    return weak_source is not None
+
+
+def _battery_candidate(source: str, goal_type: str) -> dict[str, Any]:
+    """Wrap a closing battery source as a Path-B candidate.
+
+    ``origin='battery'`` lets the thesis read-out separate a trivially-closed goal from one
+    carried by composition/retrieval; ``path='B'`` keeps the compare/bank wiring unchanged.
+    """
+    return {
+        "source": source,
+        "statement": f"example : {goal_type}",
+        "proof_term": _bare_proof_term({"source": source}),
+        "origin": "battery",
+        "lean_type": goal_type,
+        "path": "B",
+    }
+
+
 async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     """The native controller: kernel verdict + deterministic routing + bounded repair.
 
@@ -1227,35 +1334,50 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     weak = settings.prover_weak_path_b
     b_strong: Optional[dict[str, Any]] = None
     if research or verified_a is None:
-        cb = _synthesized_candidate(ctx, sg_id)
-        if cb:
-            # The proving kernel (verify + bounded repair + weak gate) is shared with the
-            # bridge/lemma/ablation paths via prove_proposition; the verify node owns only
-            # the blackboard wiring around it.
-            outcome = await prove_proposition(goal, cb["source"], weak=weak, profile=profile)
-            for v in outcome.verdicts:
-                _record("B" if v["path"] == "seed" else "B-repair", v["ok"])
-            decision["repair_iters"] += outcome.repair_iters
+        # Path B (deterministic): the closer battery, FIRST — try standard one-shot closers
+        # via the kernel before paying for the LLM seed + repair. Win-eligibility is
+        # regime-gated by _run_closer_battery via the same weak gate; the full-strength close
+        # is preserved as the ``b_strong`` counterfactual.
+        bat_weak, bat_strong, bat_verdicts = _run_closer_battery(goal, weak=weak, profile=profile)
+        for v in bat_verdicts:
+            _record("Bdet", v["ok"])
+        if bat_strong is not None:
+            b_strong = _battery_candidate(bat_strong, goal)
+        if bat_weak is not None:
+            verified_b = _battery_candidate(bat_weak, goal)
 
-            def _as_candidate(src: str) -> dict[str, Any]:
-                # The synthesized seed keeps the synthesizer's metadata; a repaired source
-                # is wrapped with the BARE proof body so the bank/scaffold get a hole-fitting
-                # term, mirroring the prior inline construction.
-                if src == cb["source"]:
-                    return {**cb, "path": "B"}
-                return {
-                    "source": src,
-                    "statement": cb.get("statement", ""),
-                    "proof_term": _bare_proof_term({"source": src}),
-                    "origin": "repair",
-                    "lean_type": cb.get("lean_type") or goal,
-                    "path": "B",
-                }
+        # Path B (synthesized): LLM seed + bounded repair — only when the battery produced no
+        # win-eligible proof. The battery's b_strong counterfactual is kept either way.
+        if verified_b is None:
+            cb = _synthesized_candidate(ctx, sg_id)
+            if cb:
+                # The proving kernel (verify + bounded repair + weak gate) is shared with the
+                # bridge/lemma/ablation paths via prove_proposition; the verify node owns only
+                # the blackboard wiring around it.
+                outcome = await prove_proposition(goal, cb["source"], weak=weak, profile=profile)
+                for v in outcome.verdicts:
+                    _record("B" if v["path"] == "seed" else "B-repair", v["ok"])
+                decision["repair_iters"] += outcome.repair_iters
 
-            if outcome.source is not None:
-                b_strong = _as_candidate(outcome.source)
-            if outcome.weak_source is not None:
-                verified_b = _as_candidate(outcome.weak_source)
+                def _as_candidate(src: str, cb=cb) -> dict[str, Any]:
+                    # The synthesized seed keeps the synthesizer's metadata; a repaired source
+                    # is wrapped with the BARE proof body so the bank/scaffold get a
+                    # hole-fitting term, mirroring the prior inline construction.
+                    if src == cb["source"]:
+                        return {**cb, "path": "B"}
+                    return {
+                        "source": src,
+                        "statement": cb.get("statement", ""),
+                        "proof_term": _bare_proof_term({"source": src}),
+                        "origin": "repair",
+                        "lean_type": cb.get("lean_type") or goal,
+                        "path": "B",
+                    }
+
+                if outcome.source is not None and b_strong is None:
+                    b_strong = _as_candidate(outcome.source)
+                if outcome.weak_source is not None:
+                    verified_b = _as_candidate(outcome.weak_source)
 
     # b_strong closed at full strength but no eligible (weak) proof won ⇒ the gate is what
     # forces Path A to carry the goal — the load-bearing signal of the weak-prover headline.
@@ -1609,7 +1731,7 @@ async def bank_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
         )
 
     formal = _formal_context(ctx)
-    scaffold = _native_scaffold_from_subtasks(ctx, subtasks) or _sanitize_scaffold(plan.scaffold or "")
+    scaffold = _native_scaffold_from_subtasks(ctx, subtasks, plan.active_closer()) or _sanitize_scaffold(plan.scaffold or "")
     assembled_body = _assemble(scaffold, subtasks, discharged, formal) if scaffold else ""
     if assembled_body and formal:
         assembled = _formal_command_from_body(_proof_body_from_scaffold(assembled_body), formal)

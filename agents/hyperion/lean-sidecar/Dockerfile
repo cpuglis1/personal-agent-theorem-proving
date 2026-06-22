@@ -46,6 +46,18 @@ RUN lake update -R \
 # Pre-create the scratch package dir the server writes into.
 RUN mkdir -p /app/leanproject/Scratch
 
+# Build leanprover-community/repl against the SAME toolchain (v4.15.0) so it loads our
+# oleans. Rev 2196679 ("chore: bump to v4.15.0") is the single commit whose
+# lean-toolchain is leanprover/lean4:v4.15.0 (the next commit bumps to v4.16.0-rc2).
+# repl has no package dependencies, so this builds fast and standalone — the heavy
+# Mathlib layer above is what carries the oleans the repl imports at runtime via
+# `lake env` (LEAN_PATH from /app/leanproject's deps).
+RUN git clone https://github.com/leanprover-community/repl /app/repl \
+    && cd /app/repl \
+    && git checkout 2196679 \
+    && cp /app/leanproject/lean-toolchain /app/repl/lean-toolchain \
+    && lake build
+
 # The FastAPI verify server.
 WORKDIR /app
 RUN pip install --no-cache-dir fastapi "uvicorn[standard]" pydantic

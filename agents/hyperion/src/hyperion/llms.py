@@ -18,6 +18,19 @@ from crewai import LLM
 from hyperion.config import settings
 
 
+class AgentIterationCapExceeded(RuntimeError):
+    """An agent made more LLM calls in one execution than its iteration ceiling allows.
+
+    CrewAI 0.86's ``CrewAgentExecutor._invoke_loop`` recurses on an
+    ``OutputParserException`` without honoring ``max_iter`` (the force-answer branch is
+    only reached on a *parseable* turn), so a tool-less agent whose output the ReAct parser
+    can't read re-prompts itself until the wall-clock or context limit — a real, observed
+    runaway (a single synth node made 56 calls / ~145k tokens on one hard goal). ``max_iter``
+    therefore cannot bound it. :class:`HyperionLLM` enforces the ceiling at the one layer
+    CrewAI cannot bypass — the completion call itself — and raises this so the runner can
+    treat a capped synth as "no candidate" (and any other runaway as a stage failure)."""
+
+
 class HyperionLLM(LLM):
     """CrewAI LLM that keeps usage accounting alive and enforces per-agent caps.
 
@@ -36,7 +49,8 @@ class HyperionLLM(LLM):
 
     def __init__(self, *args: Any, hyperion_task_id: str | None = None,
                  hyperion_role: str | None = None,
-                 hyperion_fallback_model: str | None = None, **kwargs: Any) -> None:
+                 hyperion_fallback_model: str | None = None,
+                 hyperion_max_calls: int | None = None, **kwargs: Any) -> None:
         """Construct a CrewAI ``LLM`` augmented with Hyperion bookkeeping.
 
         Args:
@@ -62,6 +76,11 @@ class HyperionLLM(LLM):
         # it covers the case where the record pins a concrete model that has no proxy
         # fallback configured.
         self._hyperion_fallback_model = hyperion_fallback_model
+        # Hard ceiling on completion calls within a single agent execution — the enforcement
+        # of the record's ``max_iter`` that CrewAI's executor fails to apply on parse-error
+        # loops (see AgentIterationCapExceeded). ``None``/0 disables the ceiling.
+        self._hyperion_max_calls = hyperion_max_calls
+        self._hyperion_calls = 0
 
     def set_callbacks(self, callbacks: Any) -> None:
         """Install litellm callbacks, always preserving Hyperion's usage logger.
@@ -118,6 +137,15 @@ class HyperionLLM(LLM):
             from hyperion.usage import check_agent_cap
 
             check_agent_cap(self._hyperion_task_id, self._hyperion_role)
+        # Enforce the iteration ceiling here — the one layer CrewAI's executor can't bypass.
+        # Counted before the call so a runaway parse-error loop is stopped at the ceiling,
+        # not one call past it. Raised, not swallowed, so it propagates out of the executor.
+        if self._hyperion_max_calls and self._hyperion_calls >= self._hyperion_max_calls:
+            raise AgentIterationCapExceeded(
+                f"agent '{self._hyperion_role}' exceeded its {self._hyperion_max_calls}-call "
+                f"iteration ceiling (likely a CrewAI parse-error loop)"
+            )
+        self._hyperion_calls += 1
         try:
             return super().call(messages, *args, **kwargs)
         except Exception as exc:
@@ -149,6 +177,7 @@ def _make_llm(
     top_p: float | None = None,
     max_tokens: int | None = None,
     fallback_model: str | None = None,
+    max_calls: int | None = None,
     extra_tags: list[str] | None = None,
 ) -> LLM:
     """Construct a configured ``HyperionLLM`` pointed at the LiteLLM proxy.
@@ -206,6 +235,7 @@ def _make_llm(
         hyperion_task_id=task_id,
         hyperion_role=agent_role,
         hyperion_fallback_model=f"openai/{fallback_model}" if fallback_model else None,
+        hyperion_max_calls=max_calls,
         **extra,
     )
 
@@ -220,6 +250,7 @@ def make_agent_llm(
     top_p: float | None = None,
     max_tokens: int | None = None,
     fallback_alias: str | None = None,
+    max_calls: int | None = None,
 ) -> LLM:
     """Build an LLM from an agent record's fields (data-driven path, Phase 1).
 
@@ -241,6 +272,7 @@ def make_agent_llm(
         top_p=top_p,
         max_tokens=max_tokens,
         fallback_model=fallback_alias,
+        max_calls=max_calls,
     )
 
 
