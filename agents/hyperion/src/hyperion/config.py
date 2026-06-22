@@ -185,6 +185,9 @@ class Settings(BaseSettings):
     # (definition + bridge lemmas) the synthesizer proposes when the normal path stalls. The
     # plan's `c`; cheap degeneracy gates prune most before any proving budget is spent.
     concept_candidates: int = 4
+    # OFF/ON eval switch for the definition-synthesis escalation branch. ON is the
+    # product default; benchmarks can disable it per task to measure rescue deltas.
+    prover_definition_escalation: bool = True
     # Soundness contract strictness (the sorryAx gate; see crews/soundness.py). False
     # (default) tolerates the compiler-trusting native axioms (native_decide); True — the
     # recommended setting for HEADLINE runs — admits only the kernel base

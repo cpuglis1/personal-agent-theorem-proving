@@ -41,6 +41,8 @@ export interface LeanCandidate {
   origin: CandidateOrigin | string;
   lean_type: string;
   path?: ProofPath | null;
+  winner?: ProofPath | string | null;
+  tier_closed?: string | null;
   generality_score?: number | null;
 }
 
@@ -64,6 +66,8 @@ export interface VerifyVerdict {
 export interface VerifyDecision {
   subgoal?: string;
   winner_path: ProofPath | null;
+  winner?: ProofPath | string | null;
+  tier_closed?: string | null;
   a_attempts: number;
   repair_iters: number;
   mode?: string;

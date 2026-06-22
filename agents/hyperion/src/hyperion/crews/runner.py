@@ -1426,6 +1426,7 @@ async def run_task(
     problem_id: str | None = None,
     split: str | None = None,
     order_seed: int | None = None,
+    prover_definition_escalation: bool | None = None,
 ) -> dict[str, Any]:
     """Run a task through a workflow DAG. Discovers context, then executes the
     workflow's nodes in dependency order — pausing for human approval where a node
@@ -1450,6 +1451,13 @@ async def run_task(
     context_put(task_id, "eval_mode", mode)
     context_put(task_id, "learning_writes_enabled", mode == "train")
     context_put(task_id, "lean_profile", profile)
+    context_put(
+        task_id,
+        "prover_definition_escalation",
+        settings.prover_definition_escalation
+        if prover_definition_escalation is None
+        else bool(prover_definition_escalation),
+    )
     try:
         wf = resolve_workflow(workflow)
     except (FileNotFoundError, ValueError) as exc:
@@ -1503,6 +1511,7 @@ async def resume_task(
     cap_output_tokens: int | None = None,
     eval_mode: str | None = None,
     lean_profile: str | None = None,
+    prover_definition_escalation: bool | None = None,
 ) -> dict[str, Any]:
     """Resume a task paused before node ``resume_node`` in ``workflow``.
 
@@ -1523,6 +1532,16 @@ async def resume_task(
     context_put(task_id, "eval_mode", mode)
     context_put(task_id, "learning_writes_enabled", mode == "train")
     context_put(task_id, "lean_profile", profile)
+    existing_escalation = context_get(task_id, "prover_definition_escalation")
+    context_put(
+        task_id,
+        "prover_definition_escalation",
+        existing_escalation
+        if prover_definition_escalation is None and existing_escalation is not None
+        else settings.prover_definition_escalation
+        if prover_definition_escalation is None
+        else bool(prover_definition_escalation),
+    )
     loop = asyncio.get_event_loop()
     deadline = loop.time() + wall
     caps = _caps_payload(cap_wall_seconds, cap_input_tokens, cap_output_tokens)

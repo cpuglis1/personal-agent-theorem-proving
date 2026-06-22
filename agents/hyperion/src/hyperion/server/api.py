@@ -746,6 +746,8 @@ class TaskRequest(BaseModel):
             ``test`` keep artifacts/traces but disable persistent memory/bank writes.
         lean_profile: Verifier profile. ``core`` rejects imports; ``mathlib`` allows
             ``import Mathlib`` on the warm-cache sidecar.
+        prover_definition_escalation: Optional per-run OFF/ON switch for the concept
+            escalation branch. ``None`` uses the server default.
     """
     task: str
     schema_version: int = 1                              # (Phase 9) external-caller contract
@@ -761,6 +763,7 @@ class TaskRequest(BaseModel):
     problem_id: Optional[str] = None
     split: Optional[str] = None
     order_seed: Optional[int] = None
+    prover_definition_escalation: Optional[bool] = None
 
 
 class TaskResponse(BaseModel):
@@ -902,6 +905,7 @@ async def _run_and_update(
     problem_id: Optional[str] = None,
     split: Optional[str] = None,
     order_seed: Optional[int] = None,
+    prover_definition_escalation: Optional[bool] = None,
 ) -> None:
     """Background coroutine that runs a fresh task end-to-end and persists outcome.
 
@@ -948,6 +952,7 @@ async def _run_and_update(
         problem_id=problem_id,
         split=split,
         order_seed=order_seed,
+        prover_definition_escalation=prover_definition_escalation,
     )
     await _persist_result(task_id, result)
     _progress(f"[hyperion] status={result['status']}")
@@ -1124,6 +1129,7 @@ async def submit_task(body: TaskRequest) -> TaskResponse:
             problem_id=body.problem_id,
             split=body.split,
             order_seed=body.order_seed,
+            prover_definition_escalation=body.prover_definition_escalation,
         )
     )
     return TaskResponse(task_id=task_id, status="queued")

@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
+from hyperion.eval import lean_prove_benchmark
 from hyperion.eval import thesis_curve
 from hyperion.eval.demo import SAMPLE_PROBLEMS, run_problem
 from hyperion.eval.trace import collect_trace, format_trace
@@ -82,6 +86,36 @@ def test_running_curve_only_advances_on_solved():
     assert thesis_curve.running_curve(_OUTCOMES) == [
         pytest.approx(1.0), pytest.approx(0.5), pytest.approx(1 / 3)
     ]
+
+
+def test_paired_row_marks_definition_escalation_rescue():
+    row = lean_prove_benchmark._paired_row(
+        {"id": "hard"},
+        {"status": "failed", "path_c_wins": 0},
+        {"status": "done", "path_c_wins": 1},
+        eval_mode="dev",
+        lean_profile="core",
+    )
+    assert row["case_id"] == "hard"
+    assert row["rescued_by_escalation"] is True
+
+
+def test_hard_smoke_fixture_schema():
+    path = Path(__file__).parents[1] / "evals" / "lean_prove_splits" / "hard_smoke.jsonl"
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+    assert len(rows) >= 3
+    for row in rows:
+        assert row["id"].startswith("hard_")
+        assert row["split"] == "hard_smoke"
+        assert row["workflow"] == "lean-prove"
+        assert row["lean_profile"] == "core"
+        assert row["expected"] == "escalation_on_only"
+        assert row["source"] == "curated-hard-smoke"
+        assert row["formal_statement"].startswith("theorem hard_")
+        assert row["formal_statement"].endswith("by sorry")
+        assert "definition-escalation" in row["tags"]
+        assert "sorry" in row["prompt"].lower()
 
 
 @pytest.mark.anyio

@@ -298,6 +298,8 @@ async def test_prove_through_accepts_clean_proof_and_stages_path_c(tmp_path, mon
     assert accepted["concept_id"] == "c1"
     assert accepted["through_proof"] == proof
     assert discharged["path"] == "C"
+    assert discharged["winner"] == "C"
+    assert discharged["tier_closed"] == "prove_through"
     assert discharged["concept_id"] == "c1"
     assert discharged["proof_term"] == "by trivial"
     pp.assert_awaited_once()

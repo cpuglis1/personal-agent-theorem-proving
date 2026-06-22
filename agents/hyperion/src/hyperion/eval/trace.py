@@ -26,7 +26,7 @@ _PER_SG_KEYS = (
     "candidate_a", "candidates_a", "candidate_b",
     "verified_a", "verified_b", "verify_decision",
     "concept_context", "stall_errors", "subgoal_unbound_context",
-    "escalated", "synthesize_definition", "concept_candidates",
+    "escalated", "escalation_gate", "synthesize_definition", "concept_candidates",
     "verify_concept", "verified_concept", "prove_through",
     "accepted_concept", "bank_concept",
     "discharged",

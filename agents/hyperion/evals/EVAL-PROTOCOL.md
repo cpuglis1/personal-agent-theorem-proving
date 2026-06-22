@@ -27,6 +27,9 @@ is the policy switch that determines whether a task may use that dependency.
 
 Use `evals/lean_prove_splits/smoke.jsonl` only for fast wiring checks; do not report it
 as benchmark progress.
+Use `evals/lean_prove_splits/hard_smoke.jsonl` only for paired OFF/ON definition
+escalation smoke; it is self-authored and exists to exercise the branch, not to report
+headline theorem-proving progress.
 Use `evals/lean_prove_splits/train.jsonl` with `eval_mode=train`.
 Use `evals/lean_prove_splits/dev.jsonl` with `eval_mode=dev`; dev must be public or
 pre-registered held-out data, not self-authored cases tuned during development.
@@ -39,6 +42,16 @@ python -m hyperion.eval.lean_prove_benchmark \
   --cases agents/hyperion/evals/lean_prove_splits/dev.jsonl \
   --eval-mode dev \
   --out agents/hyperion/tasks/dev-results.jsonl
+```
+
+Paired definition-escalation smoke:
+
+```bash
+python -m hyperion.eval.lean_prove_benchmark \
+  --cases agents/hyperion/evals/lean_prove_splits/hard_smoke.jsonl \
+  --eval-mode dev \
+  --out agents/hyperion/tasks/hard-smoke-off-on.jsonl \
+  --paired-off-on
 ```
 
 ## Manifest

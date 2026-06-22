@@ -1156,7 +1156,7 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     profile = ctx.get("lean_profile", settings.lean_profile)
     decision: dict[str, Any] = {
         "subgoal": sg_id, "winner_path": None, "a_attempts": 0,
-        "repair_iters": 0, "verdicts": [],
+        "repair_iters": 0, "verdicts": [], "winner": None, "tier_closed": None,
     }
 
     def _record(path: str, closed: bool) -> None:
@@ -1242,6 +1242,10 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     winner: Optional[dict[str, Any]] = verified_a or verified_b
     if winner is not None:
         decision["winner_path"] = winner["path"]
+        decision["winner"] = winner["path"]
+        decision["tier_closed"] = winner.get("origin") or (
+            "retrieve" if winner["path"] == "A" else "synthesize"
+        )
 
     ctx.put(_bb_key("verify_decision", sg_id), decision)
     if winner is None:
@@ -1263,6 +1267,8 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
         }
 
     winner["lean_type"] = winner.get("lean_type") or goal
+    winner["winner"] = winner["path"]
+    winner["tier_closed"] = decision["tier_closed"]
     ctx.put(_bb_key("discharged", sg_id), winner)
     ctx.progress(f"[verify] {sg_id}: discharged via Path {winner['path']}")
     return {
@@ -1288,8 +1294,25 @@ async def escalation_gate_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     decision = ctx.get(_bb_key("verify_decision", sg_id)) or {}
     discharged = ctx.get(_bb_key("discharged", sg_id))
     stalled = discharged is None and decision.get("winner_path") is None
-    if stalled:
+    enabled = bool(ctx.get("prover_definition_escalation", settings.prover_definition_escalation))
+    if stalled and not enabled:
+        ctx.put(_bb_key("escalated", sg_id), False)
+        ctx.put(_bb_key("escalation_gate", sg_id), {
+            "subgoal": sg_id,
+            "enabled": False,
+            "stalled": True,
+            "escalated": False,
+            "reason": "definition escalation disabled",
+        })
+    elif stalled:
         ctx.put(_bb_key("escalated", sg_id), True)
+        ctx.put(_bb_key("escalation_gate", sg_id), {
+            "subgoal": sg_id,
+            "enabled": True,
+            "stalled": True,
+            "escalated": True,
+            "reason": "normal prover stalled",
+        })
         ctx.put(_bb_key("stall_errors", sg_id), ctx.get(_bb_key("stall_errors", sg_id)) or [
             f"normal prover stalled on {sg_id}"
         ])
@@ -1299,16 +1322,32 @@ async def escalation_gate_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
         ctx.put(_bb_key("parent_name", sg_id), ctx.get(_bb_key("parent_name", sg_id)) or "target")
     else:
         ctx.put(_bb_key("escalated", sg_id), False)
+        ctx.put(_bb_key("escalation_gate", sg_id), {
+            "subgoal": sg_id,
+            "enabled": enabled,
+            "stalled": False,
+            "escalated": False,
+            "reason": "normal proof discharged",
+        })
     ctx.progress(
         f"[escalation_gate] {sg_id}: "
-        + ("stalled; routing to definition synthesis" if stalled else "normal proof discharged; skipped")
+        + (
+            "stalled; definition escalation disabled"
+            if stalled and not enabled
+            else "stalled; routing to definition synthesis"
+            if stalled
+            else "normal proof discharged; skipped"
+        )
     )
     return {
         "handler": "escalation_gate",
         "subgoal": sg_id,
         "ok": True,
-        "escalated": bool(stalled),
+        "enabled": enabled,
+        "stalled": bool(stalled),
+        "escalated": bool(stalled and enabled),
         "goal": goal,
+        "reason": "definition escalation disabled" if stalled and not enabled else None,
     }
 
 
@@ -1900,6 +1939,8 @@ async def prove_through_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
             or outcome.source or "",
             "origin": "concept",
             "path": "C",
+            "winner": "C",
+            "tier_closed": "prove_through",
             "lean_type": goal,
             "concept_id": accepted.get("concept_id"),
             "definition_name": definition.get("name"),

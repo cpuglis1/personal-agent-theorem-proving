@@ -806,6 +806,8 @@ async def test_verify_delegates_repair_but_only_kernel_yields_pass(tmp_path):
         decision = context_get("v1", "verify_decision:sg")
         assert decision["repair_iters"] == 1
         assert decision["a_attempts"] == 1
+        assert decision["winner"] == "B"
+        assert decision["tier_closed"] == "repair"
 
 
 @pytest.mark.anyio
@@ -846,7 +848,10 @@ async def test_path_a_wins_without_calling_repair(tmp_path):
 
         assert res["winner_path"] == "A"
         repair.assert_not_awaited()
-        assert context_get("v3", "discharged:sg")["proof_term"] == "pa"
+        discharged = context_get("v3", "discharged:sg")
+        assert discharged["proof_term"] == "pa"
+        assert discharged["winner"] == "A"
+        assert discharged["tier_closed"] == "retrieve"
 
 
 def test_synthesized_candidate_includes_retrieved_concept_context(tmp_path):
@@ -919,6 +924,31 @@ async def test_escalation_gate_routes_only_stalls(tmp_path):
         ))
         assert normal["escalated"] is False
         assert context_get("eg2", "escalated:sg") is False
+
+
+@pytest.mark.anyio
+async def test_escalation_gate_honors_disabled_definition_escalation(tmp_path):
+    with patch.object(settings, "tasks_dir", tmp_path):
+        context_put("eg-off", "prover_definition_escalation", False)
+        context_put("eg-off", "verify_decision:sg", {"winner_path": None})
+        context_put("eg-off", "discharged:sg", None)
+
+        res = await escalation_gate_handler(NativeNodeCtx(
+            task_id="eg-off",
+            node=WorkflowNode(id="escalation_gate", kind="native", handler="escalation_gate",
+                              instruction="sg"),
+            request="prove G",
+            progress_callback=None,
+        ))
+
+        assert res["enabled"] is False
+        assert res["stalled"] is True
+        assert res["escalated"] is False
+        assert res["reason"] == "definition escalation disabled"
+        assert context_get("eg-off", "escalated:sg") is False
+        gate = context_get("eg-off", "escalation_gate:sg")
+        assert gate["enabled"] is False
+        assert gate["reason"] == "definition escalation disabled"
 
 
 @pytest.mark.anyio
