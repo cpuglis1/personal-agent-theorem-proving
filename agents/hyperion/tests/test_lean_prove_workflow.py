@@ -1347,6 +1347,67 @@ selected_option: a
 
 
 @pytest.mark.anyio
+async def test_bank_threads_implicit_parent_binders_as_explicit(tmp_path):
+    """Implicit/instance parent binders must be quantified *explicitly* in the threaded ∀.
+
+    Regression: the threaded ∀-type was built from each binder's ``raw`` form, so an
+    implicit parent binder (``{A : Type}``) stayed implicit. The proof is then
+    instantiated positionally (``... A P x y hxy hx``), and Lean rejects positional
+    explicit args against implicit binders with ``application type mismatch``. The
+    assembled ∀ must therefore carry only ``(name : type)`` binders, in parent order.
+    """
+    plan_md = """---
+task_id: threaded_implicit
+task_type: code
+options:
+  - id: a
+    summary: predicate transport
+    subtasks:
+      - id: h1
+        description: transport a predicate along an equality
+        lean_type: "P y"
+selected_option: a
+---
+"""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        (tmp_path / "threaded_implicit").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "threaded_implicit" / "plan.md").write_text(plan_md, encoding="utf-8")
+        context_put("threaded_implicit", "learning_writes_enabled", False)
+        context_put("threaded_implicit", "formal_statement_ingestion", {
+            "preamble": "import Mathlib",
+            "header": "theorem bar {A : Type} (P : A -> Prop) {x y : A} (hxy : x = y) (hx : P x)",
+            "goal": "P y",
+            "local_context": [
+                {"names": ["A"], "type": "Type", "raw": "{A : Type}"},
+                {"names": ["P"], "type": "A -> Prop", "raw": "(P : A -> Prop)"},
+                {"names": ["x", "y"], "type": "A", "raw": "{x y : A}"},
+                {"names": ["hxy"], "type": "x = y", "raw": "(hxy : x = y)"},
+                {"names": ["hx"], "type": "P x", "raw": "(hx : P x)"},
+            ],
+        })
+        context_put("threaded_implicit", "discharged:h1", {
+            "proof_term": "by norm_num",
+            "statement": "theorem h : ∀ (A : Type) (P : A -> Prop) (x y : A) (hxy : x = y) (hx : P x), P y",
+            "path": "B",
+        })
+        node = WorkflowNode(id="bank", kind="native", handler="bank", upstream=[])
+        ctx = NativeNodeCtx(task_id="threaded_implicit", node=node, request="ignored", progress_callback=None)
+
+        with mock_lean(ok=True, targets=_VERIFY_TARGET) as lean:
+            await bank_handler(ctx)
+
+    source = lean.call_args.args[0]
+    assert (
+        "have h1 : P y := by exact "
+        "((by norm_num : ∀ (A : Type) (P : A -> Prop) (x y : A) (hxy : x = y) (hx : P x), P y)) "
+        "A P x y hxy hx"
+    ) in source
+    # The threaded ∀ must not reuse the parent's implicit/instance brackets.
+    threaded = source[source.index("∀") : source.index(", P y", source.index("∀"))]
+    assert "{" not in threaded and "[" not in threaded
+
+
+@pytest.mark.anyio
 async def test_bank_rejects_invalid_final_assembly(tmp_path):
     """A node may discharge a subgoal, but the assembled result.lean is the final gate."""
     with patch.object(settings, "tasks_dir", tmp_path):

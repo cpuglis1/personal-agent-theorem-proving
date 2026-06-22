@@ -170,12 +170,30 @@ def _subgoal_mentions_formal_context(sub: Subtask, formal: dict[str, Any] | None
     return bool(tokens & names)
 
 
+def _explicit_binder(item: dict[str, Any]) -> str:
+    """Render a local binding as an *explicit* ``(names : type)`` binder.
+
+    The parent theorem may declare binders implicitly (``{A : Type}``) or by instance
+    (``[inst : C A]``); we deliberately drop those brackets here. The threaded proof is
+    later instantiated positionally at the parent binders (see ``_proof_body_for_hole``),
+    and Lean will not accept positional explicit arguments against implicit binders
+    (``application type mismatch`` — the arg slides past the implicit and lands on the
+    wrong slot). Quantifying explicitly makes the ∀-type's binder order match the
+    positional instantiation 1:1.
+    """
+    names = " ".join(item.get("names") or [])
+    typ = (item.get("type") or "").strip()
+    return f"({names} : {typ})"
+
+
 def _threaded_goal_type_from_formal(sub: Subtask, formal: dict[str, Any] | None) -> str:
     """Closed goal used by independent subgoal workers."""
     lean_type = sub.lean_type or ""
     if not _subgoal_mentions_formal_context(sub, formal):
         return lean_type
-    binders = " ".join((item.get("raw") or "").strip() for item in formal.get("local_context") or [])
+    binders = " ".join(
+        _explicit_binder(item) for item in formal.get("local_context") or [] if item.get("names")
+    )
     return f"∀ {binders}, {lean_type}" if binders else lean_type
 
 
