@@ -40,6 +40,26 @@ def test_parse_formal_statement_multi_binder_and_hypothesis_args():
     ]
 
 
+def test_parse_formal_statement_unicode_binder_names():
+    """Greek/primed/subscripted binder names must survive into the local context.
+
+    Regression: the ASCII-only identifier regex dropped non-ASCII binder names (`α`), so
+    the local context lost them and they were never threaded into independent subgoals.
+    """
+    src = """theorem foo {α : Type} (f : α -> α) {a' b₁ : α} (h : a' = b₁) : f a' = f b₁ := by
+  sorry"""
+
+    out = parse_formal_statement(src)
+
+    assert out is not None
+    assert [(b.names, b.type) for b in out.local_context] == [
+        (["α"], "Type"),
+        (["f"], "α -> α"),
+        (["a'", "b₁"], "α"),
+        (["h"], "a' = b₁"),
+    ]
+
+
 def test_parse_formal_statement_no_imports_example():
     src = """example : 2004 % 12 = 0 := by
   sorry"""

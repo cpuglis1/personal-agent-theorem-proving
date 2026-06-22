@@ -484,7 +484,9 @@ def _scaffold_as_command(scaffold: str, goal_type: str) -> str:
     return f"example : {goal_type} := by\n{_indent_tactic_body(s)}"
 
 
-_LEAN_IDENT_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_']*\b")
+# Unicode-aware (see lean_statement._IDENT_RE): Greek type params and primed/subscripted
+# names must tokenize so subgoal/context name matching catches them.
+_LEAN_IDENT_RE = re.compile(r"\b[^\W\d][\w']*\b")
 _LEAN_KEYWORDS = {
     "by", "have", "show", "exact", "intro", "intros", "fun", "from", "let", "in",
     "if", "then", "else", "match", "with", "forall", "Prop", "Type", "Sort",
@@ -520,7 +522,7 @@ def _internally_bound_names(lean_type: str) -> set[str]:
     for binder in re.findall(r"[\(\{\[]([^()\{\}\[\]]+:[^()\{\}\[\]]+)[\)\}\]]", lean_type or ""):
         before_colon = binder.split(":", 1)[0]
         names.update(_LEAN_IDENT_RE.findall(before_colon))
-    for match in re.finditer(r"∀\s+([A-Za-z_][A-Za-z0-9_']*)\b", lean_type or ""):
+    for match in re.finditer(r"∀\s+([^\W\d][\w']*)\b", lean_type or ""):
         names.add(match.group(1))
     return names
 

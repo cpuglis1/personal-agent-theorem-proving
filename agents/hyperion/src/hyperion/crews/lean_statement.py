@@ -32,7 +32,11 @@ class FormalStatement:
 
 _DECL_RE = re.compile(r"(?m)^\s*(?:theorem|lemma|example)\b")
 _BINDER_RE = re.compile(r"(\([^()]+\)|\{[^{}]+\}|\[[^\[\]]+\])")
-_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_']*")
+# Lean identifiers are Unicode: type params are routinely Greek (`α`, `β`), and names may
+# carry primes/subscripts (`a'`, `x₁`). Match any leading letter/underscore (`[^\W\d]`,
+# i.e. a Unicode word char that is not a digit) so non-ASCII binders are not silently
+# dropped from the local context — which previously left them unthreaded.
+_IDENT_RE = re.compile(r"[^\W\d][\w']*")
 
 
 def _line_is_preamble(line: str) -> bool:
