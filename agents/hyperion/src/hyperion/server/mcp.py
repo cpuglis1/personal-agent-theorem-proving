@@ -166,8 +166,8 @@ async def list_tools() -> list[Tool]:
             description=(
                 "Inspect a Lean prover run stage-by-stage: for each sub-goal, what "
                 "retrieve (Path A) / synthesize (Path B) produced, the verify verdict + "
-                "repair iterations, the compare winner + thesis triple, whether abstract "
-                "fired, and the assembled result.lean. Returns 'not a prover run' for "
+                "repair iterations, whether concept proof-through fired, and the assembled "
+                "result.lean. Returns 'not a prover run' for "
                 "ordinary tasks."
             ),
             inputSchema={

@@ -1,6 +1,6 @@
 """The prover stage trace is exposed on the live HTTP + MCP surface (Post-work observability).
 
-The native prover stages (retrieve/verify/compare/abstract/bank) are not LLM ``trace_events``,
+The native prover stages (retrieve/verify/prove_through/bank) are not LLM ``trace_events``,
 so they don't show up in the existing Trace Flow UI. These tests prove the tracer is wired in:
 
   - ``GET /tasks/{id}/trace`` gains a ``prover`` field (the per-stage, per-sub-goal trace) for
@@ -57,8 +57,6 @@ def _seed_prover_blackboard(task_id: str, tasks_dir) -> None:
     context_put(task_id, "verified_a:h1", {"path": "A"})
     context_put(task_id, "verify_decision:h1",
                 {"mode": "deploy", "a_attempts": 1, "repair_iters": 0})
-    context_put(task_id, "triple_log:h1",
-                {"winner_path": "A", "compared": False, "scores": {"a": 0.0, "b": 0.0, "winner": 0.0}})
     context_put(task_id, "discharged:h1",
                 {"origin": "retrieve", "path": "A", "proof_term": "pa", "lean_type": "P"})
 
@@ -81,7 +79,6 @@ async def test_trace_endpoint_includes_prover_stages(tmp_path):
     assert body["prover"] is not None
     sub = body["prover"]["subgoals"]["h1"]
     assert sub["discharged"]["path"] == "A"
-    assert sub["triple_log"]["winner_path"] == "A"
     # The generic trace fields are still present (additive, didn't break the UI contract).
     assert "events" in body and "routing" in body
 
@@ -121,7 +118,7 @@ async def test_mcp_hyperion_trace_renders_stages(tmp_path):
         out = await mcp.call_tool("hyperion_trace", {"task_id": "ptask"})
 
     text = out[0].text
-    for label in ("sub-goal h1", "retrieve", "verify", "compare", "abstract", "result.lean"):
+    for label in ("sub-goal h1", "retrieve", "verify", "prove through", "result.lean"):
         assert label in text
 
 

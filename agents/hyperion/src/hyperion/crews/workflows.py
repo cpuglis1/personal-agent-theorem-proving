@@ -37,7 +37,7 @@ from hyperion.config import settings
 #
 # "native" is the second non-agent kind: instead of an agent or a child workflow, the
 # node runs a registered plain-Python handler (referenced by ``WorkflowNode.handler``)
-# for deterministic DAG steps (verify/compare/bank/retrieve in the Lean prover). A
+# for deterministic DAG steps (verify/prove_through/bank/retrieve in the Lean prover). A
 # native node sets ``handler`` and leaves ``agent``/``workflow`` unset. It dispatches
 # exactly parallel to subworkflow (see ``hyperion.crews.native`` and ``runner._run_one``).
 NodeKind = Literal["plan", "work", "synthesize", "subworkflow", "native"]
@@ -59,16 +59,9 @@ class NodeWhen(BaseModel):
     When present, the node runs only if the planner-classified ``task_type`` of the
     run is listed in ``task_types`` (e.g. a developer node that fires only on
     ``code`` tasks). An empty/omitted ``when`` means the node always fires.
-
-    ``prover_mode`` adds the RESEARCH/DEPLOY policy gate (build-plan Post-work #2):
-    ``"research"`` ⇒ the node fires only when ``settings.prover_research_mode`` is True;
-    ``"deploy"`` ⇒ only when it is False. Used to gate the Path-B ``synthesize`` node so
-    DEPLOY runs greedy-retrieval (no synthesis) while RESEARCH always races A+B. Both
-    conditions, when set, must hold for the node to fire.
     """
 
     task_types: list[str] = Field(default_factory=list)
-    prover_mode: Optional[str] = None  # "research" | "deploy" | None (mode-agnostic)
 
 
 class NodePosition(BaseModel):
@@ -523,7 +516,7 @@ def expand_per_subgoal(
     is actually executable on the otherwise single-chain prover DAG.
 
     The "template" chain is every node strictly between ``head_id`` (``skeleton_check``)
-    and ``tail_id`` (``bank``) — retrieve‖synthesize→verify→compare/escalation→abstract/
+    and ``tail_id`` (``bank``) — retrieve‖synthesize→verify/escalation→prove_through/
     bank_concept. Each template node is cloned per sub-goal with id ``<id>__<sg>`` and its
     ``instruction`` set to the sub-goal id: native handlers read it via ``_subgoal_id``,
     and the ``synthesize`` agent node is resolved by the runner, which owns the per-sub-goal

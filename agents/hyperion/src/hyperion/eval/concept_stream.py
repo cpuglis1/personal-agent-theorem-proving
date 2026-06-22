@@ -84,7 +84,7 @@ def stream_manifest() -> dict[str, Any]:
         "success_criteria": [
             "at least one accepted_concept whose definition is synthesized, not seeded",
             "every bridge has axioms_clean=true and no sorryAx",
-            f"necessity_hits >= {settings.concept_promote_k} on a later theorem",
+            "the theorem is discharged through prove_through with the concept in scope",
         ],
         "theorems": [asdict(t) for t in RELATION_COMPOSITION_STREAM],
     }

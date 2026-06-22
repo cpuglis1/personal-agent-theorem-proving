@@ -5,13 +5,13 @@ A workflow node with ``kind == "native"`` (see ``hyperion.crews.workflows``) run
 registered plain-Python handler instead of a CrewAI agent or a child workflow. This
 is the seam the Lean prover uses for its deterministic steps — ``retrieve``,
 ``verify`` (a controller that *calls* an agent but owns its own loop/routing),
-``compare``, and ``bank`` — which are control-flow-deterministic and would only be
+``prove_through``, and ``bank`` — which are control-flow-deterministic and would only be
 slowed down and obscured by wrapping them in a ReAct agent.
 
 Design (mirrors ``agents/registry.py``'s ``TOOL_REGISTRY``)
 -----------------------------------------------------------
 - ``NATIVE_HANDLERS`` is a name -> async-handler registry; ``register_native_handler``
-  adds entries (later phases register ``retrieve``/``verify``/``compare``/``bank``).
+  adds entries (later phases register ``retrieve``/``verify``/``prove_through``/``bank``).
 - A handler receives a small typed :class:`NativeNodeCtx` (task id, the node, the
   run request, blackboard accessors, a progress sink) and returns a result dict that
   the runner records exactly like a stage output.
@@ -90,7 +90,7 @@ NATIVE_HANDLERS: dict[str, NativeHandler] = {}
 def register_native_handler(name: str, handler: NativeHandler) -> None:
     """Register a native handler under ``name``.
 
-    Later phases call this to add ``retrieve``/``verify``/``compare``/``bank``.
+    Later phases call this to add ``retrieve``/``verify``/``prove_through``/``bank``.
 
     Args:
         name: Registry key referenced by a native node's ``handler`` field.
@@ -146,7 +146,7 @@ async def run_native_node(ctx: NativeNodeCtx) -> NativeResult:
 
 # ---------------------------------------------------------------------------
 # Phase 1: a trivial echo handler so the seam is exercisable end-to-end now.
-# Real handlers (retrieve/verify/compare/bank) register in Phases 3–5.
+# Real handlers (retrieve/verify/prove_through/bank) register in the prover module.
 # ---------------------------------------------------------------------------
 
 

@@ -303,7 +303,7 @@ def _native_stage_summary(handler: str, result: dict) -> str:
 
     Native nodes make no LLM call, so they leave no ``response_preview`` for the trace
     UI — yet a prover run's deterministic stages (skeleton_check / retrieve / verify /
-    compare / abstract / bank) are exactly the ones an operator wants to confirm fired.
+    prove_through / bank) are exactly the ones an operator wants to confirm fired.
     This renders the handler's result dict into one readable line per stage, falling
     back to compact JSON for handlers without a bespoke phrasing.
     """
@@ -323,13 +323,10 @@ def _native_stage_summary(handler: str, result: dict) -> str:
                 f"winner=Path {r.get('winner_path')} · A-attempts={dec.get('a_attempts')} "
                 f"· repair-iters={dec.get('repair_iters')} · mode={dec.get('mode')}"
             )
-        if handler == "compare":
-            return f"winner=Path {r.get('winner_path')} · compared={r.get('compared')}"
-        if handler == "abstract":
-            return (
-                f"abstracted={r.get('abstracted')} · "
-                f"over-abstractions rejected={r.get('n_rejected', 0)}"
-            )
+        if handler == "prove_through":
+            return f"solved={r.get('solved')} · concept={r.get('concept_id')}"
+        if handler == "bank_concept":
+            return f"banked={r.get('banked')} · concept={r.get('concept_id')}"
         if handler == "bank":
             base = (
                 f"assembled result.lean · banked {r.get('n_banked', 0)}/"

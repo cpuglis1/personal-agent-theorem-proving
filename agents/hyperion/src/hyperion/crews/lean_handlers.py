@@ -42,7 +42,6 @@ from dataclasses import dataclass, field
 from typing import Any, Optional
 
 from hyperion.config import settings
-from hyperion.crews.lemma_compare import build_triple, choose_winner, generality_score
 from hyperion.crews.lean_statement import (
     context_dict_to_decompose_request,
     formal_to_context_dict,
@@ -693,8 +692,8 @@ def _multi_candidate_from_lemmas(goal_type: str, lemmas: list[dict[str, Any]]) -
     The single-lemma :func:`_candidate_from_lemma` ceilings reuse at depth 1 by construction;
     this is the form that makes composition reachable. ``lemmas_used`` starts as the full
     offered set, but the verify controller ablates it down to the lemmas actually *needed*
-    (single-drop necessity) before crediting :func:`lemma_compare.reuse_depth` — so depth is a
-    verified lower bound, never the (gameable) count of lemmas handed to ``simp``.
+    (single-drop necessity) before crediting ``reuse_depth`` — so depth is a verified lower
+    bound, never the (gameable) count of lemmas handed to ``simp``.
     """
     return {
         "id": None,  # a composition is not itself a banked lemma
@@ -722,14 +721,9 @@ async def propose_repair(
     goal: str,
     candidate_source: str,
     errors: list[str],
-    weak: bool = False,
     profile: str | None = None,
 ) -> str:
     """Ask the ``repair`` agent for ONE revised candidate that closes ``goal``.
-
-    When ``weak`` (the weak-prover headline regime), the prompt forbids strong closers so
-    repair aims for an *eligible* proof — but the gate is still enforced mechanically by
-    :func:`_uses_only_weak_tactics`, never by trusting the model to comply.
 
     A scoped, structured LLM call (à la ``runner._summarize_context``) that reads its
     model and persona from the ``repair`` agent record — so the model/prompt stay
@@ -754,17 +748,11 @@ async def propose_repair(
         return candidate_source
 
     system = f"{record.role}\n\n{record.goal}\n\n{record.backstory}"
-    weak_clause = (
-        f"\n\nCONSTRAINT: do NOT use any of these tactics — "
-        f"{', '.join(settings.prover_path_b_banned_tactics)}, or bare `simp`. "
-        f"Use only primitive steps (rfl, exact, apply, intro, rw, `simp only [...]`)."
-        if weak else ""
-    )
     user = (
         f"Verifier profile: {(profile or settings.lean_profile or 'core').strip().lower()}\n\n"
         f"Goal type:\n{goal}\n\n"
         f"Candidate proof that FAILED to type-check:\n{candidate_source}\n\n"
-        f"Kernel diagnostics:\n" + "\n".join(errors or ["(no diagnostics)"]) + weak_clause + "\n\n"
+        f"Kernel diagnostics:\n" + "\n".join(errors or ["(no diagnostics)"]) + "\n\n"
         "Return ONLY the full revised Lean 4 source."
     )
     try:
@@ -784,68 +772,6 @@ async def propose_repair(
     except Exception as exc:
         logger.warning("propose_repair: LLM call failed (%s) — re-checking unchanged", exc)
         return candidate_source
-
-
-# ---------------------------------------------------------------------------
-# abstraction proposal — the one generative sub-step of `abstract` (§Phase 5 (a))
-# ---------------------------------------------------------------------------
-
-
-async def propose_abstraction(
-    statement: str, proof_term: str, lean_type: str
-) -> list[dict[str, Any]]:
-    """Ask the ``abstractor`` agent for lifted lemmas, ORDERED most-general first.
-
-    The :func:`propose_repair` twin (build plan §Phase 5 decision a): a scoped, structured
-    LLM call that reads its model/persona from the ``abstractor`` agent record, so the
-    generalization model/prompt stay operator-configurable in JSON without a CrewAI crew or
-    a DAG back-edge. The :func:`abstract_handler` controller owns the re-verify + fallback
-    loop; this only proposes.
-
-    Returns a list of candidate dicts (``{source, statement, proof_term, lean_type}``)
-    ordered from boldest generalization to most conservative — the controller keeps the
-    first that still type-checks (the most-general form that re-verifies). Returns ``[]``
-    on any error so the controller falls back to the concrete verified lemma; the kernel
-    re-verifies every proposal, so an over-abstraction can never sneak into the bank.
-    """
-    from hyperion.agents.registry import load_agent
-
-    try:
-        record = load_agent("abstractor")
-    except Exception as exc:  # missing record must not crash the controller
-        logger.warning("propose_abstraction: could not load 'abstractor' agent (%s)", exc)
-        return []
-
-    system = f"{record.role}\n\n{record.goal}\n\n{record.backstory}"
-    user = (
-        f"Goal type the lemma was derived for:\n{lean_type}\n\n"
-        f"Verified lemma statement:\n{statement}\n\n"
-        f"Proof term that closed it:\n{proof_term}\n\n"
-        "Return ONLY a JSON array of candidate lemmas, MOST GENERAL FIRST, each "
-        '{"source", "statement", "proof_term", "lean_type"}.'
-    )
-    try:
-        import json
-
-        from openai import OpenAI
-
-        client = OpenAI(base_url=settings.litellm_base_url, api_key=settings.llm_api_key)
-        resp = client.chat.completions.create(
-            model=record.model_alias,
-            temperature=record.temperature,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
-        )
-        text = (resp.choices[0].message.content or "").strip()
-        data = json.loads(text)
-        if isinstance(data, list):
-            return [d for d in data if isinstance(d, dict) and d.get("source")]
-        return []
-    except Exception as exc:
-        logger.warning("propose_abstraction: LLM call failed (%s) — no proposals", exc)
-        return []
 
 
 # ---------------------------------------------------------------------------
@@ -972,30 +898,12 @@ def _full_verdict(source: str, *, profile: str | None = None) -> tuple[bool, lis
     return bool(res["ok"]), res["errors"]
 
 
-def _uses_only_weak_tactics(source: str) -> bool:
-    """Whether ``source`` avoids every strong closer — the deterministic weak-prover gate.
-
-    The value claim of the snowball ("retrieval is doing real work") is only honest if Path B
-    can't trivially front-run the bank with a decision procedure. We enforce that the way the
-    kernel enforces proofs — mechanically, not by trusting the LLM to obey a prompt: a proof
-    that contains ``omega``/``ring``/``decide``/… (config ``prover_path_b_banned_tactics``)
-    is ineligible to *win*. Full ``simp`` is strong; ``simp only [...]`` (explicit lemmas) is
-    allowed, since that is itself reuse of named facts.
-    """
-    for t in settings.prover_path_b_banned_tactics:
-        if re.search(rf"\b{re.escape(t)}\b", source):
-            return False
-    if re.search(r"\bsimp\b(?!\s*only)", source):
-        return False
-    return True
-
-
 def _necessary_lemma_ids(goal_type: str, lemmas: list[dict[str, Any]]) -> list[str]:
     """Single-drop ablation: which banked lemmas the composition actually *needed*.
 
     A lemma is necessary iff removing it (and re-running the kernel on the remaining set)
-    breaks the proof. The credited :func:`lemma_compare.reuse_depth` is the count of such
-    lemmas — a verified lower bound on genuine composition that can't be inflated by handing
+    breaks the proof. The credited ``reuse_depth`` is the count of such lemmas — a verified
+    lower bound on genuine composition that can't be inflated by handing
     extra lemmas to ``simp``. Conservative on interactions (two lemmas redundant alone but
     needed together would both read as droppable ⇒ we *under*-credit, never over-credit).
     """
@@ -1016,28 +924,22 @@ def _necessary_lemma_ids(goal_type: str, lemmas: list[dict[str, Any]]) -> list[s
 class ProofOutcome:
     """Result of proving one proposition via the kernel + bounded repair loop.
 
-    The reusable proving kernel's return value (see :func:`prove_proposition`). It carries
-    both verdicts the weak-prover regime needs:
+    The reusable proving kernel's return value (see :func:`prove_proposition`).
 
     Attributes:
-        closed: True iff some attempt closed the goal at *full strength* (any tactics).
-        source: The full-strength closing source — the counterfactual ``b_strong`` (could
-            a strong prover close it?), or None.
-        weak_source: The closing source that ALSO passes :func:`_uses_only_weak_tactics`
-            — the proof eligible to *win* under the snowball value claim. Equals ``source``
-            when ``weak=False``; None when only a strong proof closed under the weak gate.
-        proof_term: The bare proof body of the winning source (``weak_source or source``).
+        closed: True iff some attempt closed the goal (kernel full-mode, no ``sorry``).
+        source: The closing source, or None if nothing closed.
+        proof_term: The bare proof body of the closing source.
         repair_iters: Repair rounds performed (each is one ``repair`` agent call).
         verdicts: Per-attempt ``{"path": "seed"|"repair", "ok": bool}`` trace.
         errors: Diagnostics from the last attempt (empty when the last attempt closed).
-        axioms / axioms_clean: The soundness contract result on the winning source when a
+        axioms / axioms_clean: The soundness contract result on the closing source when a
             ``decl`` was supplied; otherwise ``[]`` / None (probe skipped). ``axioms_clean``
-            is the bridge/lemma/ablation acceptance gate (Phases 2-4).
+            is the bridge/lemma acceptance gate (concept synthesis).
     """
 
     closed: bool
     source: Optional[str]
-    weak_source: Optional[str]
     proof_term: Optional[str]
     repair_iters: int
     verdicts: list[dict[str, Any]] = field(default_factory=list)
@@ -1047,15 +949,14 @@ class ProofOutcome:
 
     @property
     def won(self) -> bool:
-        """True iff a *win-eligible* (weak-gated) proof closed the goal."""
-        return self.weak_source is not None
+        """True iff a proof closed the goal."""
+        return self.source is not None
 
 
 async def prove_proposition(
     goal_type: str,
     seed_source: str,
     *,
-    weak: bool = False,
     max_repair: Optional[int] = None,
     decl: Optional[str] = None,
     strict_soundness: Optional[bool] = None,
@@ -1064,26 +965,22 @@ async def prove_proposition(
     """Prove ``goal_type`` from ``seed_source`` via the kernel + bounded repair loop.
 
     The proving kernel extracted from ``verify_handler`` Path B, made callable on any goal
-    so bridge lemmas, planned lemmas, and the same-budget ablation re-proofs (Phases 2-4)
-    all share one path. Verify the seed; on failure (or weak-gate ineligibility) delegate
-    ONE repair proposal per round to the ``repair`` agent (:func:`propose_repair`) and
-    re-check it with the kernel, up to ``max_repair`` rounds (default
-    ``settings.cap_repair_iters``).
+    so bridge lemmas, planned lemmas, and the prove-through re-proofs all share one path.
+    Verify the seed; on failure delegate ONE repair proposal per round to the ``repair``
+    agent (:func:`propose_repair`) and re-check it with the kernel, up to ``max_repair``
+    rounds (default ``settings.cap_repair_iters``).
 
     The verdict is ALWAYS the kernel's — a repair proposal can be arbitrarily creative and
-    still cannot fake a pass. Honors the weak-prover gate exactly as the verify node does:
-    ``source`` is the full-strength close (the counterfactual), ``weak_source`` additionally
-    passes the weak-tactic gate.
+    still cannot fake a pass.
 
     When ``decl`` is given, the soundness contract (:func:`soundness.soundness_ok`) runs on
-    the winning source and fills ``axioms``/``axioms_clean`` — the kernel-grounded acceptance
+    the closing source and fills ``axioms``/``axioms_clean`` — the kernel-grounded acceptance
     gate for bridges/lemmas. With no ``decl`` (the verify node's anonymous ``example``
     sources) the axiom probe is skipped; full-mode verification already forbids ``sorry``.
 
     Args:
         goal_type: The proposition being proved (passed to the repair agent as context).
         seed_source: The initial candidate source to verify (e.g. a synthesized proof).
-        weak: Enforce the weak-prover gate on win-eligibility (snowball value claim).
         max_repair: Repair-round cap (defaults to ``settings.cap_repair_iters``).
         decl: Declaration name to run the soundness contract against; None skips the probe.
         strict_soundness: Override ``settings.prover_soundness_strict`` for the probe.
@@ -1093,54 +990,43 @@ async def prove_proposition(
     """
     cap = settings.cap_repair_iters if max_repair is None else max_repair
     verdicts: list[dict[str, Any]] = []
-    strong_source: Optional[str] = None
-    weak_source: Optional[str] = None
+    source: Optional[str] = None
 
     closed, errors = _full_verdict(seed_source, profile=profile)
     verdicts.append({"path": "seed", "ok": closed})
     if closed:
-        strong_source = seed_source
-        if not weak or _uses_only_weak_tactics(seed_source):
-            weak_source = seed_source
+        source = seed_source
 
     cur_source = seed_source
     repair_iters = 0
-    # Repair while we lack a win-eligible proof — covers both "did not close" and "closed
-    # but gated out by the weak prover". A strong close is kept as the counterfactual.
-    if weak_source is None:
+    if source is None:
         for _ in range(cap):
             repair_iters += 1
             cur_source = _sanitize_lean_source(
-                await propose_repair(goal_type, cur_source, errors, weak=weak, profile=profile),
+                await propose_repair(goal_type, cur_source, errors, profile=profile),
                 profile=profile,
             )
             closed, errors = _full_verdict(cur_source, profile=profile)
             verdicts.append({"path": "repair", "ok": closed})
-            if not closed:
-                continue
-            if strong_source is None:
-                strong_source = cur_source
-            if not weak or _uses_only_weak_tactics(cur_source):
-                weak_source = cur_source
+            if closed:
+                source = cur_source
                 break
 
-    win = weak_source or strong_source
-    proof_term = _bare_proof_term({"source": win}) if win else None
+    proof_term = _bare_proof_term({"source": source}) if source else None
 
     axioms: list[str] = []
     axioms_clean: Optional[bool] = None
-    if win is not None and decl is not None:
+    if source is not None and decl is not None:
         strict = (
             settings.prover_soundness_strict if strict_soundness is None else strict_soundness
         )
-        sres = soundness_ok(win, decl, strict=strict, profile=profile)
+        sres = soundness_ok(source, decl, strict=strict, profile=profile)
         axioms = sres.axioms
         axioms_clean = sres.ok
 
     return ProofOutcome(
-        closed=strong_source is not None,
-        source=strong_source,
-        weak_source=weak_source,
+        closed=source is not None,
+        source=source,
         proof_term=proof_term,
         repair_iters=repair_iters,
         verdicts=verdicts,
@@ -1151,20 +1037,15 @@ async def prove_proposition(
 
 
 # ---------------------------------------------------------------------------
-# Deterministic closer battery — the Path-B seed (regime-gated win-eligibility)
+# Deterministic closer battery — the Path-B seed, tried before the LLM synth
 # ---------------------------------------------------------------------------
 
-# Standard one-shot closers, cheapest/most-primitive first. Win-eligibility is NOT encoded
-# here — it is decided downstream by the SAME ``_uses_only_weak_tactics`` gate Path B uses
-# (one enforcement path, never a hand-labelled flag). Consequence (the thesis contract):
-#   • strong regime: every closer may WIN  → external/SOTA-comparison number.
-#   • weak regime  : only primitives (``rfl`` / structural ``intros`` / narrow ``simp only``)
-#     may win; the strong closers are still TRIED and recorded as the ``b_strong``
-#     counterfactual but are BANNED FROM WINNING — the control condition that forces
-#     composition + definition-mediation to carry the non-trivial goals.
+# Standard one-shot closers, cheapest/most-primitive first. The battery wins with whatever
+# closes the goal through the kernel; "basic path failed" (the escalation trigger) is real
+# failure, not a weakened prover.
 _BATTERY_CLOSERS = (
     "rfl",            # primitive: kernel computation / definitional
-    "simp only []",   # primitive: narrow simp (weak-eligible)
+    "simp only []",   # primitive: narrow simp
     "decide", "norm_num", "ring", "ring_nf", "omega",
     "simp", "linarith", "nlinarith", "positivity", "aesop",
 )
@@ -1199,57 +1080,46 @@ def _closer_battery_tactics(goal_type: str) -> list[str]:
 
 
 def _run_closer_battery(
-    goal_type: str, *, weak: bool, profile: str | None
-) -> tuple[Optional[str], Optional[str], list[dict[str, Any]]]:
-    """Try the deterministic battery against the kernel; return (weak_source, strong_source,
-    verdicts).
+    goal_type: str, *, profile: str | None
+) -> tuple[Optional[str], list[dict[str, Any]]]:
+    """Try the deterministic battery against the kernel; return (source, verdicts).
 
-    ``strong_source`` is the first attempt that closes at full strength (the ``b_strong``
-    counterfactual / the strong-regime win); ``weak_source`` is the first close that ALSO
-    passes the :func:`_uses_only_weak_tactics` gate. Strong regime (``weak=False``) ⇒
-    ``weak_source == strong_source``. The kernel is the only judge — a tactic that does not
-    close is skipped; nothing is faked.
+    ``source`` is the first attempt that closes the goal, or None. The kernel is the only
+    judge — a tactic that does not close is skipped; nothing is faked.
     """
-    strong_source: Optional[str] = None
-    weak_source: Optional[str] = None
+    source: Optional[str] = None
     verdicts: list[dict[str, Any]] = []
     for tac in _closer_battery_tactics(goal_type):
         src = _battery_source(goal_type, tac)
         closed, _errors = _full_verdict(src, profile=profile)
         verdicts.append({"tactic": tac, "ok": closed})
-        if not closed:
-            continue
-        if strong_source is None:
-            strong_source = src
-        if not weak or _uses_only_weak_tactics(src):
-            weak_source = src
+        if closed:
+            source = src
             break
-    return weak_source, strong_source, verdicts
+    return source, verdicts
 
 
 def subgoal_battery_closes(ctx: NativeNodeCtx) -> bool:
-    """Whether the closer battery yields a *win-eligible* proof for this sub-goal — the
-    runner's "battery first" signal to skip the LLM synth node.
+    """Whether the closer battery closes this sub-goal — the runner's "battery first" signal
+    to skip the LLM synth node.
 
-    Pure kernel, no LLM. Resolves the goal/profile/regime exactly as :func:`verify_handler`
-    does and runs the SAME :func:`_run_closer_battery`, so a True here means verify will
-    discharge the goal from the battery without ever needing the synthesized seed. (The
-    battery is intentionally re-run in verify — both are cheap kernel calls — so verify stays
-    the single authoritative owner of ``verified_b``/``b_strong``.)"""
+    Pure kernel, no LLM. Resolves the goal/profile exactly as :func:`verify_handler` does and
+    runs the SAME :func:`_run_closer_battery`, so a True here means verify will discharge the
+    goal from the battery without ever needing the synthesized seed. (The battery is
+    intentionally re-run in verify — both are cheap kernel calls — so verify stays the single
+    authoritative owner of ``verified_b``.)"""
     sg_id = _subgoal_id(ctx)
     goal = _goal_type(ctx, sg_id)
     profile = ctx.get("lean_profile", settings.lean_profile)
-    weak_source, _strong, _verdicts = _run_closer_battery(
-        goal, weak=settings.prover_weak_path_b, profile=profile
-    )
-    return weak_source is not None
+    source, _verdicts = _run_closer_battery(goal, profile=profile)
+    return source is not None
 
 
 def _battery_candidate(source: str, goal_type: str) -> dict[str, Any]:
     """Wrap a closing battery source as a Path-B candidate.
 
-    ``origin='battery'`` lets the thesis read-out separate a trivially-closed goal from one
-    carried by composition/retrieval; ``path='B'`` keeps the compare/bank wiring unchanged.
+    ``origin='battery'`` lets the read-out separate a trivially-closed goal from one carried
+    by composition/retrieval; ``path='B'`` keeps the bank attribution unchanged.
     """
     return {
         "source": source,
@@ -1264,36 +1134,29 @@ def _battery_candidate(source: str, goal_type: str) -> dict[str, Any]:
 async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     """The native controller: kernel verdict + deterministic routing + bounded repair.
 
-    Routing (build plan §1a; RESEARCH/DEPLOY per §Phase 5 decision b):
+    Routing:
       1. Try each Path-A candidate (top, then next-best) in ranked order — the first that
-         closes is the verified Path-A lemma (``verified_a``).
-      2. Path B (always in RESEARCH mode; in DEPLOY only when Path A did not verify):
-         check the synthesized candidate; on failure run the repair loop — delegate ONE
-         proposal per iteration to the ``repair`` agent (:func:`propose_repair`) and re-check
-         it, up to ``settings.cap_repair_iters`` — yielding the verified Path-B lemma
-         (``verified_b``).
-      3. Nothing verifies ⇒ record a structured stall. The Phase-4 definition-synthesis
-         branch may then try to birth a concept and write ``discharged:<sg>``; the final
+         closes is the verified Path-A lemma (``verified_a``). Path A is the optional
+         lemma-cache (off by default); with no cache this is a no-op.
+      2. Path B (only when Path A did not verify): the closer battery first, then the
+         synthesized candidate; on failure run the repair loop — delegate ONE proposal per
+         iteration to the ``repair`` agent (:func:`propose_repair`) and re-check it, up to
+         ``settings.cap_repair_iters`` — yielding the verified Path-B lemma (``verified_b``).
+      3. Nothing verifies ⇒ record a structured stall. The definition-synthesis escalation
+         branch may then prove through a concept and write ``discharged:<sg>``; the final
          bank step remains the hard proof-completion gate.
-
-    DEPLOY (``prover_research_mode`` False, default) is exploit-first: it short-circuits
-    once Path A closes and never pays to verify Path B — the historical behavior. RESEARCH
-    verifies BOTH so ``compare`` has a genuine A-vs-B contest and ``abstract`` can fire on a
-    fresh Path-B lemma even when Path A also closed (anti-starvation, decision e).
 
     The verdict is ALWAYS the kernel's: an LLM repair can be arbitrarily creative and
     still cannot hallucinate a pass, because every proposal is checked on the next line.
-    Writes ``verified_a``/``verified_b`` (the compare inputs), a provisional ``discharged``
-    (exploit-first pick — its single-winner contract, finalized later by ``compare``), and
-    the full routing trace to the blackboard for the thesis log.
+    Writes ``verified_a``/``verified_b``, a ``discharged`` winner, and the full routing
+    trace to the blackboard.
     """
     sg_id = _subgoal_id(ctx)
     goal = _goal_type(ctx, sg_id)
     profile = ctx.get("lean_profile", settings.lean_profile)
-    research = settings.prover_research_mode
     decision: dict[str, Any] = {
         "subgoal": sg_id, "winner_path": None, "a_attempts": 0,
-        "repair_iters": 0, "verdicts": [], "mode": "research" if research else "deploy",
+        "repair_iters": 0, "verdicts": [],
     }
 
     def _record(path: str, closed: bool) -> None:
@@ -1330,38 +1193,25 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
             verified_a = {**cand, "path": "A"}
         break
 
-    # ---- Path B: synthesized candidate, then the bounded repair loop ----
-    # RESEARCH: always verify B (the comparison is the experiment). DEPLOY: only when
-    # Path A failed to close (exploit-first — don't pay for B once A has won).
-    #
-    # weak gate (build plan: snowball value claim): when ``prover_weak_path_b``, a proof is
-    # only *eligible to win* (verified_b) if it uses no strong closer; the full-strength
-    # verdict is logged regardless as the counterfactual ``b_strong`` (could a strong prover
-    # have solved it). Repair is given a fair shot at an eligible (weak) proof.
-    weak = settings.prover_weak_path_b
-    b_strong: Optional[dict[str, Any]] = None
-    if research or verified_a is None:
+    # ---- Path B: closer battery, then the synthesized candidate + bounded repair ----
+    # Exploit-first: only run Path B when Path A did not already close the goal.
+    if verified_a is None:
         # Path B (deterministic): the closer battery, FIRST — try standard one-shot closers
-        # via the kernel before paying for the LLM seed + repair. Win-eligibility is
-        # regime-gated by _run_closer_battery via the same weak gate; the full-strength close
-        # is preserved as the ``b_strong`` counterfactual.
-        bat_weak, bat_strong, bat_verdicts = _run_closer_battery(goal, weak=weak, profile=profile)
+        # via the kernel before paying for the LLM seed + repair.
+        bat_source, bat_verdicts = _run_closer_battery(goal, profile=profile)
         for v in bat_verdicts:
             _record("Bdet", v["ok"])
-        if bat_strong is not None:
-            b_strong = _battery_candidate(bat_strong, goal)
-        if bat_weak is not None:
-            verified_b = _battery_candidate(bat_weak, goal)
+        if bat_source is not None:
+            verified_b = _battery_candidate(bat_source, goal)
 
-        # Path B (synthesized): LLM seed + bounded repair — only when the battery produced no
-        # win-eligible proof. The battery's b_strong counterfactual is kept either way.
+        # Path B (synthesized): LLM seed + bounded repair — only when the battery missed.
         if verified_b is None:
             cb = _synthesized_candidate(ctx, sg_id)
             if cb:
-                # The proving kernel (verify + bounded repair + weak gate) is shared with the
-                # bridge/lemma/ablation paths via prove_proposition; the verify node owns only
-                # the blackboard wiring around it.
-                outcome = await prove_proposition(goal, cb["source"], weak=weak, profile=profile)
+                # The proving kernel (verify + bounded repair) is shared with the
+                # bridge/lemma paths via prove_proposition; the verify node owns only the
+                # blackboard wiring around it.
+                outcome = await prove_proposition(goal, cb["source"], profile=profile)
                 for v in outcome.verdicts:
                     _record("B" if v["path"] == "seed" else "B-repair", v["ok"])
                 decision["repair_iters"] += outcome.repair_iters
@@ -1381,23 +1231,14 @@ async def verify_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
                         "path": "B",
                     }
 
-                if outcome.source is not None and b_strong is None:
-                    b_strong = _as_candidate(outcome.source)
-                if outcome.weak_source is not None:
-                    verified_b = _as_candidate(outcome.weak_source)
+                if outcome.source is not None:
+                    verified_b = _as_candidate(outcome.source)
 
-    # b_strong closed at full strength but no eligible (weak) proof won ⇒ the gate is what
-    # forces Path A to carry the goal — the load-bearing signal of the weak-prover headline.
-    decision["b_strong_closed"] = b_strong is not None
-    decision["b_gated_out"] = b_strong is not None and verified_b is None
-
-    # verified_a/verified_b are the compare inputs (anti-starvation reads verified_b);
-    # verified_b_strong is the full-strength counterfactual for the dual thesis read-out.
+    # verified_a/verified_b are the candidate inputs the bank reads.
     ctx.put(_bb_key("verified_a", sg_id), verified_a)
     ctx.put(_bb_key("verified_b", sg_id), verified_b)
-    ctx.put(_bb_key("verified_b_strong", sg_id), b_strong)
 
-    # Provisional winner — exploit-first prefers A; compare finalizes when both verified.
+    # Exploit-first winner.
     winner: Optional[dict[str, Any]] = verified_a or verified_b
     if winner is not None:
         decision["winner_path"] = winner["path"]
@@ -1468,144 +1309,6 @@ async def escalation_gate_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
         "ok": True,
         "escalated": bool(stalled),
         "goal": goal,
-    }
-
-
-# ---------------------------------------------------------------------------
-# compare — finalize the winner + write the thesis triple log (§Phase 5 (c)/(d))
-# ---------------------------------------------------------------------------
-
-
-async def compare_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
-    """Pick the preferred verified candidate and log the ``(retrieved, synthesized,
-    winner)`` triple — the experiment's core measurement (build plan §Phase 5 (c)/(d)).
-
-    Reads the considered candidates (``candidate_a``/``candidate_b``) and what actually
-    verified (``verified_a``/``verified_b``, written by :func:`verify_handler`). Delegates
-    the choice to the pure, deterministic :func:`lemma_compare.choose_winner` (more general
-    / shorter / reuse-first), finalizes ``discharged:<sg>`` to that winner (carrying its
-    ``generality_score`` for the bank), and writes the fixed :class:`lemma_compare.TripleLog`
-    to ``triple_log:<sg>`` for Post-work's thesis-curve harness. Pure logic lives in
-    ``lemma_compare``; this handler is just the blackboard plumbing around it.
-    """
-    sg_id = _subgoal_id(ctx)
-    goal = _goal_type(ctx, sg_id)
-    retrieved = ctx.get(_bb_key("candidate_a", sg_id))
-    synthesized = _synthesized_candidate(ctx, sg_id)
-    verified_a = ctx.get(_bb_key("verified_a", sg_id))
-    verified_b = ctx.get(_bb_key("verified_b", sg_id))
-    verified_b_strong = ctx.get(_bb_key("verified_b_strong", sg_id))
-
-    winner = choose_winner(verified_a, verified_b)
-    if winner is not None:
-        winner["lean_type"] = winner.get("lean_type") or goal
-        winner["generality_score"] = generality_score(winner)
-        winner["times_won"] = lemma_bank.bump_times_won(winner)
-        ctx.put(_bb_key("discharged", sg_id), winner)  # finalize the verify provisional
-
-    mode = "research" if settings.prover_research_mode else "deploy"
-    triple = build_triple(
-        subgoal=sg_id, goal_type=goal,
-        retrieved=retrieved, synthesized=synthesized,
-        verified_a=verified_a, verified_b=verified_b,
-        verified_b_strong=verified_b_strong,
-        winner=winner, mode=mode,
-    )
-    ctx.put(_bb_key("triple_log", sg_id), triple)
-    ctx.progress(
-        f"[compare] {sg_id}: winner Path {triple['winner_path']} "
-        f"(compared={triple['compared']})"
-    )
-    return {
-        "handler": "compare",
-        "subgoal": sg_id,
-        "winner_path": triple["winner_path"],
-        "compared": triple["compared"],
-        "scores": triple["scores"],
-    }
-
-
-# ---------------------------------------------------------------------------
-# abstract — the anti-unification abstractor (§Phase 5 (a)/(e); baseline §5/§6.6)
-# ---------------------------------------------------------------------------
-
-
-async def abstract_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
-    """Generalize a fresh verified Path-B lemma, re-verify, keep the most-general form.
-
-    The novel module (build plan §Phase 5), built as a native CONTROLLER mirroring
-    verify/repair: the deterministic re-verify + most-general-that-type-checks selection +
-    over-abstraction rejection/fallback live here; only the generative lift is delegated to
-    the ``abstractor`` agent (:func:`propose_abstraction`).
-
-    Anti-starvation trigger (decision e): fires iff ``verified_b:<sg>`` is set — i.e. Path B
-    produced a kernel-verified lemma — read INDEPENDENTLY of who won the compare. So when
-    RESEARCH mode verified both and compare picked Path A, the bespoke Path-B lemma is still
-    generalized into the bank rather than starved. In DEPLOY mode Path B isn't verified once
-    A wins ⇒ ``verified_b`` is None ⇒ this cleanly no-ops (nothing fresh to generalize).
-
-    Selection: :func:`propose_abstraction` returns proposals most-general-first; the kernel
-    (``full`` mode) re-verifies each in order and the FIRST that type-checks is kept. An
-    over-abstraction that no longer type-checks is rejected; if none type-check, fall back
-    to the concrete verified lemma. The chosen form is written to ``abstracted:<sg>`` so the
-    bank stores the generalized (or fallback) lemma.
-    """
-    sg_id = _subgoal_id(ctx)
-    goal = _goal_type(ctx, sg_id)
-    profile = ctx.get("lean_profile", settings.lean_profile)
-    fresh_b = ctx.get(_bb_key("verified_b", sg_id))
-    if not fresh_b:
-        ctx.put(_bb_key("abstracted", sg_id), None)
-        ctx.progress(f"[abstract] {sg_id}: no fresh Path-B lemma — skipped")
-        return {"handler": "abstract", "subgoal": sg_id, "fired": False,
-                "reason": "no fresh Path-B lemma (verified_b unset)"}
-
-    statement = fresh_b.get("statement", "")
-    proof_term = fresh_b.get("proof_term", "")
-    lean_type = fresh_b.get("lean_type") or goal
-    proposals = await propose_abstraction(statement, proof_term, lean_type)
-
-    chosen: Optional[dict[str, Any]] = None
-    n_rejected = 0
-    for p in proposals:  # most-general first
-        src = p.get("source", "")
-        if not src:
-            continue
-        closed, _errors = _full_verdict(src, profile=profile)
-        if closed:
-            chosen = {
-                "source": src,
-                "statement": p.get("statement", statement),
-                "proof_term": p.get("proof_term", src),
-                "origin": "abstract",
-                "lean_type": p.get("lean_type") or lean_type,
-                "path": fresh_b.get("path", "B"),
-            }
-            break
-        n_rejected += 1  # over-abstraction rejected — try the next, more conservative one
-
-    if chosen is None:
-        # No proposal type-checked (or none offered) → fall back to the concrete lemma.
-        chosen = {**fresh_b, "origin": "abstract-fallback"}
-        abstracted = False
-    else:
-        abstracted = True
-    chosen["generality_score"] = generality_score(chosen)
-    discharged = ctx.get(_bb_key("discharged", sg_id)) or {}
-    if discharged.get("path") == fresh_b.get("path"):
-        chosen["times_won"] = int(discharged.get("times_won") or 0)
-    ctx.put(_bb_key("abstracted", sg_id), chosen)
-    ctx.progress(
-        f"[abstract] {sg_id}: {'abstracted' if abstracted else 'fell back'} "
-        f"({n_rejected} over-abstraction(s) rejected)"
-    )
-    return {
-        "handler": "abstract",
-        "subgoal": sg_id,
-        "fired": True,
-        "abstracted": abstracted,
-        "n_rejected": n_rejected,
-        "origin": chosen["origin"],
     }
 
 
@@ -1769,29 +1472,24 @@ async def bank_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
                 + "; ".join(final_errors or ["verifier unavailable"])
             )
 
-    # Store each winning lemma (loud writes — surface failures). Prefer the ABSTRACTED
-    # form (§Phase 5): the abstractor's most-general type-checking generalization is what
-    # grows the bank's reuse, so store it instead of the concrete winner when present.
-    # (result.lean above is still assembled from the concrete ``discharged`` proof that
-    # fits the scaffold hole — only the banked lemma is the generalized one.)
+    # Store each winning lemma (loud writes — surface failures).
     bank_failures: list[dict[str, str]] = []
     banked = 0
     learning_writes = bool(ctx.get("learning_writes_enabled", True))
     for sg_id, win in discharged.items():
         sub = next((s for s in subtasks if s.id == sg_id), None)
-        to_bank = ctx.get(_bb_key("abstracted", sg_id)) or win
         if not learning_writes:
             continue
         store = lemma_bank.store_lemma(
-            to_bank.get("statement", "") or sg_id,
-            to_bank.get("proof_term", ""),
+            win.get("statement", "") or sg_id,
+            win.get("proof_term", ""),
             source_goal=ctx.request,
             verification_mode="full",
-            generality_score=float(to_bank.get("generality_score", 0.0) or 0.0),
-            lean_type=(sub.lean_type if sub else None) or to_bank.get("lean_type"),
-            times_retrieved=int(to_bank.get("times_retrieved") or 0),
-            times_won=int(to_bank.get("times_won") or 0),
-            origin=to_bank.get("origin") or "skill_library",
+            generality_score=float(win.get("generality_score", 0.0) or 0.0),
+            lean_type=(sub.lean_type if sub else None) or win.get("lean_type"),
+            times_retrieved=int(win.get("times_retrieved") or 0),
+            times_won=int(win.get("times_won") or 0),
+            origin=win.get("origin") or "skill_library",
         )
         if store["ok"]:
             banked += 1
@@ -1853,7 +1551,7 @@ async def propose_definition(
 ) -> list[dict[str, Any]]:
     """Ask the ``definition_synthesizer`` agent for ``n`` concept candidates.
 
-    The :func:`propose_repair` / :func:`propose_abstraction` twin: a scoped, structured LLM
+    The :func:`propose_repair` twin: a scoped, structured LLM
     call reading model/persona from the ``definition_synthesizer`` agent record. Each
     candidate is a *concept* — a new local definition (vocabulary) plus the bridge lemmas
     that make it usable — aimed at the stuck lemma. The proposer may invent freely; the
@@ -2045,7 +1743,6 @@ async def verify_concept_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     """
     sg_id = _subgoal_id(ctx)
     candidates = ctx.get(_bb_key("concept_candidates", sg_id)) or []
-    weak = settings.prover_weak_path_b
     strict = settings.prover_soundness_strict
     profile = ctx.get("lean_profile", settings.lean_profile)
 
@@ -2089,7 +1786,7 @@ async def verify_concept_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
         for b in cand.get("bridges") or []:
             seed = _compose_concept_source(def_src, b.get("source") or "")
             outcome = await prove_proposition(
-                b.get("lean_type") or "", seed, weak=weak, decl=b.get("name"),
+                b.get("lean_type") or "", seed, decl=b.get("name"),
                 strict_soundness=strict, profile=profile,
             )
             bridge_ok = outcome.won and bool(outcome.axioms_clean)
@@ -2102,7 +1799,7 @@ async def verify_concept_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
                 break
             proven_bridges.append({
                 "name": b.get("name"),
-                "source": outcome.weak_source or outcome.source,
+                "source": outcome.source,
                 "proof_term": outcome.proof_term,
                 "lean_type": b.get("lean_type") or "",
                 "statement": b.get("statement") or "",
@@ -2140,120 +1837,93 @@ async def verify_concept_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
 
 
 # ===========================================================================
-# Birth ablation (PLAN-definition-synthesis Phase 3) — same-budget causal test
+# Prove through a verified concept
 # ---------------------------------------------------------------------------
-# A concept is provisionally accepted ONLY if it *caused* the proof: re-prove the goal
-# THROUGH the package and WITHOUT it at an IDENTICAL budget; accept iff solves-WITH
-# (soundness-clean) AND fails-WITHOUT. solves-without ⇒ the concept caused nothing ⇒
-# reject (crutch/redundant). The budget must be exactly equal across arms or the causal
-# claim collapses — both arms call prove_proposition with the same max_repair, weak gate,
-# and goal; only the in-scope vocabulary differs.
+# Once a definition and its bridges verify, the concept branch tries to close the stuck
+# theorem with that vocabulary in scope. This is not a causal with/without ablation; it is
+# just the same kernel proof loop applied after extending the local language.
 # ===========================================================================
 
-_ABLATION_DECL = "ablation_target"
+_PROVE_THROUGH_DECL = "concept_target"
 
 
 def _concept_preamble(concept: dict[str, Any]) -> str:
-    """The definition + all bridge sources, the vocabulary the WITH-arm proves through."""
+    """The definition + all bridge sources, the vocabulary to prove through."""
     def_src = ((concept.get("definition") or {}).get("source") or "").strip()
     bridges = "\n\n".join((b.get("source") or "").strip() for b in concept.get("bridges") or [])
     return f"{def_src}\n\n{bridges}".strip()
 
 
-async def birth_ablation_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
-    """Native step: the same-budget with/without causal test for a verified concept.
-
-    Reads ``verified_concept:<sg>`` and re-proves the sub-goal twice at an identical
-    budget (``settings.cap_repair_iters`` repair rounds, same weak gate, same goal):
-    the WITH arm has the concept's definition + bridges in scope, the WITHOUT arm does
-    not. Accept (provisionally) iff the WITH arm solves soundness-clean AND the WITHOUT
-    arm fails. ``solves-without`` ⇒ reject (the concept caused nothing). The accepted
-    package is staged at ``accepted_concept:<sg>`` with provisional bank fields
-    (``necessity_hits``/``times_won``/``provisional``) for Phase 4 banking + promotion.
-
-    No bank write here; ``bank_concept`` persists only concepts that pass this causal test.
-    """
+async def prove_through_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
+    """Prove the stuck sub-goal with the verified concept package in scope."""
     sg_id = _subgoal_id(ctx)
     goal = _goal_type(ctx, sg_id)
     concept = ctx.get(_bb_key("verified_concept", sg_id))
     if not concept:
-        ctx.put(_bb_key("birth_ablation", sg_id),
+        ctx.put(_bb_key("prove_through", sg_id),
                 {"subgoal": sg_id, "ran": False, "reason": "no verified concept"})
-        ctx.progress(f"[birth_ablation] {sg_id}: no verified concept to test")
-        return {"handler": "birth_ablation", "subgoal": sg_id, "ok": False,
-                "birth_ablation_pass": False, "reason": "no verified concept"}
+        ctx.progress(f"[prove_through] {sg_id}: no verified concept")
+        return {"handler": "prove_through", "subgoal": sg_id, "ok": False,
+                "reason": "no verified concept"}
 
-    weak = settings.prover_weak_path_b
     strict = settings.prover_soundness_strict
     profile = ctx.get("lean_profile", settings.lean_profile)
-    budget = settings.cap_repair_iters  # IDENTICAL across arms — B_ablate
-    target = f"theorem {_ABLATION_DECL} : {goal} := by sorry"
-    with_seed = f"{_concept_preamble(concept)}\n\n{target}\n"
-    without_seed = f"{target}\n"
+    target = f"theorem {_PROVE_THROUGH_DECL} : {goal} := by sorry"
+    seed = f"{_concept_preamble(concept)}\n\n{target}\n"
 
-    # Same call shape both arms; the ONLY difference is whether the vocabulary is in scope.
-    with_out = await prove_proposition(
-        goal, with_seed, weak=weak, max_repair=budget, decl=_ABLATION_DECL,
-        strict_soundness=strict, profile=profile,
-    )
-    without_out = await prove_proposition(
-        goal, without_seed, weak=weak, max_repair=budget, decl=_ABLATION_DECL,
+    outcome = await prove_proposition(
+        goal, seed, max_repair=settings.cap_repair_iters, decl=_PROVE_THROUGH_DECL,
         strict_soundness=strict, profile=profile,
     )
 
-    with_solves = with_out.won and bool(with_out.axioms_clean)
-    without_solves = without_out.won
-    accept = with_solves and not without_solves
-    reject_reason = (
-        None if accept
-        else "solves without the concept (crutch/redundant)" if without_solves
-        else "with-arm did not solve soundness-clean"
-    )
-
+    solved = outcome.won and bool(outcome.axioms_clean)
     result = {
         "subgoal": sg_id, "ran": True, "concept_id": concept.get("concept_id"),
-        "budget": budget, "weak": weak,
-        "with_solves": with_solves, "without_solves": without_solves,
-        "with_axioms_clean": with_out.axioms_clean,
-        "with_repair_iters": with_out.repair_iters,
-        "without_repair_iters": without_out.repair_iters,
-        "accept": accept, "reject_reason": reject_reason,
+        "solved": solved,
+        "axioms_clean": outcome.axioms_clean,
+        "repair_iters": outcome.repair_iters,
     }
-    ctx.put(_bb_key("birth_ablation", sg_id), result)
+    ctx.put(_bb_key("prove_through", sg_id), result)
 
-    if accept:
+    if solved:
         accepted = {
             **concept,
-            "with_proof": with_out.weak_source or with_out.source,
-            "birth_ablation": {"budget": budget, "with_repair_iters": with_out.repair_iters},
-            "provisional": True,
-            "necessity_hits": 0,   # later, distinct theorems that need it (Phase 4 promotion)
-            "times_won": 1,        # this birth
+            "through_proof": outcome.source,
+            "times_won": 1,
         }
         ctx.put(_bb_key("accepted_concept", sg_id), accepted)
+        definition = accepted.get("definition") or {}
+        ctx.put(_bb_key("discharged", sg_id), {
+            "source": outcome.source or "",
+            "statement": f"theorem {_PROVE_THROUGH_DECL} : {goal}",
+            "proof_term": _bare_proof_term({"source": outcome.source or ""})
+            or outcome.source or "",
+            "origin": "concept",
+            "path": "C",
+            "lean_type": goal,
+            "concept_id": accepted.get("concept_id"),
+            "definition_name": definition.get("name"),
+            "times_won": 1,
+        })
 
     ctx.progress(
-        f"[birth_ablation] {sg_id}: "
-        + (f"ACCEPT concept {concept.get('concept_id')}" if accept
-           else f"reject ({reject_reason})")
+        f"[prove_through] {sg_id}: "
+        + (f"proved through concept {concept.get('concept_id')}" if solved else "did not close")
     )
     return {
-        "handler": "birth_ablation", "subgoal": sg_id, "ok": accept,
-        "birth_ablation_pass": accept, "concept_id": concept.get("concept_id"),
-        "with_solves": with_solves, "without_solves": without_solves,
+        "handler": "prove_through", "subgoal": sg_id, "ok": solved,
+        "concept_id": concept.get("concept_id"), "solved": solved,
     }
 
 
 async def bank_concept_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
-    """Persist an accepted concept and expose its with-arm proof as a discharge.
+    """Persist an accepted concept.
 
     The final ``bank`` handler still owns result.lean assembly and lemma banking. This
-    step only makes the language-extension branch visible to that existing path:
-    accepted concepts are stored in the ``concepts`` collection, and their birth proof is
-    staged as ``discharged:<sg>`` with path ``"C"``.
+    step only writes accepted concepts to the ``concepts`` collection; ``prove_through``
+    already staged the Path C discharge.
     """
     sg_id = _subgoal_id(ctx)
-    goal = _goal_type(ctx, sg_id)
     accepted = ctx.get(_bb_key("accepted_concept", sg_id))
     if not accepted:
         ctx.put(_bb_key("bank_concept", sg_id),
@@ -2276,28 +1946,13 @@ async def bank_concept_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
         accepted = {**accepted, "bank_id": store["id"]}
         ctx.put(_bb_key("accepted_concept", sg_id), accepted)
 
-    definition = accepted.get("definition") or {}
-    discharged = {
-        "source": accepted.get("with_proof") or "",
-        "statement": f"theorem {_ABLATION_DECL} : {goal}",
-        "proof_term": _bare_proof_term({"source": accepted.get("with_proof") or ""})
-        or accepted.get("with_proof") or "",
-        "origin": "concept",
-        "path": "C",
-        "lean_type": goal,
-        "concept_id": accepted.get("concept_id"),
-        "definition_name": definition.get("name"),
-        "times_won": int(accepted.get("times_won") or 1),
-        "necessity_hits": int(accepted.get("necessity_hits") or 0),
-    }
-    ctx.put(_bb_key("discharged", sg_id), discharged)
     result = {
         "subgoal": sg_id,
         "banked": store["ok"],
         "bank_writes_enabled": learning_writes,
         "store": store,
         "concept_id": accepted.get("concept_id"),
-        "discharged": True,
+        "discharged": ctx.get(_bb_key("discharged", sg_id)) is not None,
     }
     ctx.put(_bb_key("bank_concept", sg_id), result)
     ctx.progress(
@@ -2319,10 +1974,8 @@ register_native_handler("lean_decompose", lean_decompose_handler)
 register_native_handler("skeleton_check", skeleton_check_handler)
 register_native_handler("verify", verify_handler)
 register_native_handler("escalation_gate", escalation_gate_handler)
-register_native_handler("compare", compare_handler)
-register_native_handler("abstract", abstract_handler)
 register_native_handler("bank", bank_handler)
 register_native_handler("synthesize_definition", synthesize_definition_handler)
 register_native_handler("verify_concept", verify_concept_handler)
-register_native_handler("birth_ablation", birth_ablation_handler)
+register_native_handler("prove_through", prove_through_handler)
 register_native_handler("bank_concept", bank_concept_handler)

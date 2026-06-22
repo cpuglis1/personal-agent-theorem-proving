@@ -3,11 +3,11 @@
 A prover run leaves a complete record of itself on the durable blackboard
 (``context.json``): every stage writes its output under a sub-goal-namespaced key
 (``candidate_a:<sg>``, ``candidate_b:<sg>``, ``verified_a/b:<sg>``, ``verify_decision:<sg>``,
-``triple_log:<sg>``, ``discharged:<sg>``, ``abstracted:<sg>``), the decomposer writes the
+``discharged:<sg>``), the decomposer writes the
 plan/scaffold, and ``bank`` writes ``artifacts/result.lean``. This module reads that record
 back and organizes it by sub-goal in pipeline order, so a human (or the thesis harness) can
-see exactly what decompose → skeleton_check → retrieve ‖ synthesize → verify → compare →
-abstract → bank each produced — without instrumenting the hot path.
+see exactly what decompose → skeleton_check → retrieve ‖ synthesize → verify →
+definition-synthesis → prove-through → bank each produced — without instrumenting the hot path.
 
 :func:`collect_trace` is pure (it takes the blackboard/plan/result as data); :func:`trace_task`
 is the thin disk-reading wrapper. :func:`format_trace` renders a readable report.
@@ -27,9 +27,9 @@ _PER_SG_KEYS = (
     "verified_a", "verified_b", "verify_decision",
     "concept_context", "stall_errors", "subgoal_unbound_context",
     "escalated", "synthesize_definition", "concept_candidates",
-    "verify_concept", "verified_concept", "birth_ablation",
+    "verify_concept", "verified_concept", "prove_through",
     "accepted_concept", "bank_concept",
-    "triple_log", "discharged", "abstracted",
+    "discharged",
 )
 
 
@@ -145,31 +145,20 @@ def format_trace(trace: dict[str, Any]) -> str:
             f"verified_a={_flag(e.get('verified_a') is not None)} "
             f"verified_b={_flag(e.get('verified_b') is not None)}"
         )
-        tl = e.get("triple_log") or {}
-        out.append(
-            f"  compare           : winner=Path {tl.get('winner_path')}  "
-            f"compared={tl.get('compared')}  scores={tl.get('scores')}"
-        )
         out.append(
             f"  definition synth  : escalated={bool(e.get('escalated'))} "
             f"candidates={len(e.get('concept_candidates') or [])} "
             f"verified={_flag(e.get('verified_concept') is not None)}"
         )
-        ba = e.get("birth_ablation") or {}
+        pt = e.get("prove_through") or {}
         out.append(
-            f"  birth ablation    : pass={_flag(ba.get('accept'))} "
-            f"concept_id={ba.get('concept_id')}"
+            f"  prove through     : solved={_flag(pt.get('solved'))} "
+            f"concept_id={pt.get('concept_id')}"
         )
         bc = e.get("bank_concept") or {}
         out.append(
-            f"  concept bank      : banked={_flag(bc.get('banked'))} "
-            f"necessity_hits={(e.get('accepted_concept') or {}).get('necessity_hits')}"
+            f"  concept bank      : banked={_flag(bc.get('banked'))}"
         )
-        ab = e.get("abstracted")
-        if ab is None:
-            out.append("  abstract          : did not fire (no fresh Path-B lemma)")
-        else:
-            out.append(f"  abstract          : {_cand(ab)}")
         out.append(f"  → discharged      : {_cand(e.get('discharged'))}")
 
     out.append("")

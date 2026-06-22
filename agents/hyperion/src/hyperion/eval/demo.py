@@ -2,7 +2,7 @@
 
 This is the "kick off some problems and watch each stage perform" harness. It drives the
 actual ``runner.run_task`` over a dynamically-built ``lean-prove`` workflow (decompose →
-skeleton_check → retrieve ‖ synthesize → verify → compare → abstract → bank), with the two
+skeleton_check → retrieve ‖ synthesize → verify → bank), with the two
 external dependencies mocked so it runs with **no live toolchain**:
 
   - **Lean** — a content-aware fake ``verify_lean``: ``skeleton`` mode always elaborates
@@ -10,8 +10,8 @@ external dependencies mocked so it runs with **no live toolchain**:
     the problem's ``fail_full`` set. This is faithful enough to exercise the real routing — a
     ``sorry``-bearing Path-B candidate genuinely fails ``full`` and triggers the repair loop.
   - **LLM** — the agent stages (``_run_stage``) are replaced by a fake that writes the plan and
-    the synthesized candidate from the problem spec; ``propose_repair`` / ``propose_abstraction``
-    return canned proposals. The kernel still judges every proposal (it cannot be faked).
+    the synthesized candidate from the problem spec; ``propose_repair`` returns a canned
+    proposal. The kernel still judges every proposal (it cannot be faked).
 
 Run it: ``./.venv/bin/uv run python -m hyperion.eval.demo``. The same workflow runs live once
 the Lean sidecar + an LLM proxy are reachable — drop the mocks and point ``LEAN_URL`` at the
@@ -48,18 +48,16 @@ class Problem:
     synth: dict[str, dict] = field(default_factory=dict)             # sg -> candidate_b
     fail_full: set[str] = field(default_factory=set)                 # sources the kernel rejects
     repair_proposal: Optional[str] = None                            # propose_repair return
-    abstraction: list[dict] = field(default_factory=list)            # propose_abstraction return
-    research_mode: bool = False
 
 
 def build_workflow(subgoal_ids: list[str]) -> WorkflowRecord:
-    """The full Phase-5 prover DAG for N sub-goals (one chain per ``sorry``)."""
+    """The trimmed prover DAG for N sub-goals (one chain per ``sorry``)."""
     nodes = [
         WorkflowNode(id="decompose", kind="plan", agent="decomposer", upstream=[]),
         WorkflowNode(id="skeleton_check", kind="native", handler="skeleton_check",
                      upstream=["decompose"]),
     ]
-    abstract_ids = []
+    verify_ids = []
     for sg in subgoal_ids:
         nodes += [
             WorkflowNode(id=f"retrieve_{sg}", kind="native", handler="retrieve",
@@ -68,13 +66,9 @@ def build_workflow(subgoal_ids: list[str]) -> WorkflowRecord:
                          instruction=sg, upstream=["skeleton_check"]),
             WorkflowNode(id=f"verify_{sg}", kind="native", handler="verify",
                          instruction=sg, upstream=[f"retrieve_{sg}", f"synth_{sg}"]),
-            WorkflowNode(id=f"compare_{sg}", kind="native", handler="compare",
-                         instruction=sg, upstream=[f"verify_{sg}"]),
-            WorkflowNode(id=f"abstract_{sg}", kind="native", handler="abstract",
-                         instruction=sg, upstream=[f"compare_{sg}"]),
         ]
-        abstract_ids.append(f"abstract_{sg}")
-    nodes.append(WorkflowNode(id="bank", kind="native", handler="bank", upstream=abstract_ids))
+        verify_ids.append(f"verify_{sg}")
+    nodes.append(WorkflowNode(id="bank", kind="native", handler="bank", upstream=verify_ids))
     return WorkflowRecord(id="lean-prove-demo", name="demo", nodes=nodes)
 
 
@@ -107,12 +101,10 @@ def _mocked(problem: Problem, tasks_root: Path):
     wf = build_workflow(problem.subgoal_ids)
     repair = AsyncMock(return_value=problem.repair_proposal
                        or f"-- repaired\nexample : {problem.request} := by exact proof")
-    abstraction = AsyncMock(return_value=list(problem.abstraction))
 
     with ExitStack() as stack:
         ep = stack.enter_context
         ep(patch.object(settings, "tasks_dir", tasks_root))
-        ep(patch.object(settings, "prover_research_mode", problem.research_mode))
         ep(patch.object(runner, "build_agent", MagicMock()))
         ep(patch.object(runner, "load_agent", MagicMock()))
         ep(patch.object(runner, "discover_context", MagicMock(return_value=None)))
@@ -124,9 +116,8 @@ def _mocked(problem: Problem, tasks_root: Path):
         # would let the battery close every sorry-free probe, skipping the very synth/repair/
         # research mechanics these samples exist to demonstrate. The battery is exercised by
         # its own tests and the real dev/train eval.
-        ep(patch.object(lean_handlers, "_run_closer_battery", return_value=(None, None, [])))
+        ep(patch.object(lean_handlers, "_run_closer_battery", return_value=(None, [])))
         ep(patch.object(lean_handlers, "propose_repair", repair))
-        ep(patch.object(lean_handlers, "propose_abstraction", abstraction))
         ep(patch("hyperion.tools.lean_verify.verify_lean", side_effect=_fake_verify))
         ep(patch("hyperion.crews.lean_handlers.verify_lean", side_effect=_fake_verify))
         ep(patch("hyperion.memory.lemma_bank.store_lemma",
@@ -188,29 +179,11 @@ SAMPLE_PROBLEMS: list[Problem] = [
                       "proof_term": "by sorry", "origin": "synthesize", "lean_type": "R"}},
         repair_proposal="theorem t_h1 : R := by exact r_proof",  # sorry-free → kernel accepts
     ),
-    # 3) RESEARCH: both paths verify → compare contest → abstractor generalizes the Path-B lemma.
-    Problem(
-        id="demo_research_abstract",
-        request="prove S",
-        plan_md=_plan(
-            "demo_research_abstract",
-            "theorem target : S := by\n  have h1 : S := sorry\n  exact h1",
-            "      - id: h1\n        description: prove S\n        lean_type: \"S\"\n",
-        ),
-        subgoal_ids=["h1"],
-        retrieved={"S": [{"statement": "lem_S", "proof_term": "lemS_proof", "lean_type": "S"}]},
-        synth={"h1": {"source": "theorem t_h1 : S := by exact s_proof", "statement": "theorem t_h1 : S",
-                      "proof_term": "s_proof", "origin": "synthesize", "lean_type": "S"}},
-        abstraction=[{"source": "theorem gen {α : Type} (x : α) : x = x := rfl",
-                      "statement": "theorem gen {α : Type} (x : α) : x = x",
-                      "proof_term": "rfl", "lean_type": "∀ {α : Type} (x : α), x = x"}],
-        research_mode=True,
-    ),
 ]
 
 
 async def _main_async() -> None:
-    all_triples: list[dict[str, Any]] = []
+    outcomes: list[dict[str, Any]] = []
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         for problem in SAMPLE_PROBLEMS:
@@ -218,10 +191,10 @@ async def _main_async() -> None:
             print("\n" + "=" * 78)
             print(format_trace(trace))
             for sg in trace["subgoals"].values():
-                if sg.get("triple_log"):
-                    all_triples.append(sg["triple_log"])
+                if sg.get("discharged"):
+                    outcomes.append(sg["discharged"])
     print("\n" + "=" * 78)
-    print(thesis_curve.format_summary(all_triples))
+    print(thesis_curve.format_summary(outcomes))
 
 
 def main() -> None:

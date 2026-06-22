@@ -35,11 +35,10 @@ from hyperion.crews.lean_handlers import (
     ProofOutcome,
     formal_ingest_handler,
     lean_decompose_handler,
-    abstract_handler,
     bank_concept_handler,
     bank_handler,
-    compare_handler,
     escalation_gate_handler,
+    prove_through_handler,
     skeleton_check_handler,
     verify_handler,
 )
@@ -63,7 +62,7 @@ def _no_battery():
     would consume a scripted ``mock_lean(results=[...])`` sequence or close a goal the test
     means to route through the LLM/repair path. Tests that script the candidate/repair path
     patch the battery to "closes nothing"; the battery has its own dedicated tests."""
-    return patch.object(lean_handlers, "_run_closer_battery", return_value=(None, None, []))
+    return patch.object(lean_handlers, "_run_closer_battery", return_value=(None, []))
 
 
 @pytest.fixture
@@ -556,7 +555,6 @@ async def test_shipped_lean_prove_mocked_workflow_runs_with_native_decompose(tmp
          patch.object(runner, "_node_task", MagicMock()), \
          patch.object(runner, "_run_stage", new=_fake_stage), \
          patch.object(lean_handlers, "retrieve_applicable_lemmas", lambda goal, **k: []), \
-         patch.object(lean_handlers, "propose_abstraction", AsyncMock(return_value=[])), \
          patch("hyperion.memory.lemma_bank.store_lemma", store), \
          patch("hyperion.server.meta_tasks.run_meta_tasks", new=AsyncMock()), \
          _no_battery(), \
@@ -610,21 +608,20 @@ async def test_shipped_workflow_escalates_stall_and_banks_concept(tmp_path):
         return ProofOutcome(
             closed=True,
             source=src,
-            weak_source=src,
             proof_term="by trivial",
             repair_iters=0,
             axioms=[],
             axioms_clean=True,
         )
 
-    lost = ProofOutcome(closed=False, source=None, weak_source=None, proof_term=None,
+    lost = ProofOutcome(closed=False, source=None, proof_term=None,
                         repair_iters=3, axioms=[], axioms_clean=None)
     concept = {
         "definition": {"name": "Useful", "source": "def Useful (p : Prop) : Prop := p"},
         "bridges": [{"name": "Useful.intro", "source": "theorem Useful.intro : Useful True := by trivial",
                      "lean_type": "Useful True", "statement": "Useful.intro : Useful True"}],
     }
-    proof_through_concept = "theorem ablation_target : True := by trivial"
+    proof_through_concept = "theorem concept_target : True := by trivial"
     prove = AsyncMock(side_effect=[lost, _won(), _won(proof_through_concept), lost])
     lemma_store = MagicMock(return_value={"ok": True, "id": "lemma", "error": None})
     concept_store = MagicMock(return_value={"ok": True, "id": "concept", "error": None})
@@ -638,7 +635,6 @@ async def test_shipped_workflow_escalates_stall_and_banks_concept(tmp_path):
          patch.object(lean_handlers, "retrieve_applicable_lemmas", lambda goal, **k: []), \
          patch.object(lean_handlers, "propose_definition", AsyncMock(return_value=[concept])), \
          patch.object(lean_handlers, "prove_proposition", prove), \
-         patch.object(lean_handlers, "propose_abstraction", AsyncMock(return_value=[])), \
          patch("hyperion.memory.lemma_bank.store_lemma", lemma_store), \
          patch("hyperion.memory.concept_bank.store_concept", concept_store), \
          patch("hyperion.server.meta_tasks.run_meta_tasks", new=AsyncMock()), \
@@ -710,7 +706,6 @@ async def test_skeleton_failure_revises_decomposer_before_sourcing(tmp_path):
          patch.object(runner, "_run_stage", new=_fake_stage), \
          patch.object(lean_handlers, "verify_lean", _verify), \
          patch.object(lean_handlers, "retrieve_applicable_lemmas", lambda goal, **k: []), \
-         patch.object(lean_handlers, "propose_abstraction", AsyncMock(return_value=[])), \
          patch("hyperion.memory.lemma_bank.store_lemma", MagicMock(return_value={"ok": True, "id": "pt", "error": None})), \
          patch("hyperion.server.meta_tasks.run_meta_tasks", new=AsyncMock()):
         result = await runner.run_task("revise_skeleton", "word problem", workflow="lean-prove")
@@ -895,7 +890,7 @@ def test_retrieve_and_synthesize_share_a_wave():
     verify_node = next(n for n in wf.nodes if n.id == "verify")
     assert set(verify_node.upstream) == {"retrieve", "synthesize"}
     assert next(n for n in wf.nodes if n.id == "escalation_gate").upstream == ["verify"]
-    assert next(n for n in wf.nodes if n.id == "bank").upstream == ["abstract", "bank_concept"]
+    assert next(n for n in wf.nodes if n.id == "bank").upstream == ["verify", "bank_concept"]
 
 
 @pytest.mark.anyio
@@ -927,17 +922,24 @@ async def test_escalation_gate_routes_only_stalls(tmp_path):
 
 
 @pytest.mark.anyio
-async def test_bank_concept_persists_and_stages_discharge(tmp_path):
+async def test_bank_concept_persists_accepted_concept(tmp_path):
     with patch.object(settings, "tasks_dir", tmp_path):
         context_put("bc", "accepted_concept:sg", {
             "concept_id": "c1",
             "definition": {"name": "Balanced", "source": "def Balanced : Prop := True"},
             "bridges": [],
-            "with_proof": "theorem ablation_target : G := by exact proofG",
+            "through_proof": "theorem concept_target : G := by exact proofG",
             "origin": "synthesized",
-            "provisional": True,
-            "necessity_hits": 0,
             "times_won": 1,
+        })
+        context_put("bc", "discharged:sg", {
+            "source": "theorem concept_target : G := by exact proofG",
+            "statement": "theorem concept_target : G",
+            "proof_term": "by exact proofG",
+            "origin": "concept",
+            "path": "C",
+            "lean_type": "G",
+            "concept_id": "c1",
         })
         store = MagicMock(return_value={"ok": True, "id": "cid", "error": None})
         ctx = NativeNodeCtx(
@@ -992,12 +994,11 @@ options:
 
 
 def _two_sorry_workflow() -> WorkflowRecord:
-    """decompose → skeleton_check → (retrieve‖synth → verify → compare → abstract) per
-    sub-goal → bank.
+    """decompose → skeleton_check → (retrieve‖synth → verify) per sub-goal → bank.
 
-    Multi-sorry fan-out as one (retrieve‖synthesize→verify→compare→abstract) chain per
-    sub-goal over the shared, sub-goal-namespaced blackboard — each prover native node
-    carries its sub-goal id in ``instruction``.
+    Multi-sorry fan-out as one retrieve‖synthesize→verify chain per sub-goal over the
+    shared, sub-goal-namespaced blackboard — each prover native node carries its sub-goal
+    id in ``instruction``.
     """
     def chain(sg: str) -> list[WorkflowNode]:
         return [
@@ -1007,10 +1008,6 @@ def _two_sorry_workflow() -> WorkflowRecord:
                          instruction=sg, upstream=["skeleton_check"]),
             WorkflowNode(id=f"verify_{sg}", kind="native", handler="verify",
                          instruction=sg, upstream=[f"retrieve_{sg}", f"synth_{sg}"]),
-            WorkflowNode(id=f"compare_{sg}", kind="native", handler="compare",
-                         instruction=sg, upstream=[f"verify_{sg}"]),
-            WorkflowNode(id=f"abstract_{sg}", kind="native", handler="abstract",
-                         instruction=sg, upstream=[f"compare_{sg}"]),
         ]
 
     nodes = [
@@ -1020,7 +1017,7 @@ def _two_sorry_workflow() -> WorkflowRecord:
         *chain("h1"),
         *chain("h2"),
         WorkflowNode(id="bank", kind="native", handler="bank",
-                     upstream=["abstract_h1", "abstract_h2"]),
+                     upstream=["verify_h1", "verify_h2"]),
     ]
     return WorkflowRecord(id="lean-prove-2sorry", name="2-sorry", nodes=nodes)
 
@@ -1055,12 +1052,6 @@ def _mock_prover_run(tasks_dir):
     registry = {"lean-prove-2sorry": _two_sorry_workflow()}
     store = MagicMock(return_value={"ok": True, "id": "pt", "error": None})
 
-    # The generative lift is delegated; patch it so abstract runs LLM-free (the kernel,
-    # mocked ok below, still judges the proposal — propose_abstraction can't fake a pass).
-    abstraction = AsyncMock(return_value=[{
-        "source": "theorem gen : G := by trivial", "statement": "theorem gen : G",
-        "proof_term": "by trivial", "lean_type": "∀ x, G"}])
-
     with patch.object(settings, "tasks_dir", tasks_dir), \
          patch.object(runner, "build_agent", MagicMock()), \
          patch.object(runner, "load_agent", MagicMock()), \
@@ -1070,7 +1061,6 @@ def _mock_prover_run(tasks_dir):
          patch("hyperion.crews.workflows.resolve_workflow",
                new=MagicMock(side_effect=lambda wid: registry[wid])), \
          patch.object(lean_handlers, "retrieve_applicable_lemmas", _fake_retrieve), \
-         patch.object(lean_handlers, "propose_abstraction", abstraction), \
          patch("hyperion.memory.lemma_bank.store_lemma", store), \
          patch("hyperion.server.meta_tasks.run_meta_tasks", new=AsyncMock()), \
          _no_battery(), \
@@ -1127,7 +1117,7 @@ def test_capture_lemma_candidate_writes_namespaced_candidate(tmp_path):
 async def test_shipped_single_chain_expands_per_subgoal_at_runtime(tmp_path):
     """The shipped single-chain ``lean-prove`` workflow auto-fans-out when the plan has
     >1 sub-goal: after skeleton_check passes, the runner clones the retrieve/synthesize/
-    verify/compare/abstract chain per sub-goal (``expand_per_subgoal``) so BOTH h1 and h2
+    verify chain per sub-goal (``expand_per_subgoal``) so BOTH h1 and h2
     are discharged and banked — the multi-``have`` scaffold the old single chain failed."""
 
     async def _fake_stage(task_id, request, stage, agents, tasks, cb, deadline):
@@ -1153,9 +1143,6 @@ async def test_shipped_single_chain_expands_per_subgoal_at_runtime(tmp_path):
         return []
 
     store = MagicMock(return_value={"ok": True, "id": "pt", "error": None})
-    abstraction = AsyncMock(return_value=[{
-        "source": "theorem gen : G := by trivial", "statement": "theorem gen : G",
-        "proof_term": "by trivial", "lean_type": "∀ x, G"}])
 
     with patch.object(settings, "tasks_dir", tmp_path), \
          patch.object(runner, "build_agent", MagicMock()), \
@@ -1164,7 +1151,6 @@ async def test_shipped_single_chain_expands_per_subgoal_at_runtime(tmp_path):
          patch.object(runner, "_node_task", MagicMock()), \
          patch.object(runner, "_run_stage", new=_fake_stage), \
          patch.object(lean_handlers, "retrieve_applicable_lemmas", _fake_retrieve), \
-         patch.object(lean_handlers, "propose_abstraction", abstraction), \
          patch("hyperion.memory.lemma_bank.store_lemma", store), \
          patch("hyperion.server.meta_tasks.run_meta_tasks", new=AsyncMock()), \
          _no_battery(), \
@@ -1415,7 +1401,7 @@ def test_assemble_collapses_multiline_pathA_proof_into_have_hole():
 
 
 # ---------------------------------------------------------------------------
-# Phase 5 — compare/abstract wiring (after verify, before bank) + anti-starvation
+# Trimmed DAG wiring (verify to bank, concept proof-through branch)
 # ---------------------------------------------------------------------------
 
 
@@ -1426,97 +1412,21 @@ def _native_ctx(task_id: str, node_id: str, handler: str, sg: str = "h1",
     return NativeNodeCtx(task_id=task_id, node=node, request=request, progress_callback=None)
 
 
-def test_compare_and_abstract_run_between_verify_and_bank():
-    """In the shipped ``lean-prove`` workflow, ``compare`` runs after ``verify``,
-    ``abstract`` after ``compare``, and ``bank`` after ``abstract`` (bank receives the
-    abstracted form)."""
+def test_trimmed_workflow_runs_verify_to_bank_with_concept_escalation_branch():
+    """The shipped workflow has no compare/abstract/birth-ablation nodes."""
     wf = load_workflow("lean-prove")
     waves = runner._wave_groups(topo_sort(wf.nodes))
     wave_of = {n.id: wi for wi, wave in enumerate(waves) for n in wave}
+    ids = {n.id for n in wf.nodes}
 
-    assert wave_of["compare"] > wave_of["verify"]
-    assert wave_of["abstract"] > wave_of["compare"]
-    assert wave_of["bank"] > wave_of["abstract"]
+    assert "compare" not in ids
+    assert "abstract" not in ids
+    assert "birth_ablation" not in ids
+    assert wave_of["bank"] > wave_of["verify"]
+    assert wave_of["prove_through"] > wave_of["verify_concept"]
+    assert wave_of["bank_concept"] > wave_of["prove_through"]
     bank = next(n for n in wf.nodes if n.id == "bank")
-    assert bank.upstream == ["abstract", "bank_concept"]
-
-
-@pytest.mark.anyio
-async def test_compare_increments_times_won_for_winner(tmp_path):
-    with patch.object(settings, "tasks_dir", tmp_path):
-        (tmp_path / "win1").mkdir(parents=True, exist_ok=True)
-        (tmp_path / "win1" / "plan.md").write_text(_PLAN_MD, encoding="utf-8")
-        context_put("win1", "candidate_a:h1", {
-            "id": "lemma-pt",
-            "source": "a_src",
-            "statement": "lem_P",
-            "proof_term": "pa",
-            "lean_type": "P",
-            "times_won": 2,
-        })
-        context_put("win1", "verified_a:h1", {
-            "id": "lemma-pt",
-            "source": "a_src",
-            "statement": "lem_P",
-            "proof_term": "pa",
-            "lean_type": "P",
-            "path": "A",
-            "times_won": 2,
-        })
-
-        with patch("hyperion.memory.lemma_bank.bump_times_won", MagicMock(return_value=3)) as bump:
-            res = await compare_handler(_native_ctx("win1", "compare", "compare"))
-        winner = context_get("win1", "discharged:h1")
-
-    assert res["winner_path"] == "A"
-    bump.assert_called_once()
-    assert winner["times_won"] == 3
-
-
-@pytest.mark.anyio
-async def test_research_mode_abstracts_path_b_even_when_path_a_wins_and_bank_stores_it(tmp_path):
-    """RESEARCH mode end-to-end over verify→compare→abstract→bank for one sub-goal:
-      - verify kernel-verifies BOTH paths (verified_a AND verified_b set);
-      - compare logs a genuine A-vs-B contest (``compared``) and Path A wins;
-      - abstract STILL fires on the fresh Path-B lemma (anti-starvation, decision e);
-      - bank stores the ABSTRACTED (generalized) form, not the concrete winner.
-    """
-    with patch.object(settings, "tasks_dir", tmp_path), \
-         patch.object(settings, "prover_research_mode", True):
-        (tmp_path / "r1").mkdir(parents=True, exist_ok=True)
-        (tmp_path / "r1" / "plan.md").write_text(_PLAN_MD, encoding="utf-8")
-        context_put("r1", "candidate_a:h1",
-                    {"source": "a_src", "statement": "lem_P", "proof_term": "pa", "lean_type": "P"})
-        context_put("r1", "candidate_b:h1",
-                    {"source": "b_src", "statement": "synth_P", "proof_term": "pb", "lean_type": "P"})
-
-        proposal = [{"source": "theorem g {α} (x : α) : x = x := rfl",
-                     "statement": "theorem g {α} (x : α) : x = x",
-                     "proof_term": "rfl", "lean_type": "∀ {α} (x : α), x = x"}]
-        store = MagicMock(return_value={"ok": True, "id": "pt", "error": None})
-
-        with patch.object(lean_handlers, "propose_abstraction", AsyncMock(return_value=proposal)), \
-             patch("hyperion.memory.lemma_bank.store_lemma", store), \
-             mock_lean(ok=True, targets=_VERIFY_TARGET):
-            await verify_handler(_native_ctx("r1", "verify", "verify"))
-            # RESEARCH: both paths were kernel-verified.
-            assert context_get("r1", "verified_a:h1") is not None
-            assert context_get("r1", "verified_b:h1") is not None
-
-            compare_res = await compare_handler(_native_ctx("r1", "compare", "compare"))
-            assert compare_res["compared"] is True       # genuine A-vs-B contest
-            assert compare_res["winner_path"] == "A"      # reuse-first tie → Path A wins
-
-            abstract_res = await abstract_handler(_native_ctx("r1", "abstract", "abstract"))
-            assert abstract_res["fired"] is True          # fired despite Path A winning
-            assert abstract_res["abstracted"] is True
-
-            await bank_handler(_native_ctx("r1", "bank", "bank"))
-
-        # The bank received the generalized lemma (the abstracted form), not "lem_P".
-        assert store.call_count == 1
-        banked_statement = store.call_args_list[0].args[0]
-        assert banked_statement == "theorem g {α} (x : α) : x = x"
+    assert bank.upstream == ["verify", "bank_concept"]
 
 
 @pytest.mark.anyio
@@ -1567,66 +1477,43 @@ def test_closer_battery_tactics_prefixes_intros_only_for_arrow_goals():
     assert any(t.startswith("intros;") for t in impl)
 
 
-def test_subgoal_battery_closes_signals_win_eligible_only(tmp_path):
-    """The runner's battery-first gate is True iff the battery yields a *win-eligible*
-    (weak-gated) proof — i.e. exactly when verify would discharge the goal from the battery,
-    so skipping the LLM synth is safe. A strong-only close (weak_source None) does NOT skip."""
+def test_subgoal_battery_closes_signals_battery_close(tmp_path):
+    """The runner's battery-first gate is True iff the battery closes the goal — exactly when
+    verify would discharge it from the battery, so skipping the LLM synth is safe."""
     from hyperion.crews.lean_handlers import subgoal_battery_closes
 
     node = WorkflowNode(id="synthesize", kind="work", agent="lemma_synthesizer", instruction="h1")
     ctx = NativeNodeCtx(task_id="bat", node=node, request="0 + 0 = 0", progress_callback=None)
 
     with patch.object(settings, "tasks_dir", tmp_path):
-        # win-eligible close → skip the LLM synth.
+        # battery closes → skip the LLM synth.
         with patch.object(lean_handlers, "_run_closer_battery",
-                          return_value=("example : 0 + 0 = 0 := by rfl", "example : ... := by rfl", [])):
+                          return_value=("example : 0 + 0 = 0 := by rfl", [])):
             assert subgoal_battery_closes(ctx) is True
-        # strong-only close (weak gated out) → must NOT skip; the synth/composition must run.
-        with patch.object(lean_handlers, "_run_closer_battery",
-                          return_value=(None, "example : G := by norm_num", [])):
-            assert subgoal_battery_closes(ctx) is False
         # nothing closes → run the synth.
-        with patch.object(lean_handlers, "_run_closer_battery", return_value=(None, None, [])):
+        with patch.object(lean_handlers, "_run_closer_battery", return_value=(None, [])):
             assert subgoal_battery_closes(ctx) is False
 
 
 @pytest.mark.lean
-def test_closer_battery_strong_regime_wins_with_norm_num():
-    """STRONG regime (``weak=False``): a goal that needs ``norm_num`` closes, and the
-    win-eligible source equals the full-strength source (no gate)."""
+def test_closer_battery_wins_with_norm_num():
+    """A goal that needs ``norm_num`` closes via the battery."""
     from hyperion.crews.lean_handlers import _run_closer_battery
 
     goal = "((1:ℚ)/2 + 1/3) * (1/2 - 1/3) = 5/36"
-    weak_source, strong_source, verdicts = _run_closer_battery(goal, weak=False, profile="mathlib")
-    assert strong_source is not None
-    assert weak_source == strong_source
+    source, verdicts = _run_closer_battery(goal, profile="mathlib")
+    assert source is not None
     assert any(v["ok"] for v in verdicts)
 
 
 @pytest.mark.lean
-def test_closer_battery_weak_regime_gates_strong_closer_but_keeps_counterfactual():
-    """WEAK regime is the thesis control: a non-trivial arithmetic goal closes at full
-    strength (``strong_source`` set — the ``b_strong`` counterfactual) but NO primitive wins
-    it (``weak_source`` None), so composition/definition must carry it. The gate is the same
-    ``_uses_only_weak_tactics`` Path B uses — not a hand label."""
+def test_closer_battery_closes_trivial_goal_with_primitive():
+    """An honestly-trivial goal the kernel decides by computation closes via a primitive."""
     from hyperion.crews.lean_handlers import _run_closer_battery
 
-    goal = "((1:ℚ)/2 + 1/3) * (1/2 - 1/3) = 5/36"
-    weak_source, strong_source, _ = _run_closer_battery(goal, weak=True, profile="mathlib")
-    assert strong_source is not None  # norm_num closes it at full strength
-    assert weak_source is None        # rfl / simp only [] do not — control holds
-
-
-@pytest.mark.lean
-def test_closer_battery_weak_regime_lets_primitive_win_honestly_trivial():
-    """WEAK regime: an honestly-trivial goal the kernel decides by computation is won by a
-    primitive (``rfl``) — the battery is allowed to close what is genuinely trivial."""
-    from hyperion.crews.lean_handlers import _run_closer_battery
-
-    weak_source, strong_source, _ = _run_closer_battery("2004 % 12 = 0", weak=True, profile="mathlib")
-    assert strong_source is not None
-    assert weak_source is not None
-    assert "by rfl" in weak_source or "by decide" in weak_source
+    source, _ = _run_closer_battery("2004 % 12 = 0", profile="mathlib")
+    assert source is not None
+    assert "by rfl" in source or "by decide" in source
 
 
 # ---------------------------------------------------------------------------

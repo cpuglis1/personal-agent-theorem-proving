@@ -172,25 +172,3 @@ def test_necessary_lemma_ids_empty_when_no_lemma_is_needed(monkeypatch):
               {"id": "b", "lean_type": "TB", "proof_term": "pb"}]
     monkeypatch.setattr(lean_handlers, "_full_verdict", lambda src: (True, []))
     assert _necessary_lemma_ids("GOAL", lemmas) == []
-
-
-# ---------------------------------------------------------------------------
-# weak-prover gate — Path-B eligibility lint (build-plan value claim)
-# ---------------------------------------------------------------------------
-
-from hyperion.crews.lean_handlers import _uses_only_weak_tactics
-
-
-def test_weak_gate_rejects_strong_closers():
-    assert not _uses_only_weak_tactics("example : P := by omega")
-    assert not _uses_only_weak_tactics("example : P := by decide")
-    assert not _uses_only_weak_tactics("example : P := by ring")
-    assert not _uses_only_weak_tactics("example : P := by simp")          # bare simp is strong
-    assert not _uses_only_weak_tactics("example : P := by\n  nlinarith [h]")
-
-
-def test_weak_gate_allows_primitive_steps_and_simp_only():
-    assert _uses_only_weak_tactics("example : n + 0 = n := by rw [Nat.add_zero]")
-    assert _uses_only_weak_tactics("example : P := by exact h")
-    assert _uses_only_weak_tactics("example : P := by intro n; rfl")
-    assert _uses_only_weak_tactics("example : P := by simp only [h0, h1]")  # explicit lemmas ok

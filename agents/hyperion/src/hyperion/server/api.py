@@ -1219,7 +1219,7 @@ async def get_task_trace(task_id: str) -> dict:
         except Exception:
             ev["tools_used"] = []
 
-    # Prover stage trace: the native nodes (retrieve/verify/compare/abstract/bank) are not
+    # Prover stage trace: the native nodes (retrieve/verify/prove_through/bank) are not
     # LLM ``trace_events``, so they don't appear above. Reconstruct their per-stage, per-
     # sub-goal output from the durable blackboard so a real prover run is inspectable in the
     # same Trace Flow UI. Attached only for prover runs (``subgoals`` present); guarded so a

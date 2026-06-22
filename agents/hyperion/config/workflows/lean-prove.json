@@ -1,7 +1,7 @@
 {
   "id": "lean-prove",
-  "name": "Lean Prove (decompose → retrieve‖synthesize → verify → compare/definition-escalation → bank)",
-  "description": "The full prover loop. The decomposer writes structural typed sub-goals; native code builds and skeleton-checks the have-chain and deterministic closer; then retrieve (Path A) and synthesize (Path B) run in ONE wave. verify waits for both and acts as the native controller. Normal wins flow through compare → abstract → bank. Stalls route through escalation_gate → synthesize_definition → verify_concept → birth_ablation → bank_concept; accepted concepts are persisted and staged as a normal discharge before the final bank assembles result.lean. The branch is implemented with native soft gates because the runner is a pure DAG.",
+  "name": "Lean Prove (decompose → retrieve‖synthesize → verify → definition-escalation → bank)",
+  "description": "The full prover loop. The decomposer writes structural typed sub-goals; native code builds and skeleton-checks the have-chain and deterministic closer; then retrieve (Path A) and synthesize (Path B) run in ONE wave. verify waits for both and acts as the native controller. Normal wins flow directly to bank. Stalls route through escalation_gate → synthesize_definition → verify_concept → prove_through → bank_concept; accepted concepts are persisted and staged as a normal discharge before the final bank assembles result.lean. The branch is implemented with native soft gates because the runner is a pure DAG.",
   "nodes": [
     {
       "id": "formal_ingest",
@@ -93,21 +93,6 @@
       }
     },
     {
-      "id": "compare",
-      "handler": "compare",
-      "kind": "native",
-      "upstream": [
-        "verify"
-      ],
-      "gate_before": false,
-      "instruction": null,
-      "when": null,
-      "position": {
-        "x": 170.0,
-        "y": 560.0
-      }
-    },
-    {
       "id": "escalation_gate",
       "handler": "escalation_gate",
       "kind": "native",
@@ -153,8 +138,8 @@
       }
     },
     {
-      "id": "birth_ablation",
-      "handler": "birth_ablation",
+      "id": "prove_through",
+      "handler": "prove_through",
       "kind": "native",
       "upstream": [
         "verify_concept"
@@ -172,7 +157,7 @@
       "handler": "bank_concept",
       "kind": "native",
       "upstream": [
-        "birth_ablation"
+        "prove_through"
       ],
       "gate_before": false,
       "instruction": null,
@@ -183,26 +168,11 @@
       }
     },
     {
-      "id": "abstract",
-      "handler": "abstract",
-      "kind": "native",
-      "upstream": [
-        "compare"
-      ],
-      "gate_before": false,
-      "instruction": null,
-      "when": null,
-      "position": {
-        "x": 170.0,
-        "y": 690.0
-      }
-    },
-    {
       "id": "bank",
       "handler": "bank",
       "kind": "native",
       "upstream": [
-        "abstract",
+        "verify",
         "bank_concept"
       ],
       "gate_before": false,

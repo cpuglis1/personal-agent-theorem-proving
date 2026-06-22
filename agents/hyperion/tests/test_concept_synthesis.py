@@ -151,13 +151,13 @@ async def test_synthesize_no_candidates_is_not_ok(tmp_path, monkeypatch):
 
 def _won(axioms_clean=True):
     return ProofOutcome(
-        closed=True, source="theorem t := pf", weak_source="theorem t := pf",
+        closed=True, source="theorem t := pf",
         proof_term="pf", repair_iters=0, axioms=["propext"], axioms_clean=axioms_clean,
     )
 
 
 def _lost():
-    return ProofOutcome(closed=False, source=None, weak_source=None, proof_term=None,
+    return ProofOutcome(closed=False, source=None, proof_term=None,
                         repair_iters=3, axioms=[], axioms_clean=None)
 
 

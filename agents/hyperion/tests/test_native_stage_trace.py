@@ -1,5 +1,5 @@
 """Native-stage trace rows — the deterministic prover nodes (skeleton_check/retrieve/
-verify/compare/abstract/bank) make no LLM call, so without an explicit trace row they
+verify/prove_through/bank) make no LLM call, so without an explicit trace row they
 render as dimmed/empty nodes in the Trace Flow UI. ``record_native_stage`` writes one
 ``trace_events`` row per native node so each stage shows as FIRED with a readable output.
 """
@@ -20,8 +20,8 @@ def test_summary_phrasings_are_human_readable():
     assert "winner=Path B · A-attempts=0 · repair-iters=1" in s(
         "verify", {"winner_path": "B",
                    "decision": {"a_attempts": 0, "repair_iters": 1, "mode": "deploy"}})
-    assert "compared=True" in s("compare", {"winner_path": "A", "compared": True})
-    assert "abstracted=True" in s("abstract", {"abstracted": True, "n_rejected": 1})
+    assert "solved=True" in s("prove_through", {"solved": True, "concept_id": "c1"})
+    assert "banked=True" in s("bank_concept", {"banked": True, "concept_id": "c1"})
     assert "banked 1/1" in s("bank", {"n_banked": 1, "n_discharged": 1})
     # Unknown handler falls back to compact JSON, never raises.
     assert "foo" in s("mystery", {"foo": 1})

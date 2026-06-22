@@ -765,14 +765,6 @@ def _node_fires(node, signals) -> tuple[bool, str]:
     when = node.when
     if when is None:
         return True, ""
-    # RESEARCH/DEPLOY policy gate (Post-work #2): "research" fires only when the prover is
-    # in research mode, "deploy" only when it is not. Gates the Path-B synthesize node.
-    if when.prover_mode:
-        research = settings.prover_research_mode
-        if when.prover_mode == "research" and not research:
-            return False, "prover_mode 'research' but running DEPLOY"
-        if when.prover_mode == "deploy" and research:
-            return False, "prover_mode 'deploy' but running RESEARCH"
     if not when.task_types:
         return True, ""
     task_type = getattr(signals, "task_type", None) or "mixed"
@@ -1098,7 +1090,7 @@ async def _execute_workflow(
                     return n.id, res
                 if n.kind == "native":
                     # Deterministic step: dispatch to a registered plain-Python
-                    # handler (verify/compare/bank/retrieve in the prover). Runs
+                    # handler (verify/prove_through/bank/retrieve in the prover). Runs
                     # inside this same try, so it inherits CapExceeded/wall budget.
                     from hyperion.crews.native import NativeNodeCtx, run_native_node
 

@@ -1,7 +1,7 @@
 """``_mock_lean`` — patch the Lean verifier so downstream tests run Lean-free.
 
 The Phase 1 deliverable that lets every later phase (retrieval probe, verify
-controller, abstractor re-check) run with NO Lean toolchain and NO httpx: it patches
+controller and proof-through checks) run with NO Lean toolchain and NO httpx: it patches
 :func:`hyperion.tools.lean_verify.verify_lean` to return canned ``LeanResult`` dicts.
 
 Two modes:

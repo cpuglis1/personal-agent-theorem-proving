@@ -177,42 +177,14 @@ class Settings(BaseSettings):
     # trades proof quality against LLM spend (Post-work re-tunes it against measured
     # sidecar latency). Parallel to cap_tool_loop; default 3 mirrors it.
     cap_repair_iters: int = 3
-    # Prover RESEARCH vs DEPLOY policy (build plan §Phase 5 decision b; full `when`-based
-    # knob is Post-work). False (DEPLOY, default) ⇒ `verify` is exploit-first: it
-    # short-circuits on the first path that closes the goal — the historical behavior.
-    # True (RESEARCH) ⇒ `verify` does NOT short-circuit: it kernel-verifies BOTH Path A
-    # and Path B so `compare` has a genuine A-vs-B contest and `abstract` can fire on a
-    # fresh Path-B lemma even when Path A also closed (anti-starvation). The comparison
-    # IS the experiment, so the thesis runs are RESEARCH; deployments are DEPLOY.
-    prover_research_mode: bool = False
-    # Premise-source policy for Path-A retrieval. Default stays skill-only so the
-    # current green prover workflow is unchanged until Mathlib ingestion is wired.
+    # Premise-source policy for Path-A retrieval (the optional lemma cache, off by default).
     lemma_retrieval_mode: str = "skill"  # skill | mathlib | combined
-    # How many top-ranked banked lemmas to compose into the depth>=2 Path-A candidate
-    # (build-plan depth axis). The composition is tried only after every single-lemma
-    # candidate fails, and its credited reuse_depth is ablated to the necessary subset.
+    # How many top-ranked banked lemmas to compose into the depth>=2 Path-A candidate.
     compose_top_k: int = 3
-    # Path-B "weak prover" gate (snowball value claim). When True, a synthesized/repaired
-    # proof is only *eligible to win* if it uses none of the strong closers below — so the
-    # bank is load-bearing and a Path-A win is a real win, not omega/ring front-running. The
-    # full-strength verdict is ALWAYS computed and logged as a counterfactual (could a strong
-    # prover have solved it?), so a single run reports both "reuse is necessary under a weak
-    # prover" and "reuse is preferred under a strong one". Enforced deterministically by lint,
-    # not by trusting the LLM to obey. The headline thesis runs set this True.
-    prover_weak_path_b: bool = False
-    prover_path_b_banned_tactics: tuple[str, ...] = (
-        "omega", "decide", "native_decide", "ring", "ring_nf", "linarith", "nlinarith",
-        "polyrith", "norm_num", "aesop", "tauto", "simp_all", "field_simp",
-    )
     # Definition synthesis (PLAN-definition-synthesis Phase 2): how many concept candidates
     # (definition + bridge lemmas) the synthesizer proposes when the normal path stalls. The
     # plan's `c`; cheap degeneracy gates prune most before any proving budget is spent.
     concept_candidates: int = 4
-    # Stream-level certification knobs for synthesized concepts. Promotion/pruning is
-    # intentionally external to a single proof run; these settings are read by the concept
-    # bank helpers and future stream drivers.
-    concept_promote_k: int = 2
-    concept_prune_idle_m: int = 15
     # Soundness contract strictness (the sorryAx gate; see crews/soundness.py). False
     # (default) tolerates the compiler-trusting native axioms (native_decide); True — the
     # recommended setting for HEADLINE runs — admits only the kernel base
