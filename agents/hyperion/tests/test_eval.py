@@ -120,7 +120,11 @@ def test_hard_smoke_fixture_schema():
         assert row["split"] == "hard_smoke"
         assert row["workflow"] == "lean-prove"
         assert row["lean_profile"] == "core"
-        assert row["expected"] == "escalation_on_only"
+        # These cases close under normal proving in BOTH escalation regimes (verified by
+        # the paired OFF/ON hard smoke); they do not currently exercise the escalation
+        # branch, so the expectation is parity, not an escalation-only rescue. See
+        # EVAL-PROTOCOL.md "Split Discipline".
+        assert row["expected"] == "both_pass"
         assert row["source"] == "curated-hard-smoke"
         assert row["formal_statement"].startswith("theorem hard_")
         assert row["formal_statement"].endswith("by sorry")

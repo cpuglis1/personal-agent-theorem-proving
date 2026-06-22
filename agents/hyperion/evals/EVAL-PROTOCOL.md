@@ -30,6 +30,13 @@ as benchmark progress.
 Use `evals/lean_prove_splits/hard_smoke.jsonl` only for paired OFF/ON definition
 escalation smoke; it is self-authored and exists to exercise the branch, not to report
 headline theorem-proving progress.
+NOTE (2026-06-22): the current curated cases all close under normal proving (Path B) in
+BOTH regimes, so their `expected` is `both_pass`, not `escalation_on_only` — they no
+longer force the escalation gate. They remain useful as an end-to-end assembly/parity
+smoke (they regression-guard the threaded-subgoal final-assembly fix). To actually
+exercise OFF/ON escalation we still need genuinely normal-stalling cases sourced from
+real failures; do NOT manufacture a stall by weakening the battery or synth (that would
+recreate the intentionally-cut weak/strong regime).
 Use `evals/lean_prove_splits/train.jsonl` with `eval_mode=train`.
 Use `evals/lean_prove_splits/dev.jsonl` with `eval_mode=dev`; dev must be public or
 pre-registered held-out data, not self-authored cases tuned during development.
