@@ -11,7 +11,7 @@ The harness reads existing SQLite rows, `context.json`, `progress.log`, `plan.md
 
 The next architecture decision is proof-state/threaded subgoal support, but only after two hygiene fixes: terminalize verifier timeouts and reconcile orphaned `running` rows. In the available miniF2F dev slice, 1/3 statements definitely needs theorem-local binder context in subgoals (`mathd_algebra_182`); 2/3 are binder-free (`mathd_algebra_462`, `mathd_numbertheory_132`) but still expose scaffold composition/proof-sourcing issues. Evidence: split rows are three miniF2F valid statements in `dev_mathlib.jsonl` lines 1-3; the binder failure is task `8984a2d2` with `subgoal_unbound_context` carrying `y` in h1/h2, and `skeleton_ok=false` in `ai-router/tasks/8984a2d2/context.json:34-60`.
 
-Current passing benchmark signal is not credible as held-out theorem proving: the two core dev passes are curated-core/self-authored (`core-dev-exp-chain-001`, `core-dev-string-conj-001`) and both passed; the available miniF2F mathlib rows are 0/4 passed. Evidence: core result rows at `agents/hyperion/tasks/benchmark-core-dev-results.jsonl:1-2`; miniF2F failures at `agents/hyperion/tasks/benchmark-mathlib-dev-results.jsonl:1` and `agents/hyperion/tasks/benchmark-mathlib-dev-proposition-results.jsonl:1-3`; core split source is `curated-core` at `agents/hyperion/evals/lean_prove_splits/dev.jsonl:1-2`.
+Current passing benchmark signal is not credible as held-out theorem proving: the two historical core dev passes are curated-core/self-authored (`core-dev-exp-chain-001`, `core-dev-string-conj-001`) and both passed. Follow-up split hygiene moves that signal to smoke (`agents/hyperion/evals/lean_prove_splits/smoke.jsonl:1-2`) and makes public miniF2F rows the default dev slice (`agents/hyperion/evals/lean_prove_splits/dev.jsonl:1-3`). Evidence: core result rows at `agents/hyperion/tasks/benchmark-core-dev-results.jsonl:1-2`; miniF2F failures at `agents/hyperion/tasks/benchmark-mathlib-dev-results.jsonl:1` and `agents/hyperion/tasks/benchmark-mathlib-dev-proposition-results.jsonl:1-3`.
 
 ## Failure Taxonomy
 
@@ -31,7 +31,7 @@ Scrubs: no scaffold scrub fixes this.
 
 ### 2. Verifier Latency
 
-Root cause: Lean verification timeout is represented as `infra_ok=False`; `skeleton_check_handler` writes `skeleton_ok=None` and returns `ok=None` on infra failure (`agents/hyperion/src/hyperion/crews/lean_handlers.py:821-831`). The runner only revises/fails on `ok is False` (`agents/hyperion/src/hyperion/crews/runner.py:1147-1153`) and only fans out on `ok is True` (`agents/hyperion/src/hyperion/crews/runner.py:1220-1227`), so `ok=None` is neither clean failure nor normal pass.
+Root cause: Lean verification timeout is represented as `infra_ok=False`; at assessment time `skeleton_check_handler` wrote `skeleton_ok=None` and did not terminalize the run. Follow-up hygiene keeps `skeleton_ok=None` as an inconclusive trace field but returns terminal `ok=false` with `error_code=verifier_timeout`/`verifier_unavailable` (`agents/hyperion/src/hyperion/crews/lean_handlers.py:934-948`), and the runner fails that terminally instead of revising/fanning out (`agents/hyperion/src/hyperion/crews/runner.py:1160-1171`).
 
 Evidence: `145b9bb6` and `16918b9b` are running with `skeleton_ok=null` and timeout errors (`docs/lean-prove-failure-classification-2026-06-21.json:70-77`, `:121-128`). The verifier default timeout is 120 seconds in `agents/hyperion/src/hyperion/tools/lean_verify.py:46-49`, and infra failures become `lean verifier unavailable: ...` at `agents/hyperion/src/hyperion/tools/lean_verify.py:76-84` and `:115-127`.
 
@@ -45,12 +45,12 @@ Root cause: decomposer output contract is too broad: it emits a free-form scaffo
 
 Evidence: `mathd_algebra_462` generated a non-compositional rational scaffold: h1/h2 simplify the factors, h3 proves only `(5 / 6) * (1 / 6) = 5 / 36`, and the close is `exact h3` (`ai-router/tasks/16918b9b/plan.md:8-14`; same pattern in task `1c681809`, `ai-router/tasks/1c681809/plan.md:7-12`). Task `1c681809` was cleanly rejected at skeleton after revision budget with `skeleton_ok=false` (`docs/lean-prove-failure-classification-2026-06-21.json:221-283`). Task `16918b9b` did not get a clean verdict because skeleton timed out (`ai-router/tasks/16918b9b/context.json:19-23`).
 
-Current handling: skeleton failure revises decomposer up to budget, then fails (`agents/hyperion/src/hyperion/crews/runner.py:1142-1187`). Missing/invalid composition is cause; timeout and orphaned running rows are symptoms/noise.
+Current handling: skeleton proof failure revises decomposer up to budget, then fails (`agents/hyperion/src/hyperion/crews/runner.py:1179-1204`). Missing/invalid composition is cause; timeout and orphaned running rows are symptoms/noise.
 
 Scrubs currently in scope:
 
-- `_sanitize_scaffold` strips end-of-line commas such as `:= sorry,` (`agents/hyperion/src/hyperion/crews/lean_handlers.py:285-288`, `:326-341`).
-- `_canonicalize_closing` rewrites final exact lines containing `▸` or `.trans` to `exact <last_have>` (`agents/hyperion/src/hyperion/crews/lean_handlers.py:290-323`).
+- `_sanitize_scaffold` strips end-of-line commas such as `:= sorry,` (`agents/hyperion/src/hyperion/crews/lean_handlers.py:391-394`, `:432-447`).
+- `_canonicalize_closing` rewrites final exact lines containing `▸` or `.trans` to `exact <last_have>` (`agents/hyperion/src/hyperion/crews/lean_handlers.py:396-429`).
 - `_sanitize_frontmatter` quotes plain YAML scalar values containing colons at any indent, while skipping block scalar bodies (`agents/hyperion/src/hyperion/crews/plan_contract.py:72-83`, `:97-137`).
 - `_sanitize_frontmatter` separately retries invalid `lean_type:` scalars by quoting/escaping them (`agents/hyperion/src/hyperion/crews/plan_contract.py:84-86`, `:121-130`).
 
@@ -58,21 +58,21 @@ Assessment: these scrubs mask an underspecified decomposer/kernel boundary. The 
 
 ### 4. Binder-Threading Ceiling
 
-Root cause: the independent-subgoal contract cannot prove subgoals that mention theorem-local variables unless those variables are carried into the subgoal theorem. The detector computes formal-bound names and flags subgoal `lean_type` references not internally bound (`agents/hyperion/src/hyperion/crews/lean_handlers.py:402-420`).
+Root cause: the independent-subgoal contract cannot prove subgoals that mention theorem-local variables unless those variables are carried into the subgoal theorem. The follow-up implementation quantifies formal locals for independent workers (`agents/hyperion/src/hyperion/crews/lean_handlers.py:174-190`) and still flags locals introduced only by free-form scaffold text as unbound (`agents/hyperion/src/hyperion/crews/lean_handlers.py:508-529`).
 
 Evidence: task `8984a2d2` formal ingestion parsed `(y : ℂ)` and goal `7 * (3 * y + 2) = 21 * y + 14` (`docs/lean-prove-failure-classification-2026-06-21.json:524-541`), then flagged h1/h2 as referencing unbound `y` (`docs/lean-prove-failure-classification-2026-06-21.json:546-559`, also `ai-router/tasks/8984a2d2/context.json:34-60`). The emitted plan indeed has subgoals over `y` (`ai-router/tasks/8984a2d2/plan.md:7-13`).
 
-Current handling: skeleton immediately fails with `error_code=subgoal_unbound_context` and runner returns failed without revision (`agents/hyperion/src/hyperion/crews/lean_handlers.py:803-820`, `agents/hyperion/src/hyperion/crews/runner.py:1155-1161`).
+Current handling: skeleton immediately fails scaffold-introduced local leaks with `error_code=subgoal_unbound_context`, while formal theorem locals are threaded into closed subgoal targets (`agents/hyperion/src/hyperion/crews/lean_handlers.py:908-928`, `agents/hyperion/src/hyperion/crews/runner.py:590-606`).
 
 Scrubs: no scrub can make independent theorem subgoals carry theorem-local binders. This needs a contract change.
 
 ### 5. Eval Methodology / Self-Authoring Contamination
 
-Root cause: the current green benchmark signal comes from curated core cases that match the hand-tuned, rfl-friendly regime. Dev core cases are `source=curated-core` (`agents/hyperion/evals/lean_prove_splits/dev.jsonl:1-2`), while test is a placeholder and explicitly not a real holdout (`agents/hyperion/evals/lean_prove_splits/test.jsonl:1`).
+Root cause: the current green benchmark signal comes from curated core cases that match the hand-tuned, rfl-friendly regime. At assessment time, dev core cases were `source=curated-core`; follow-up split hygiene moves those rows to `smoke.jsonl` as `source=curated-core-self-authored` (`agents/hyperion/evals/lean_prove_splits/smoke.jsonl:1-2`) and makes public miniF2F the default dev rows (`agents/hyperion/evals/lean_prove_splits/dev.jsonl:1-3`). Test is still a placeholder and explicitly not a real holdout (`agents/hyperion/evals/lean_prove_splits/test.jsonl:1`).
 
 Evidence: both core dev result rows pass final verification (`agents/hyperion/tasks/benchmark-core-dev-results.jsonl:1-2`), and classifier marks them as eval contamination (`docs/lean-prove-failure-classification-2026-06-21.json:458-517`, `:628-687`). The public miniF2F dev rows are failures (`agents/hyperion/tasks/benchmark-mathlib-dev-results.jsonl:1`, `agents/hyperion/tasks/benchmark-mathlib-dev-proposition-results.jsonl:1-3`).
 
-Current handling: `eval_mode=dev/test` disables learning writes (`agents/hyperion/src/hyperion/crews/runner.py:1339-1342`), and the benchmark helper refuses `test` (`agents/hyperion/src/hyperion/eval/lean_prove_benchmark.py:97-107`). That is good hygiene but not a self-authoring firewall.
+Current handling: `eval_mode=dev/test` disables learning writes (`agents/hyperion/src/hyperion/crews/runner.py:1357-1358`, `:1430-1431`), and the benchmark helper refuses `test` (`agents/hyperion/src/hyperion/eval/lean_prove_benchmark.py:97-107`). Follow-up split hygiene adds a self-authoring firewall by moving curated cases to `smoke.jsonl` (`agents/hyperion/evals/lean_prove_splits/smoke.jsonl:1-2`).
 
 ## Load-Bearing Questions
 
@@ -93,7 +93,7 @@ Does skeleton reject `exact h3` when it actually runs to verdict? Yes for task `
 
 Did the specific `16918b9b` rational case get caught? No clean verdict: it timed out with `skeleton_ok=null` (`ai-router/tasks/16918b9b/context.json:19-23`) and is still a `running` orphan (`docs/lean-prove-failure-classification-2026-06-21.json:98-147`). Its plan shows the same non-compositional `exact h3` (`ai-router/tasks/16918b9b/plan.md:8-14`).
 
-Does final bank verify against original formal statement? For formal-ingested runs, yes by code path: formal ingestion stores `formal_statement`, `formal_header`, `formal_goal`, and local context (`agents/hyperion/src/hyperion/crews/lean_handlers.py:174-189`); skeleton command uses `_formal_command_from_body` when formal context exists (`agents/hyperion/src/hyperion/crews/lean_handlers.py:167-171`); bank assembly also wraps assembled body with the formal command when formal context exists (`agents/hyperion/src/hyperion/crews/lean_handlers.py:1497-1499`). For non-formal runs, bank wraps against `_prose_to_goal_type(ctx.request)` (`agents/hyperion/src/hyperion/crews/lean_handlers.py:1500-1501`), so exact benchmark prompts are safer than natural-language prompts.
+Does final bank verify against original formal statement? For formal-ingested runs, yes by code path: formal ingestion stores `formal_statement`, `formal_header`, `formal_goal`, and local context (`agents/hyperion/src/hyperion/crews/lean_handlers.py:280-293`); skeleton command uses `_formal_command_from_body` when formal context exists (`agents/hyperion/src/hyperion/crews/lean_handlers.py:148-153`, `:273-277`); bank assembly also wraps assembled body with the formal command when formal context exists (`agents/hyperion/src/hyperion/crews/lean_handlers.py:1611-1617`). For non-formal runs, bank wraps against `_prose_to_goal_type(ctx.request)` (`agents/hyperion/src/hyperion/crews/lean_handlers.py:1616-1617`), so exact benchmark prompts are safer than natural-language prompts.
 
 ### B3. Scrub Accumulation
 
@@ -111,7 +111,7 @@ Conclusion: thesis machinery is implemented and exercised in toy/historical runs
 
 ### B5. Eval Integrity
 
-Passing benchmark signal: 2/2 current benchmark passes are self-authored/curated core (`agents/hyperion/tasks/benchmark-core-dev-results.jsonl:1-2`, source rows at `agents/hyperion/evals/lean_prove_splits/dev.jsonl:1-2`). Held-out/public miniF2F signal: 0/4 available result rows pass (`agents/hyperion/tasks/benchmark-mathlib-dev-results.jsonl:1`, `agents/hyperion/tasks/benchmark-mathlib-dev-proposition-results.jsonl:1-3`).
+Passing benchmark signal: 2/2 current benchmark passes are self-authored/curated core (`agents/hyperion/tasks/benchmark-core-dev-results.jsonl:1-2`); those cases now live in the smoke split, not dev (`agents/hyperion/evals/lean_prove_splits/smoke.jsonl:1-2`). Held-out/public miniF2F signal: 0/4 available result rows pass (`agents/hyperion/tasks/benchmark-mathlib-dev-results.jsonl:1`, `agents/hyperion/tasks/benchmark-mathlib-dev-proposition-results.jsonl:1-3`), and default dev now points at public miniF2F rows (`agents/hyperion/evals/lean_prove_splits/dev.jsonl:1-3`).
 
 Recommended firewall:
 
@@ -124,7 +124,7 @@ Recommended firewall:
 
 1. Reconcile orphaned `running` rows on startup. On boot, mark prior `running` rows as `interrupted` or `failed_interrupted` with a restart timestamp unless there is a live worker registry entry. Evidence: startup rehydrates progress only (`agents/hyperion/src/hyperion/server/api.py:543-564`), and current rows `145b9bb6`/`16918b9b` remain `running` (`docs/lean-prove-failure-classification-2026-06-21.json:45-96`, `:98-147`).
 
-2. Treat Mathlib skeleton verifier timeout as terminal `verifier_timeout`. `verify_lean` distinguishes infra from proof failure (`agents/hyperion/src/hyperion/tools/lean_verify.py:18-28`, `:76-84`); `skeleton_check_handler` currently turns infra into `skeleton_ok=None` (`agents/hyperion/src/hyperion/crews/lean_handlers.py:826-831`). For dev benchmark methodology, `None` should not proceed to retrieve/synthesize.
+2. Treat Mathlib skeleton verifier timeout as terminal `verifier_timeout`. `verify_lean` distinguishes infra from proof failure (`agents/hyperion/src/hyperion/tools/lean_verify.py:51-84`); follow-up hygiene now turns skeleton infra failures into terminal `verifier_timeout`/`verifier_unavailable` while preserving `skeleton_ok=None` as the trace value (`agents/hyperion/src/hyperion/crews/lean_handlers.py:934-948`). For dev benchmark methodology, `None` should not proceed to retrieve/synthesize.
 
 3. Re-evaluate 120 seconds only after terminalizing timeout. The timeout is currently hard-coded as 120 seconds (`agents/hyperion/src/hyperion/tools/lean_verify.py:46-49`). Some timeouts are likely bad-scaffold symptoms, but the system cannot measure that cleanly while inconclusive skeletons continue or become orphaned running rows.
 
@@ -134,7 +134,7 @@ One architecture decision: implement proof-state/threaded subgoal handling for t
 
 Stop building:
 
-- Stop treating self-authored rfl-tuned core dev passes as progress signal. They are useful smoke tests only (`agents/hyperion/evals/lean_prove_splits/dev.jsonl:1-2`, `agents/hyperion/tasks/benchmark-core-dev-results.jsonl:1-2`).
+- Stop treating self-authored rfl-tuned core passes as progress signal. They are useful smoke tests only (`agents/hyperion/evals/lean_prove_splits/smoke.jsonl:1-2`, `agents/hyperion/tasks/benchmark-core-dev-results.jsonl:1-2`).
 - Stop adding mechanical closing scrubs after the current comma/frontmatter/fragile-close set. The structural alternative is native composition from typed holes.
 - Do not run `eval_mode=test` until there is a real frozen holdout; the current test row is placeholder (`agents/hyperion/evals/lean_prove_splits/test.jsonl:1`).
 

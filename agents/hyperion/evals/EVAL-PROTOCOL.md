@@ -25,8 +25,11 @@ is the policy switch that determines whether a task may use that dependency.
 
 ## Split Discipline
 
+Use `evals/lean_prove_splits/smoke.jsonl` only for fast wiring checks; do not report it
+as benchmark progress.
 Use `evals/lean_prove_splits/train.jsonl` with `eval_mode=train`.
-Use `evals/lean_prove_splits/dev.jsonl` with `eval_mode=dev`.
+Use `evals/lean_prove_splits/dev.jsonl` with `eval_mode=dev`; dev must be public or
+pre-registered held-out data, not self-authored cases tuned during development.
 Do not run `test.jsonl` until the held-out set and frozen retrieval snapshot are approved.
 
 The helper runner refuses `--eval-mode test` by default:

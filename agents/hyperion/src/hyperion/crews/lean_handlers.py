@@ -129,7 +129,7 @@ def _goal_type(ctx: NativeNodeCtx, sg_id: str) -> str:
     """
     sub = _subgoal(ctx, sg_id)
     if sub and sub.lean_type:
-        return sub.lean_type
+        return _threaded_goal_type(ctx, sub)
     return _prose_to_goal_type(ctx.request)
 
 
@@ -151,6 +151,112 @@ def _formal_command_from_body(body: str, formal: dict[str, Any]) -> str:
     goal = (formal.get("goal") or "").strip()
     command = f"{header} :\n  {goal} := by\n{_indent_tactic_body(body)}"
     return f"{preamble}\n\n{command}" if preamble else command
+
+
+def _formal_binding_names(formal: dict[str, Any] | None) -> list[str]:
+    names: list[str] = []
+    if not formal:
+        return names
+    for item in formal.get("local_context") or []:
+        for name in item.get("names") or []:
+            names.append(str(name))
+    return names
+
+
+def _subgoal_mentions_formal_context(sub: Subtask, formal: dict[str, Any] | None) -> bool:
+    names = set(_formal_binding_names(formal))
+    if not names:
+        return False
+    tokens = set(_LEAN_IDENT_RE.findall(sub.lean_type or ""))
+    return bool(tokens & names)
+
+
+def _threaded_goal_type_from_formal(sub: Subtask, formal: dict[str, Any] | None) -> str:
+    """Closed goal used by independent subgoal workers."""
+    lean_type = sub.lean_type or ""
+    if not _subgoal_mentions_formal_context(sub, formal):
+        return lean_type
+    binders = " ".join((item.get("raw") or "").strip() for item in formal.get("local_context") or [])
+    return f"∀ {binders}, {lean_type}" if binders else lean_type
+
+
+def _threaded_goal_type(ctx: NativeNodeCtx, sub: Subtask) -> str:
+    """Goal used by retrieve/synthesize for a subgoal.
+
+    If a subgoal mentions theorem-local variables from an exact formal statement, prove it as
+    a closed universally quantified proposition; the bank later instantiates that proof back
+    inside the theorem body.
+    """
+    return _threaded_goal_type_from_formal(sub, _formal_context(ctx))
+
+
+def _threaded_instantiation_args(sub: Subtask, formal: dict[str, Any] | None) -> list[str]:
+    return _formal_binding_names(formal) if _subgoal_mentions_formal_context(sub, formal) else []
+
+
+def _split_top_level_conjunction(goal: str) -> list[str]:
+    parts: list[str] = []
+    depth = 0
+    start = 0
+    in_string = False
+    escaped = False
+    pairs = {"(": ")", "{": "}", "[": "]"}
+    closing = set(pairs.values())
+    for i, ch in enumerate(goal or ""):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch in pairs:
+            depth += 1
+            continue
+        if ch in closing and depth > 0:
+            depth -= 1
+            continue
+        if ch == "∧" and depth == 0:
+            parts.append(goal[start:i].strip())
+            start = i + 1
+    if parts:
+        parts.append(goal[start:].strip())
+    return [p for p in parts if p]
+
+
+def _lean_type_key(text: str) -> str:
+    return re.sub(r"\s+", "", (text or "").strip())
+
+
+def _native_closing_for_subtasks(goal: str, subtasks: list[Subtask]) -> str:
+    if not subtasks:
+        return ""
+    conjuncts = _split_top_level_conjunction(goal)
+    if len(conjuncts) == len(subtasks) and all(
+        _lean_type_key(part) == _lean_type_key(sub.lean_type)
+        for part, sub in zip(conjuncts, subtasks)
+    ):
+        return "exact " + "⟨" + ", ".join(sub.id for sub in subtasks) + "⟩"
+    return f"exact {subtasks[-1].id}"
+
+
+def _native_scaffold_from_subtasks(ctx: NativeNodeCtx, subtasks: list[Subtask]) -> str:
+    lines = [f"have {sub.id} : {sub.lean_type} := sorry" for sub in subtasks if sub.id and sub.lean_type]
+    if not lines:
+        return ""
+    close = _native_closing_for_subtasks(_target_goal_type(ctx), subtasks)
+    return "\n".join([*lines, close]) + "\n"
+
+
+def _proof_body_for_hole(proof: str, sub: Subtask, formal: dict[str, Any] | None) -> str:
+    args = _threaded_instantiation_args(sub, formal)
+    if not args:
+        return proof
+    return "by exact (" + proof + ") " + " ".join(args)
 
 
 def _proof_body_from_scaffold(scaffold: str) -> str:
@@ -404,7 +510,10 @@ def _subgoal_unbound_context_hits(
     scaffold: str,
     formal: dict[str, Any] | None,
 ) -> list[dict[str, str]]:
-    context_names = _bound_names_from_formal(formal) | _intro_names(scaffold)
+    # Formal theorem locals are now explicitly threaded into independent subgoal targets.
+    # Locals introduced only by free-form scaffold text are still invalid for independent
+    # proving because there is no formal binder set the native target can quantify over.
+    context_names = _intro_names(scaffold) - _bound_names_from_formal(formal)
     if not context_names:
         return []
     hits: list[dict[str, str]] = []
@@ -791,14 +900,15 @@ async def skeleton_check_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     without a skeleton verdict, downstream retrieve/synthesize work has no sound scaffold
     contract to rely on.
     """
-    scaffold = parse_plan(ctx.task_id).scaffold
+    plan = parse_plan(ctx.task_id)
+    subtasks = plan.active_subtasks()
+    scaffold = _native_scaffold_from_subtasks(ctx, subtasks) or (plan.scaffold or "")
     if not scaffold:
         ctx.put("skeleton_ok", False)
         ctx.put("skeleton_errors", ["no scaffold in plan"])
         return {"handler": "skeleton_check", "ok": False, "errors": ["no scaffold in plan"]}
-    plan = parse_plan(ctx.task_id)
     formal = _formal_context(ctx)
-    unbound_hits = _subgoal_unbound_context_hits(plan.active_subtasks(), scaffold, formal)
+    unbound_hits = _subgoal_unbound_context_hits(subtasks, scaffold, formal)
     ctx.put("subgoal_unbound_context", unbound_hits)
     for hit in unbound_hits:
         ctx.put(_bb_key("subgoal_unbound_context", hit["id"]), hit)
@@ -1434,7 +1544,12 @@ def _bare_proof_term(win: dict[str, Any]) -> str:
     return ""
 
 
-def _assemble(scaffold: str, subtasks: list[Subtask], discharged: dict[str, dict]) -> str:
+def _assemble(
+    scaffold: str,
+    subtasks: list[Subtask],
+    discharged: dict[str, dict],
+    formal: dict[str, Any] | None = None,
+) -> str:
     """Substitute each discharged sub-goal's proof into the scaffold's ``sorry`` holes.
 
     Replaces the first remaining ``sorry`` token with each sub-goal's **bare** proof term
@@ -1456,7 +1571,7 @@ def _assemble(scaffold: str, subtasks: list[Subtask], discharged: dict[str, dict
         win = discharged.get(sub.id)
         if not win:
             continue
-        proof = _normalize_proof_rhs(_bare_proof_term(win))
+        proof = _proof_body_for_hole(_normalize_proof_rhs(_bare_proof_term(win)), sub, formal)
         result = result.replace("sorry", proof, 1)
     return result
 
@@ -1493,15 +1608,9 @@ async def bank_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
             "cannot assemble result.lean; undischarged sub-goal(s): " + ", ".join(missing)
         )
 
-    # Sanitize the scaffold *before* substitution so the closing-tactic canonicalization
-    # (:func:`_canonicalize_closing`) sees only the chain's own ``have`` ids — a ``▸``-cast
-    # close like ``exact h2 ▸ h1 ▸ rfl`` becomes ``exact h2``. Done post-substitution it
-    # would mis-resolve "the last have" to a *substituted* inner ``have h`` and emit
-    # ``exact h``. The re-sanitize inside ``_scaffold_as_command`` is then a no-op on the
-    # (already clean) closing.
-    scaffold = _sanitize_scaffold(plan.scaffold or "")
-    assembled_body = _assemble(scaffold, subtasks, discharged) if scaffold else ""
     formal = _formal_context(ctx)
+    scaffold = _native_scaffold_from_subtasks(ctx, subtasks) or _sanitize_scaffold(plan.scaffold or "")
+    assembled_body = _assemble(scaffold, subtasks, discharged, formal) if scaffold else ""
     if assembled_body and formal:
         assembled = _formal_command_from_body(_proof_body_from_scaffold(assembled_body), formal)
     elif assembled_body:

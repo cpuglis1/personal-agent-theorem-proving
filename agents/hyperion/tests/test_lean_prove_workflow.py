@@ -218,9 +218,9 @@ theorem foo (y : ℂ) : 7 * y = 7 * y := by
 
 
 @pytest.mark.anyio
-async def test_skeleton_check_reports_subgoal_unbound_context_without_kernel(tmp_path):
+async def test_skeleton_check_threads_formal_context_into_native_subgoal(tmp_path):
     plan_md = """---
-task_id: unbound_ctx
+task_id: threaded_ctx
 task_type: code
 scaffold: |
   intro y
@@ -237,29 +237,80 @@ selected_option: a
 ---
 """
     with patch.object(settings, "tasks_dir", tmp_path):
-        (tmp_path / "unbound_ctx").mkdir(parents=True, exist_ok=True)
-        (tmp_path / "unbound_ctx" / "plan.md").write_text(plan_md, encoding="utf-8")
-        context_put("unbound_ctx", "formal_statement_ingestion", {
+        (tmp_path / "threaded_ctx").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "threaded_ctx" / "plan.md").write_text(plan_md, encoding="utf-8")
+        context_put("threaded_ctx", "formal_statement_ingestion", {
             "preamble": "import Mathlib",
             "header": "theorem foo (y : ℂ)",
             "goal": "7 * y = 7 * y",
             "local_context": [{"names": ["y"], "type": "ℂ", "raw": "(y : ℂ)"}],
         })
         ctx = NativeNodeCtx(
-            task_id="unbound_ctx",
+            task_id="threaded_ctx",
             node=WorkflowNode(id="skeleton_check", kind="native", handler="skeleton_check", upstream=[]),
             request="ignored",
             progress_callback=None,
         )
 
-        with patch("hyperion.crews.lean_handlers.verify_lean") as lean:
+        with mock_lean(ok=True, targets=_VERIFY_TARGET) as lean:
             res = await skeleton_check_handler(ctx)
-        hits = context_get("unbound_ctx", "subgoal_unbound_context")
+        hits = context_get("threaded_ctx", "subgoal_unbound_context")
 
-    lean.assert_not_called()
-    assert res["ok"] is False
-    assert res["error_code"] == "subgoal_unbound_context"
-    assert hits[0]["identifier"] == "y"
+    assert res["ok"] is True
+    assert hits == []
+    source = lean.call_args.args[0]
+    assert "intro y" not in source
+    assert source == (
+        "import Mathlib\n\n"
+        "theorem foo (y : ℂ) :\n"
+        "  7 * y = 7 * y := by\n"
+        "  have h1 : 7 * y = 7 * y := sorry\n"
+        "  exact h1"
+    )
+
+
+@pytest.mark.anyio
+async def test_skeleton_check_uses_native_conjunction_closer_over_scaffold_text(tmp_path):
+    plan_md = """---
+task_id: native_close
+task_type: code
+scaffold: |
+  have h1 : P := sorry
+  have h2 : Q := sorry
+  exact h2
+options:
+  - id: a
+    summary: conjunction pieces
+    subtasks:
+      - id: h1
+        description: prove left
+        lean_type: "P"
+      - id: h2
+        description: prove right
+        lean_type: "Q"
+selected_option: a
+---
+"""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        (tmp_path / "native_close").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "native_close" / "plan.md").write_text(plan_md, encoding="utf-8")
+        ctx = NativeNodeCtx(
+            task_id="native_close",
+            node=WorkflowNode(id="skeleton_check", kind="native", handler="skeleton_check", upstream=[]),
+            request="Prove that P ∧ Q.",
+            progress_callback=None,
+        )
+
+        with mock_lean(ok=True, targets=_VERIFY_TARGET) as lean:
+            res = await skeleton_check_handler(ctx)
+
+    assert res["ok"] is True
+    assert lean.call_args.args[0] == (
+        "example : P ∧ Q := by\n"
+        "  have h1 : P := sorry\n"
+        "  have h2 : Q := sorry\n"
+        "  exact ⟨h1, h2⟩"
+    )
 
 
 def test_scaffold_lean3_trailing_commas_are_scrubbed():
@@ -392,6 +443,41 @@ def test_synthesize_instruction_falls_back_to_ingested_formal_goal(tmp_path):
 
     assert "    7 = 7\n" in prompt
     assert "theorem seven_eq" not in prompt
+
+
+def test_synthesize_instruction_quantifies_formal_locals_for_subgoal(tmp_path):
+    plan_md = """---
+task_id: threaded_synth
+task_type: code
+options:
+  - id: a
+    summary: local goal
+    subtasks:
+      - id: h1
+        description: prove local polynomial identity
+        lean_type: "7 * y = 7 * y"
+selected_option: a
+---
+"""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        (tmp_path / "threaded_synth").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "threaded_synth" / "plan.md").write_text(plan_md, encoding="utf-8")
+        context_put("threaded_synth", "formal_statement_ingestion", {
+            "header": "theorem foo (y : ℂ)",
+            "goal": "7 * y = 7 * y",
+            "local_context": [{"names": ["y"], "type": "ℂ", "raw": "(y : ℂ)"}],
+        })
+        node = WorkflowNode(
+            id="synthesize__h1",
+            kind="work",
+            agent="lemma_synthesizer",
+            instruction="h1",
+            upstream=["skeleton_check"],
+        )
+
+        prompt = runner._synthesize_instruction("threaded_synth", node, "ignored")
+
+    assert "    ∀ (y : ℂ), 7 * y = 7 * y\n" in prompt
 
 
 def test_plan_task_mentions_active_verifier_profile():
@@ -1174,6 +1260,48 @@ selected_option: a
     source = lean.call_args.args[0]
     assert source.startswith("import Mathlib\n\ntheorem seven_eq :\n  7 = 7 := by")
     assert "example :" not in source
+    assert "exact h1" in source
+
+
+@pytest.mark.anyio
+async def test_bank_instantiates_threaded_subgoal_proof_inside_formal_statement(tmp_path):
+    plan_md = """---
+task_id: threaded_bank
+task_type: code
+options:
+  - id: a
+    summary: local goal
+    subtasks:
+      - id: h1
+        description: prove local polynomial identity
+        lean_type: "7 * y = 7 * y"
+selected_option: a
+---
+"""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        (tmp_path / "threaded_bank").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "threaded_bank" / "plan.md").write_text(plan_md, encoding="utf-8")
+        context_put("threaded_bank", "learning_writes_enabled", False)
+        context_put("threaded_bank", "formal_statement_ingestion", {
+            "preamble": "import Mathlib",
+            "header": "theorem foo (y : ℂ)",
+            "goal": "7 * y = 7 * y",
+            "local_context": [{"names": ["y"], "type": "ℂ", "raw": "(y : ℂ)"}],
+        })
+        context_put("threaded_bank", "discharged:h1", {
+            "proof_term": "by intro y; rfl",
+            "statement": "theorem h : ∀ (y : ℂ), 7 * y = 7 * y",
+            "path": "B",
+        })
+        node = WorkflowNode(id="bank", kind="native", handler="bank", upstream=[])
+        ctx = NativeNodeCtx(task_id="threaded_bank", node=node, request="ignored", progress_callback=None)
+
+        with mock_lean(ok=True, targets=_VERIFY_TARGET) as lean:
+            await bank_handler(ctx)
+
+    source = lean.call_args.args[0]
+    assert source.startswith("import Mathlib\n\ntheorem foo (y : ℂ) :\n  7 * y = 7 * y := by")
+    assert "have h1 : 7 * y = 7 * y := by exact (by intro y; rfl) y" in source
     assert "exact h1" in source
 
 

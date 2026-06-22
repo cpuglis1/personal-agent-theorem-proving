@@ -590,12 +590,18 @@ def _synthesize_instruction(task_id: str, node: WorkflowNode, request: str) -> s
     synthesizer never has to read plan.md, and so expanded and single-chain runs share one
     contract. The goal type comes from the plan's typed sub-goal, degrading to the prose
     request when the plan has none."""
-    from hyperion.crews.lean_handlers import _prose_to_goal_type  # local: avoid import cycle
+    from hyperion.crews.lean_handlers import (  # local: avoid import cycle
+        _prose_to_goal_type,
+        _threaded_goal_type_from_formal,
+    )
 
     sg_id = _synth_subgoal_id(task_id, node)
     subs = parse_plan(task_id).active_subtasks()
-    lean_type = next(
-        (s.lean_type for s in subs if s.id == sg_id and s.lean_type), ""
+    sub = next((s for s in subs if s.id == sg_id and s.lean_type), None)
+    lean_type = (
+        _threaded_goal_type_from_formal(sub, context_get(task_id, "formal_statement_ingestion"))
+        if sub
+        else ""
     ) or context_get(task_id, "formal_goal") or _prose_to_goal_type(request)
     profile = (context_get(task_id, "lean_profile") or settings.lean_profile or "core").strip().lower()
     if profile == "mathlib":

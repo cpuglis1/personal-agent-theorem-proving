@@ -1,7 +1,7 @@
 {
   "id": "lean-prove",
   "name": "Lean Prove (decompose → retrieve‖synthesize → verify → compare/definition-escalation → bank)",
-  "description": "The full prover loop. The decomposer writes a have-chain scaffold of typed sub-goals; skeleton_check type-checks it in skeleton mode; then retrieve (Path A) and synthesize (Path B) run in ONE wave. verify waits for both and acts as the native controller. Normal wins flow through compare → abstract → bank. Stalls route through escalation_gate → synthesize_definition → verify_concept → birth_ablation → bank_concept; accepted concepts are persisted and staged as a normal discharge before the final bank assembles result.lean. The branch is implemented with native soft gates because the runner is a pure DAG.",
+  "description": "The full prover loop. The decomposer writes structural typed sub-goals; native code builds and skeleton-checks the have-chain and deterministic closer; then retrieve (Path A) and synthesize (Path B) run in ONE wave. verify waits for both and acts as the native controller. Normal wins flow through compare → abstract → bank. Stalls route through escalation_gate → synthesize_definition → verify_concept → birth_ablation → bank_concept; accepted concepts are persisted and staged as a normal discharge before the final bank assembles result.lean. The branch is implemented with native soft gates because the runner is a pure DAG.",
   "nodes": [
     {
       "id": "formal_ingest",
