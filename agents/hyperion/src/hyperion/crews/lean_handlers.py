@@ -266,7 +266,14 @@ def _proof_body_for_hole(proof: str, sub: Subtask, formal: dict[str, Any] | None
     args = _threaded_instantiation_args(sub, formal)
     if not args:
         return proof
-    return "by exact (" + proof + ") " + " ".join(args)
+    # The threaded proof closes the universally-quantified form (∀ <binders>, T); to fill the
+    # instance hole we instantiate it at the parent theorem's binders. The proof term may be a
+    # bare ``by`` tactic block, which Lean cannot elaborate as a function applied to arguments
+    # without an expected type ("invalid 'by' tactic, expected type has not been provided").
+    # Ascribe it to the threaded ∀-type first so the block elaborates against a known goal, then
+    # apply the binders. The kernel (final bank verify) still arbitrates the assembled proof.
+    threaded = _threaded_goal_type_from_formal(sub, formal)
+    return f"by exact (({proof} : {threaded})) {' '.join(args)}"
 
 
 def _proof_body_from_scaffold(scaffold: str) -> str:

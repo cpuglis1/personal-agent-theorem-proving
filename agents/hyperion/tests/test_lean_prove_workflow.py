@@ -1323,7 +1323,10 @@ selected_option: a
 
     source = lean.call_args.args[0]
     assert source.startswith("import Mathlib\n\ntheorem foo (y : ℂ) :\n  7 * y = 7 * y := by")
-    assert "have h1 : 7 * y = 7 * y := by exact (by intro y; rfl) y" in source
+    assert (
+        "have h1 : 7 * y = 7 * y := by exact "
+        "((by intro y; rfl : ∀ (y : ℂ), 7 * y = 7 * y)) y"
+    ) in source
     assert "exact h1" in source
 
 
