@@ -100,6 +100,16 @@ def test_paired_row_marks_definition_escalation_rescue():
     assert row["rescued_by_escalation"] is True
 
 
+def test_benchmark_body_prefers_formal_statement():
+    body = lean_prove_benchmark._task_body(
+        {"prompt": "prove theorem foo : True", "formal_statement": "theorem foo : True := by sorry"},
+        eval_mode="dev",
+        order_seed=None,
+        prover_definition_escalation=True,
+    )
+    assert body["task"] == "theorem foo : True := by sorry"
+
+
 def test_hard_smoke_fixture_schema():
     path = Path(__file__).parents[1] / "evals" / "lean_prove_splits" / "hard_smoke.jsonl"
     rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]

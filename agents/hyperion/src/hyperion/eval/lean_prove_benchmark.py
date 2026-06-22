@@ -89,7 +89,7 @@ def _paired_row(case: dict[str, Any], off: dict[str, Any], on: dict[str, Any], *
 def _task_body(case: dict[str, Any], *, eval_mode: str, order_seed: int | None,
                prover_definition_escalation: bool) -> dict[str, Any]:
     return {
-        "task": case["prompt"],
+        "task": case.get("formal_statement") or case["prompt"],
         "workflow": case.get("workflow") or "lean-prove",
         "hitl": "off",
         "eval_mode": eval_mode,
