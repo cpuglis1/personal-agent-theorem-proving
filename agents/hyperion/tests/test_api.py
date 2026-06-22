@@ -113,6 +113,48 @@ async def test_submit_passes_eval_mode_and_lean_profile(tmp_path):
 
 
 @pytest.mark.anyio
+async def test_startup_reconciles_stale_running_rows(tmp_path):
+    """A restarted API cannot resume in-memory workers, so stale running rows go terminal."""
+    from hyperion.config import settings
+    from hyperion.server import api
+
+    with patch.object(settings, "tasks_dir", tmp_path):
+        api._PROGRESS.clear()
+        db = await api._get_db()
+        try:
+            await db.execute(
+                "INSERT INTO tasks (task_id, status, request) VALUES (?,?,?)",
+                ("stale", "running", "prove"),
+            )
+            await db.execute(
+                "INSERT INTO tasks (task_id, status, request) VALUES (?,?,?)",
+                ("done", "done", "finished"),
+            )
+            await db.commit()
+        finally:
+            await db.close()
+
+        await api._reconcile_interrupted_running_tasks()
+
+        db = await api._get_db()
+        try:
+            async with db.execute(
+                "SELECT task_id, status, error FROM tasks ORDER BY task_id"
+            ) as cur:
+                rows = await cur.fetchall()
+        finally:
+            await db.close()
+
+    by_id = {row[0]: {"status": row[1], "error": row[2]} for row in rows}
+    assert by_id["stale"]["status"] == "failed"
+    assert by_id["stale"]["error"].startswith("interrupted:")
+    assert by_id["done"]["status"] == "done"
+    assert "status=failed (interrupted:" in (tmp_path / "stale" / "progress.log").read_text(
+        encoding="utf-8"
+    )
+
+
+@pytest.mark.anyio
 async def test_missing_task_returns_404(tmp_path):
     """Polling an unknown task id returns 404 (no task file exists in tasks_dir).
 

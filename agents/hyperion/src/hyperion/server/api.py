@@ -336,6 +336,32 @@ def _rehydrate_progress() -> None:
                 pass
 
 
+async def _reconcile_interrupted_running_tasks() -> None:
+    """Mark rows left ``running`` across a restart as interrupted.
+
+    Task execution lives in in-memory background coroutines. After process restart there is
+    no worker to resume a row that still says ``running``; leaving it live in the DB makes
+    the UI and eval harness report work that cannot complete. Keep the public status inside
+    the existing terminal vocabulary (``failed``), and put the interruption class in the
+    error/progress text.
+    """
+    message = "interrupted: task was running when Hyperion started; worker is gone"
+    async with _db() as db:
+        async with db.execute("SELECT task_id FROM tasks WHERE status='running'") as cur:
+            rows = await cur.fetchall()
+        if not rows:
+            return
+        await db.execute(
+            "UPDATE tasks SET status='failed', error=?, updated_at=CURRENT_TIMESTAMP "
+            "WHERE status='running'",
+            (message,),
+        )
+        await db.commit()
+    for row in rows:
+        task_id = row[0]
+        _append_progress(task_id, f"[hyperion] status=failed ({message})")
+
+
 def _plan_affordance(task_id: str) -> dict:
     """Build the choice affordance shown while a task awaits plan approval.
 
@@ -562,6 +588,7 @@ async def _startup() -> None:
     await db.close()
     # Reload progress for tasks that were running/paused before this restart.
     _rehydrate_progress()
+    await _reconcile_interrupted_running_tasks()
     # Re-apply any persisted model assignments (PUT /config) and caps (PUT /thresholds).
     _apply_model_overrides()
     # Seed the role/alias registry from settings on first run (lossless migration of

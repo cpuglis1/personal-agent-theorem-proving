@@ -127,3 +127,176 @@ Decomposer closing-tactic quality is the next reliability target. Options, cheap
 - Synth capture: `crews/runner.py::_capture_lemma_candidate` / `_synthesize_instruction`
 - Scrubs: `lean_handlers.py::_sanitize_scaffold`, `plan_contract.py::_sanitize_frontmatter`
 - Tests: `tests/test_lean_prove_workflow.py`, `tests/test_plan_contract_lean.py`
+
+## Benchmark Prep / Usage Stop Handoff
+
+Date/time: 2026-06-21 afternoon.
+
+User asked to stop because usage was getting high. Hyperion was stopped with:
+
+```bash
+docker compose \
+  -f ai-router/docker-compose.yml \
+  -f agents/hyperion/docker-compose.override.yml \
+  -f agents/hyperion/docker-compose.lean.yml \
+  stop hyperion
+```
+
+No final `eval_mode=test` run was launched.
+
+### What landed before this handoff
+
+Committed baseline:
+
+- `d998ab2 Add benchmark eval modes and verifier profiles`
+  - added `eval_mode=train|dev|test`
+  - disables persistent lemma/concept/episode writes in `dev` and `test`
+  - added `lean_profile=core|mathlib`
+  - writes `artifacts/eval_manifest.json`
+  - added benchmark helper `hyperion.eval.lean_prove_benchmark`
+  - added trainer/dev/test split staging under `agents/hyperion/evals/`
+
+Uncommitted follow-up changes made during benchmark prep:
+
+- `agents/hyperion/src/hyperion/crews/lean_handlers.py`
+  - `_sanitize_lean_source(..., profile=...)` now preserves `import Mathlib` when
+    `profile=mathlib`, while keeping core behavior unchanged.
+  - repair prompts now include the verifier profile.
+- `agents/hyperion/src/hyperion/crews/runner.py`
+  - `_synthesize_instruction` now tells Path B whether the active verifier profile is
+    `core` or `mathlib`.
+- `agents/hyperion/config/agents/decomposer.json`
+  - decomposer prompt now says core is default, but `lean_profile=mathlib` allows
+    Mathlib imports/tactics/syntax.
+- `agents/hyperion/config/agents/lemma_synthesizer.json`
+  - lemma synthesizer prompt now permits `import Mathlib` only when the task instruction
+    says the verifier profile is `mathlib`.
+- `agents/hyperion/evals/lean_prove_splits/dev_mathlib.jsonl`
+  - new small public miniF2F-derived dev split using `formal/valid.lean`, not `test.lean`.
+
+Focused verification after the profile-aware edits:
+
+```text
+agents/hyperion/.venv/bin/pytest \
+  agents/hyperion/tests/test_lean_prove_workflow.py \
+  agents/hyperion/tests/test_lean_verify.py
+
+52 passed
+```
+
+Full backend suite and UI build were not rerun after these last uncommitted prompt/profile edits.
+
+### Dev benchmark results actually completed
+
+Important interpretation rule:
+
+`final_verify.ok=true` means the assembled `result.lean` is valid Lean for the theorem
+Hyperion assembled: it type-checks, has no `sorry`, and the Lean kernel accepts the proof.
+It does **not** independently prove that the decomposer formalized the original natural
+language problem correctly, or that it matched the intended benchmark statement. For exact
+formal benchmark prompts, this is close to "solved"; for natural-language prompts, also
+check the formalized proposition against the expected statement.
+
+Core dev pass was run with:
+
+```bash
+agents/hyperion/.venv/bin/python -m hyperion.eval.lean_prove_benchmark \
+  --cases agents/hyperion/evals/lean_prove_splits/dev.jsonl \
+  --eval-mode dev \
+  --out agents/hyperion/tasks/benchmark-core-dev-results.jsonl \
+  --order-seed 1 \
+  --poll-seconds 5
+```
+
+Results:
+
+| Case | Task | Mode | Profile | Result |
+| --- | --- | --- | --- | --- |
+| `core-dev-exp-chain-001` | `8265b9d3` | `dev` | `core` | done, `final_verify.ok=true`, 2 subgoals |
+| `core-dev-string-conj-001` | `b1befa83` | `dev` | `core` | done, `final_verify.ok=true`, 2 subgoals |
+
+Result file:
+
+```text
+agents/hyperion/tasks/benchmark-core-dev-results.jsonl
+```
+
+This is the successful "Core Lean, no Mathlib, no writes" sanity pass: 2/2.
+
+### Mathlib dev attempt stopped early
+
+Mathlib dev pass was started with:
+
+```bash
+agents/hyperion/.venv/bin/python -m hyperion.eval.lean_prove_benchmark \
+  --cases agents/hyperion/evals/lean_prove_splits/dev_mathlib.jsonl \
+  --eval-mode dev \
+  --out agents/hyperion/tasks/benchmark-mathlib-dev-results.jsonl \
+  --order-seed 1 \
+  --poll-seconds 5
+```
+
+It was interrupted for usage. The helper process was then killed, but it had already
+submitted a second backend task. Hyperion was stopped to prevent further LLM calls.
+
+Observed rows:
+
+| Case | Task | Mode | Profile | Result |
+| --- | --- | --- | --- | --- |
+| `miniF2F-valid-mathd-algebra-182` | `6d5fad7f` | `dev` | `mathlib` | failed at skeleton revision budget |
+| `miniF2F-valid-mathd-algebra-462` | `27166865` | `dev` | `mathlib` | stopped mid-run by stopping Hyperion |
+
+Result file:
+
+```text
+agents/hyperion/tasks/benchmark-mathlib-dev-results.jsonl
+```
+
+Important failure signal: Mathlib verification plumbing is reachable, but the decomposer
+does not yet robustly handle prompts containing a full top-level theorem command plus
+`import Mathlib`. The first miniF2F case failed before retrieve/synthesize, during
+`skeleton_check` revisions, with malformed scaffold/type output.
+
+Next best fix before resuming Mathlib:
+
+- change Mathlib benchmark prompts to pass the bare proposition/context rather than an
+  entire `import Mathlib` + `theorem ... := by sorry` command, or
+- teach the decomposer/skeleton wrapper to support full top-level theorem commands and
+  extract the theorem proposition safely.
+
+Cheapest immediate path: regenerate `dev_mathlib.jsonl` prompts as propositions, e.g.
+`Prove in Lean 4 with lean_profile=mathlib, assuming (y : Complex), that ...`, and keep
+`formal_statement` as the original miniF2F theorem for provenance.
+
+### Current stop state
+
+- Hyperion container is stopped intentionally.
+- Lean sidecar and other infra may still be up.
+- There is an untracked generated directory from the Compose-mounted task volume:
+  `ai-router/tasks/`.
+- `ai-router/tasks/27166865` is a partial stopped Mathlib task. Do not count it as a
+  benchmark result.
+- Do not launch `eval_mode=test` without explicit user go-ahead.
+
+### Suggested resume sequence
+
+1. Review/commit or revise the uncommitted profile-aware Mathlib prompt/sanitizer changes.
+2. Replace `dev_mathlib.jsonl` prompts with proposition-style prompts.
+3. Run local tests:
+
+```bash
+agents/hyperion/.venv/bin/pytest agents/hyperion/tests
+npm run build --prefix agents/hyperion-ui
+```
+
+4. Restart Hyperion only when ready to spend:
+
+```bash
+docker compose \
+  -f ai-router/docker-compose.yml \
+  -f agents/hyperion/docker-compose.override.yml \
+  -f agents/hyperion/docker-compose.lean.yml \
+  up -d hyperion
+```
+
+5. Re-run only Mathlib dev first. Do not run final test.

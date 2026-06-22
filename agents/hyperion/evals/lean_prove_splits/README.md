@@ -7,6 +7,8 @@ discipline:
   lemma/concept/episode writes.
 - `dev.jsonl`: development/validation cases. Runs should use `eval_mode=dev`, which
   keeps artifacts and traces but disables persistent learning writes.
+- `dev_mathlib.jsonl`: development/validation cases from public miniF2F Lean 4
+  `formal/valid.lean`, run with `eval_mode=dev` and `lean_profile=mathlib`.
 - `test.jsonl`: final held-out cases. Runs must use `eval_mode=test`, with frozen code,
   prompts, model aliases, retrieval index, bank snapshot, and verifier profile.
 

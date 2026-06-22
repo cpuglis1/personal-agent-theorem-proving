@@ -4,10 +4,25 @@
   "description": "The full prover loop. The decomposer writes a have-chain scaffold of typed sub-goals; skeleton_check type-checks it in skeleton mode; then retrieve (Path A) and synthesize (Path B) run in ONE wave. verify waits for both and acts as the native controller. Normal wins flow through compare → abstract → bank. Stalls route through escalation_gate → synthesize_definition → verify_concept → birth_ablation → bank_concept; accepted concepts are persisted and staged as a normal discharge before the final bank assembles result.lean. The branch is implemented with native soft gates because the runner is a pure DAG.",
   "nodes": [
     {
+      "id": "formal_ingest",
+      "handler": "formal_ingest",
+      "kind": "native",
+      "upstream": [],
+      "gate_before": false,
+      "instruction": null,
+      "when": null,
+      "position": {
+        "x": 40.0,
+        "y": -90.0
+      }
+    },
+    {
       "id": "decompose",
       "agent": "decomposer",
       "kind": "plan",
-      "upstream": [],
+      "upstream": [
+        "formal_ingest"
+      ],
       "gate_before": false,
       "instruction": null,
       "when": null,

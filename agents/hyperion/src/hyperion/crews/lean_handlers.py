@@ -43,6 +43,11 @@ from typing import Any, Optional
 
 from hyperion.config import settings
 from hyperion.crews.lemma_compare import build_triple, choose_winner, generality_score
+from hyperion.crews.lean_statement import (
+    context_dict_to_decompose_request,
+    formal_to_context_dict,
+    parse_formal_statement,
+)
 from hyperion.crews.native import NativeNodeCtx, register_native_handler
 from hyperion.crews.plan_contract import Subtask, parse_plan
 from hyperion.crews.soundness import soundness_ok, source_declares_gap
@@ -128,6 +133,71 @@ def _goal_type(ctx: NativeNodeCtx, sg_id: str) -> str:
     return _prose_to_goal_type(ctx.request)
 
 
+def _formal_context(ctx: NativeNodeCtx) -> dict[str, Any] | None:
+    raw = ctx.get("formal_statement_ingestion")
+    return raw if isinstance(raw, dict) and raw.get("goal") and raw.get("header") else None
+
+
+def _target_goal_type(ctx: NativeNodeCtx) -> str:
+    formal = _formal_context(ctx)
+    if formal:
+        return str(formal["goal"])
+    return _prose_to_goal_type(ctx.request)
+
+
+def _formal_command_from_body(body: str, formal: dict[str, Any]) -> str:
+    preamble = (formal.get("preamble") or "").strip()
+    header = (formal.get("header") or "").strip()
+    goal = (formal.get("goal") or "").strip()
+    command = f"{header} :\n  {goal} := by\n{_indent_tactic_body(body)}"
+    return f"{preamble}\n\n{command}" if preamble else command
+
+
+def _proof_body_from_scaffold(scaffold: str) -> str:
+    s = _sanitize_scaffold((scaffold or "").strip())
+    if not _looks_like_declaration(s):
+        return s
+    marker = ":= by"
+    idx = s.find(marker)
+    if idx < 0:
+        return s
+    return s[idx + len(marker) :].strip()
+
+
+def _scaffold_target_command(ctx: NativeNodeCtx, scaffold: str) -> str:
+    formal = _formal_context(ctx)
+    if formal:
+        return _formal_command_from_body(_proof_body_from_scaffold(scaffold), formal)
+    return _scaffold_as_command(scaffold, _target_goal_type(ctx))
+
+
+async def formal_ingest_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
+    """Parse an exact Lean command before LLM decomposition, when present."""
+    formal = parse_formal_statement(ctx.request)
+    if formal is None:
+        ctx.put("formal_statement_ingestion", None)
+        return {"handler": "formal_ingest", "ok": True, "ingested": False}
+    data = formal_to_context_dict(formal)
+    ctx.put("formal_statement_ingestion", data)
+    ctx.put("formal_statement", formal.original)
+    ctx.put("formal_preamble", formal.preamble)
+    ctx.put("formal_header", formal.header)
+    ctx.put("formal_goal", formal.goal)
+    ctx.put("formal_local_context", data["local_context"])
+    ctx.put("decompose_request", context_dict_to_decompose_request(data))
+    ctx.progress(
+        f"[formal_ingest] parsed formal statement with {len(formal.local_context)} local binding group(s)"
+    )
+    return {
+        "handler": "formal_ingest",
+        "ok": True,
+        "ingested": True,
+        "goal": formal.goal,
+        "local_context": data["local_context"],
+        "has_preamble": bool(formal.preamble),
+    }
+
+
 async def lean_decompose_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     """Write a deterministic single-subgoal Lean plan for the prover workflow.
 
@@ -136,7 +206,7 @@ async def lean_decompose_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     Richer decomposition can return to the decomposer agent later; for now one typed
     ``have`` is enough to make the native prover pipeline deterministic.
     """
-    goal = _prose_to_goal_type(ctx.request)
+    goal = _target_goal_type(ctx)
     scaffold = f"have h1 : {goal} := sorry\nexact h1"
     plan_md = (
         "---\n"
@@ -191,25 +261,18 @@ _LEADING_LEMMA_RE = re.compile(r"(?m)^(\s*)lemma(\s)")
 _NAMED_EXAMPLE_RE = re.compile(r"(?m)^(\s*)(?:lemma|theorem)\s+example\b")
 
 
-def _sanitize_lean_source(source: str) -> str:
-    """Scrub the Mathlib-isms / dialect tics LLM synthesizers reliably emit for *core* goals.
+def _sanitize_lean_source(source: str, *, profile: str | None = None) -> str:
+    """Scrub dialect tics LLM synthesizers reliably emit.
 
-    The verifier is core Lean 4 with no Mathlib on the import path, but synthesizers
-    (trained on Mathlib-heavy corpora) habitually (a) prepend an ``import Mathlib...``
-    line — which fails fast because the ``.olean`` isn't built; (b) use the ``lemma``
-    keyword, which Mathlib defines but core Lean does not (``theorem`` is the core
-    spelling); and (c) name a self-contained proof ``example`` (``lemma example : T :=
-    p``), but ``example`` is the anonymous-declaration *keyword*, not a legal identifier,
-    so the decl fails to parse. We strip import lines, drop the redundant keyword from a
-    ``{lemma,theorem} example`` (→ the valid anonymous ``example : T := p``), rewrite a
-    leading ``lemma`` → ``theorem`` (exact synonyms), then trim leading blank lines. Each
-    makes an otherwise-valid proof fail verification. Defensive and idempotent: a proof that
-    was already core passes through unchanged. (NB: when real Mathlib verification lands —
-    build-plan priority 3 — this core-only scrub becomes conditional on the goal's needs.)
+    Core profile keeps the historical behavior: strip import lines, normalize
+    ``lemma`` to ``theorem``, and turn ``lemma/theorem example`` into an anonymous
+    ``example``. Mathlib profile preserves imports while retaining the parser-safe
+    keyword normalizations.
     """
     if not source:
         return source
-    cleaned = _IMPORT_LINE_RE.sub("", source)
+    selected_profile = (profile or settings.lean_profile or "core").strip().lower()
+    cleaned = source if selected_profile == "mathlib" else _IMPORT_LINE_RE.sub("", source)
     cleaned = _NAMED_EXAMPLE_RE.sub(r"\1example", cleaned)
     cleaned = _LEADING_LEMMA_RE.sub(r"\1theorem\2", cleaned)
     return cleaned.lstrip("\n")
@@ -295,6 +358,68 @@ def _scaffold_as_command(scaffold: str, goal_type: str) -> str:
     return f"example : {goal_type} := by\n{_indent_tactic_body(s)}"
 
 
+_LEAN_IDENT_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_']*\b")
+_LEAN_KEYWORDS = {
+    "by", "have", "show", "exact", "intro", "intros", "fun", "from", "let", "in",
+    "if", "then", "else", "match", "with", "forall", "Prop", "Type", "Sort",
+}
+
+
+def _bound_names_from_formal(formal: dict[str, Any] | None) -> set[str]:
+    names: set[str] = set()
+    if not formal:
+        return names
+    for item in formal.get("local_context") or []:
+        for name in item.get("names") or []:
+            names.add(str(name))
+    return names
+
+
+def _intro_names(scaffold: str) -> set[str]:
+    names: set[str] = set()
+    for line in (scaffold or "").splitlines():
+        stripped = line.strip()
+        if not stripped.startswith(("intro ", "intros ")):
+            continue
+        parts = stripped.split()
+        for tok in parts[1:]:
+            tok = tok.strip("(),;")
+            if _LEAN_IDENT_RE.fullmatch(tok):
+                names.add(tok)
+    return names
+
+
+def _internally_bound_names(lean_type: str) -> set[str]:
+    names: set[str] = set()
+    for binder in re.findall(r"[\(\{\[]([^()\{\}\[\]]+:[^()\{\}\[\]]+)[\)\}\]]", lean_type or ""):
+        before_colon = binder.split(":", 1)[0]
+        names.update(_LEAN_IDENT_RE.findall(before_colon))
+    for match in re.finditer(r"∀\s+([A-Za-z_][A-Za-z0-9_']*)\b", lean_type or ""):
+        names.add(match.group(1))
+    return names
+
+
+def _subgoal_unbound_context_hits(
+    subtasks: list[Subtask],
+    scaffold: str,
+    formal: dict[str, Any] | None,
+) -> list[dict[str, str]]:
+    context_names = _bound_names_from_formal(formal) | _intro_names(scaffold)
+    if not context_names:
+        return []
+    hits: list[dict[str, str]] = []
+    for sub in subtasks:
+        lean_type = sub.lean_type or ""
+        internal = _internally_bound_names(lean_type)
+        tokens = {
+            tok for tok in _LEAN_IDENT_RE.findall(lean_type)
+            if tok not in _LEAN_KEYWORDS
+        }
+        for name in sorted((tokens & context_names) - internal):
+            hits.append({"id": sub.id, "identifier": name, "lean_type": lean_type})
+    return hits
+
+
 def _synthesized_candidate(ctx: NativeNodeCtx, sg_id: str) -> Optional[dict[str, Any]]:
     """The Path-B candidate the synthesizer staged for sub-goal ``sg_id``.
 
@@ -327,10 +452,13 @@ def _synthesized_candidate(ctx: NativeNodeCtx, sg_id: str) -> Optional[dict[str,
             return None
     if not isinstance(raw, dict):
         return None
-    # Scrub Mathlib-isms (import lines / `lemma` keyword) from the synthesized source so
-    # a core-provable goal isn't failed by the synthesizer's dialect (see the helper).
+    # Scrub dialect tics from the synthesized source. Core strips imports; Mathlib keeps
+    # them so profile=mathlib can prove against the sidecar project.
     if raw.get("source"):
-        raw["source"] = _sanitize_lean_source(raw["source"])
+        raw["source"] = _sanitize_lean_source(
+            raw["source"],
+            profile=ctx.get("lean_profile", settings.lean_profile),
+        )
         concepts = ctx.get(_bb_key("concept_context", sg_id)) or []
         if concepts:
             preamble = "\n\n".join(_concept_preamble(c) for c in concepts if _concept_preamble(c))
@@ -479,7 +607,11 @@ def _multi_candidate_from_lemmas(goal_type: str, lemmas: list[dict[str, Any]]) -
 
 
 async def propose_repair(
-    goal: str, candidate_source: str, errors: list[str], weak: bool = False
+    goal: str,
+    candidate_source: str,
+    errors: list[str],
+    weak: bool = False,
+    profile: str | None = None,
 ) -> str:
     """Ask the ``repair`` agent for ONE revised candidate that closes ``goal``.
 
@@ -517,6 +649,7 @@ async def propose_repair(
         if weak else ""
     )
     user = (
+        f"Verifier profile: {(profile or settings.lean_profile or 'core').strip().lower()}\n\n"
         f"Goal type:\n{goal}\n\n"
         f"Candidate proof that FAILED to type-check:\n{candidate_source}\n\n"
         f"Kernel diagnostics:\n" + "\n".join(errors or ["(no diagnostics)"]) + weak_clause + "\n\n"
@@ -653,30 +786,56 @@ async def retrieve_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
 async def skeleton_check_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     """Type-check the decomposer's scaffold in ``skeleton`` mode (``sorry`` permitted).
 
-    Confirms the have-chain composes to the target before any sub-goal sourcing. Routes
-    on the load-bearing ``infra_ok`` flag exactly like every verifier caller: a verifier
-    outage is inconclusive (``infra_ok=False``) and is NOT treated as a scaffold failure.
-    Records the verdict to the blackboard; a real ``ok=False`` is surfaced in the result
-    (the decomposer can be revised via the runner's plan-revision flow) but does not
-    crash the node.
+    Confirms the have-chain composes to the target before any sub-goal sourcing. A verifier
+    outage is still distinct from a kernel rejection, but it is terminal for this stage:
+    without a skeleton verdict, downstream retrieve/synthesize work has no sound scaffold
+    contract to rely on.
     """
     scaffold = parse_plan(ctx.task_id).scaffold
     if not scaffold:
         ctx.put("skeleton_ok", False)
         ctx.put("skeleton_errors", ["no scaffold in plan"])
         return {"handler": "skeleton_check", "ok": False, "errors": ["no scaffold in plan"]}
-    sg_id = _subgoal_id(ctx)
+    plan = parse_plan(ctx.task_id)
+    formal = _formal_context(ctx)
+    unbound_hits = _subgoal_unbound_context_hits(plan.active_subtasks(), scaffold, formal)
+    ctx.put("subgoal_unbound_context", unbound_hits)
+    for hit in unbound_hits:
+        ctx.put(_bb_key("subgoal_unbound_context", hit["id"]), hit)
+    if unbound_hits:
+        errors = [
+            f"subgoal_unbound_context: {hit['id']} references unbound {hit['identifier']}"
+            for hit in unbound_hits
+        ]
+        ctx.put("skeleton_ok", False)
+        ctx.put("skeleton_errors", errors)
+        return {
+            "handler": "skeleton_check",
+            "ok": False,
+            "error_code": "subgoal_unbound_context",
+            "errors": errors,
+            "subgoal_unbound_context": unbound_hits,
+        }
     res = verify_lean(
-        _scaffold_as_command(scaffold, _goal_type(ctx, sg_id)),
+        _scaffold_target_command(ctx, scaffold),
         mode="skeleton",
         profile=ctx.get("lean_profile", settings.lean_profile),
     )
     if not res["infra_ok"]:
-        # Inconclusive ≠ failure: degrade to "proceed" rather than blocking on a blip.
+        error_code = (
+            "verifier_timeout"
+            if any("timed out" in str(e).lower() for e in res["errors"])
+            else "verifier_unavailable"
+        )
         ctx.put("skeleton_ok", None)
         ctx.put("skeleton_errors", res["errors"])
-        return {"handler": "skeleton_check", "ok": None, "infra_ok": False,
-                "errors": res["errors"]}
+        return {
+            "handler": "skeleton_check",
+            "ok": False,
+            "infra_ok": False,
+            "error_code": error_code,
+            "errors": res["errors"],
+        }
     ctx.put("skeleton_ok", res["ok"])
     ctx.put("skeleton_errors", res["errors"])
     return {"handler": "skeleton_check", "ok": res["ok"], "errors": res["errors"]}
@@ -839,7 +998,8 @@ async def prove_proposition(
         for _ in range(cap):
             repair_iters += 1
             cur_source = _sanitize_lean_source(
-                await propose_repair(goal_type, cur_source, errors, weak=weak)
+                await propose_repair(goal_type, cur_source, errors, weak=weak, profile=profile),
+                profile=profile,
             )
             closed, errors = _full_verdict(cur_source, profile=profile)
             verdicts.append({"path": "repair", "ok": closed})
@@ -1341,10 +1501,13 @@ async def bank_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
     # (already clean) closing.
     scaffold = _sanitize_scaffold(plan.scaffold or "")
     assembled_body = _assemble(scaffold, subtasks, discharged) if scaffold else ""
-    assembled = (
-        _scaffold_as_command(assembled_body, _prose_to_goal_type(ctx.request))
-        if assembled_body else ""
-    )
+    formal = _formal_context(ctx)
+    if assembled_body and formal:
+        assembled = _formal_command_from_body(_proof_body_from_scaffold(assembled_body), formal)
+    elif assembled_body:
+        assembled = _scaffold_as_command(assembled_body, _prose_to_goal_type(ctx.request))
+    else:
+        assembled = ""
 
     # Final ground-truth gate on the assembled proof.
     final_ok: Optional[bool] = None
@@ -1912,6 +2075,7 @@ async def bank_concept_handler(ctx: NativeNodeCtx) -> dict[str, Any]:
 # Registration (mirrors crews.native's echo registration)
 # ---------------------------------------------------------------------------
 
+register_native_handler("formal_ingest", formal_ingest_handler)
 register_native_handler("retrieve", retrieve_handler)
 register_native_handler("lean_decompose", lean_decompose_handler)
 register_native_handler("skeleton_check", skeleton_check_handler)

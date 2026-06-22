@@ -751,6 +751,26 @@ function proverModuleIO(
     output: pretty(output),
   });
 
+  if (handler === "formal_ingest") {
+    return [
+      io(
+        "formal_ingest",
+        { context_keys_read: ["request"], request: data.request },
+        {
+          context_keys_written: [
+            "formal_statement_ingestion",
+            "formal_statement",
+            "formal_preamble",
+            "formal_header",
+            "formal_goal",
+            "formal_local_context",
+            "decompose_request",
+          ],
+          formal_statement_ingestion: prover.formal_statement_ingestion ?? null,
+        },
+      ),
+    ];
+  }
   if (handler === "lean_decompose" || nodeId === "decompose") {
     return [
       io(
@@ -771,10 +791,13 @@ function proverModuleIO(
         "skeleton_check",
         { context_keys_read: ["plan.md"], scaffold },
         {
-          context_keys_written: ["skeleton_ok", "skeleton_errors"],
+          context_keys_written: ["skeleton_ok", "skeleton_errors", "subgoal_unbound_context"],
           skeleton_ok: prover.skeleton_ok,
+          subgoal_unbound_context: prover.subgoal_unbound_context ?? [],
           verifier_response: { ok: prover.skeleton_ok ?? null, errors: prover.skeleton_errors ?? [] },
-          failure_reason: prover.skeleton_ok === false ? "Lean skeleton verifier rejected scaffold" : null,
+          failure_reason: Array.isArray(prover.subgoal_unbound_context) && prover.subgoal_unbound_context.length
+            ? "subgoal_unbound_context"
+            : (prover.skeleton_ok === false ? "Lean skeleton verifier rejected scaffold" : null),
         },
       ),
     ];

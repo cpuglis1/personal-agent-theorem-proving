@@ -85,6 +85,8 @@ def run_cases(
                 "status": task.get("status"),
                 "error": task.get("error"),
                 "final_verify": prover.get("final_verify"),
+                "formal_statement_ingestion": prover.get("formal_statement_ingestion"),
+                "subgoal_unbound_context": prover.get("subgoal_unbound_context"),
                 "n_subgoals": len(prover.get("subgoals") or {}),
                 "trace_events": len(trace.get("events") or []),
             }

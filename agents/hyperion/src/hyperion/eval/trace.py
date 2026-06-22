@@ -25,7 +25,7 @@ from hyperion.memory.context_store import context_get
 _PER_SG_KEYS = (
     "candidate_a", "candidates_a", "candidate_b",
     "verified_a", "verified_b", "verify_decision",
-    "concept_context", "stall_errors",
+    "concept_context", "stall_errors", "subgoal_unbound_context",
     "escalated", "synthesize_definition", "concept_candidates",
     "verify_concept", "verified_concept", "birth_ablation",
     "accepted_concept", "bank_concept",
@@ -76,6 +76,8 @@ def collect_trace(
         "scaffold": (plan.scaffold if plan else None),
         "skeleton_ok": blackboard.get("skeleton_ok"),
         "skeleton_errors": blackboard.get("skeleton_errors") or [],
+        "subgoal_unbound_context": blackboard.get("subgoal_unbound_context") or [],
+        "formal_statement_ingestion": blackboard.get("formal_statement_ingestion"),
         "final_verify": blackboard.get("final_verify"),
         "subgoals": per_sg,
         "result_lean": result_lean,

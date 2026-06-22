@@ -33,6 +33,7 @@ from hyperion.crews import lean_handlers, runner
 from hyperion.crews.lean_handlers import (
     ProofFailed,
     ProofOutcome,
+    formal_ingest_handler,
     lean_decompose_handler,
     abstract_handler,
     bank_concept_handler,
@@ -142,6 +143,125 @@ async def test_skeleton_check_missing_scaffold_is_decomposer_failure(tmp_path):
     assert res["errors"] == ["no scaffold in plan"]
 
 
+@pytest.mark.anyio
+async def test_skeleton_check_verifier_timeout_is_terminal_inconclusive(tmp_path):
+    plan_md = """---
+task_id: verifier_timeout
+task_type: code
+scaffold: |
+  have h1 : True := sorry
+  exact h1
+options:
+  - id: a
+    summary: direct
+    subtasks:
+      - id: h1
+        description: prove target
+        lean_type: "True"
+selected_option: a
+---
+"""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        task_dir = tmp_path / "verifier_timeout"
+        task_dir.mkdir(parents=True)
+        (task_dir / "plan.md").write_text(plan_md, encoding="utf-8")
+        check = WorkflowNode(
+            id="skeleton_check", kind="native", handler="skeleton_check", upstream=["decompose"]
+        )
+        ctx = NativeNodeCtx(
+            task_id="verifier_timeout",
+            node=check,
+            request="Prove that True.",
+            progress_callback=None,
+        )
+        with patch("hyperion.crews.lean_handlers.verify_lean", return_value={
+            "ok": False,
+            "errors": ["lean verifier unavailable: timed out"],
+            "infra_ok": False,
+        }):
+            res = await skeleton_check_handler(ctx)
+
+        skeleton_ok = context_get("verifier_timeout", "skeleton_ok")
+
+    assert res["ok"] is False
+    assert res["infra_ok"] is False
+    assert res["error_code"] == "verifier_timeout"
+    assert skeleton_ok is None
+
+
+@pytest.mark.anyio
+async def test_formal_ingest_stages_structured_decompose_request(tmp_path):
+    request = """import Mathlib
+
+open Real Nat Topology
+
+theorem foo (y : ℂ) : 7 * y = 7 * y := by
+  sorry"""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        ctx = NativeNodeCtx(
+            task_id="formal_ingest_case",
+            node=WorkflowNode(id="formal_ingest", kind="native", handler="formal_ingest", upstream=[]),
+            request=request,
+            progress_callback=None,
+        )
+
+        res = await formal_ingest_handler(ctx)
+        formal_goal = context_get("formal_ingest_case", "formal_goal")
+        decompose_request = context_get("formal_ingest_case", "decompose_request")
+
+    assert res["ingested"] is True
+    assert formal_goal == "7 * y = 7 * y"
+    assert "formal_signature:" in decompose_request
+    assert "local_context:" in decompose_request
+    assert "y : ℂ" in decompose_request
+    assert "import Mathlib" not in decompose_request
+
+
+@pytest.mark.anyio
+async def test_skeleton_check_reports_subgoal_unbound_context_without_kernel(tmp_path):
+    plan_md = """---
+task_id: unbound_ctx
+task_type: code
+scaffold: |
+  intro y
+  have h1 : 7 * y = 7 * y := sorry
+  exact h1
+options:
+  - id: a
+    summary: bad context leak
+    subtasks:
+      - id: h1
+        description: prove local goal
+        lean_type: "7 * y = 7 * y"
+selected_option: a
+---
+"""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        (tmp_path / "unbound_ctx").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "unbound_ctx" / "plan.md").write_text(plan_md, encoding="utf-8")
+        context_put("unbound_ctx", "formal_statement_ingestion", {
+            "preamble": "import Mathlib",
+            "header": "theorem foo (y : ℂ)",
+            "goal": "7 * y = 7 * y",
+            "local_context": [{"names": ["y"], "type": "ℂ", "raw": "(y : ℂ)"}],
+        })
+        ctx = NativeNodeCtx(
+            task_id="unbound_ctx",
+            node=WorkflowNode(id="skeleton_check", kind="native", handler="skeleton_check", upstream=[]),
+            request="ignored",
+            progress_callback=None,
+        )
+
+        with patch("hyperion.crews.lean_handlers.verify_lean") as lean:
+            res = await skeleton_check_handler(ctx)
+        hits = context_get("unbound_ctx", "subgoal_unbound_context")
+
+    lean.assert_not_called()
+    assert res["ok"] is False
+    assert res["error_code"] == "subgoal_unbound_context"
+    assert hits[0]["identifier"] == "y"
+
+
 def test_scaffold_lean3_trailing_commas_are_scrubbed():
     """A decomposer scaffold with Lean-3 ``:= sorry,`` tactic separators is scrubbed to a
     valid Lean 4 have-chain before skeleton/bank (the kernel rejects the comma form)."""
@@ -215,6 +335,82 @@ def test_sanitize_lean_source_scrubs_named_example_and_mathlibisms():
     out = _sanitize_lean_source("import Mathlib\nlemma example : True := trivial")
     assert out == "example : True := trivial"
     assert _sanitize_lean_source(out) == out
+
+
+def test_sanitize_lean_source_preserves_mathlib_imports_for_mathlib_profile():
+    """Mathlib-profile synthesis must keep imports while retaining parser-safe rewrites."""
+    from hyperion.crews.lean_handlers import _sanitize_lean_source
+
+    out = _sanitize_lean_source(
+        "import Mathlib\nlemma example : True := trivial",
+        profile="mathlib",
+    )
+    assert out == "import Mathlib\nexample : True := trivial"
+    assert _sanitize_lean_source(out, profile="mathlib") == out
+
+
+def test_synthesize_instruction_mentions_mathlib_profile(tmp_path):
+    with patch.object(settings, "tasks_dir", tmp_path):
+        (tmp_path / "mathlib_synth").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "mathlib_synth" / "plan.md").write_text(_PLAN_MD, encoding="utf-8")
+        context_put("mathlib_synth", "lean_profile", "mathlib")
+        node = WorkflowNode(
+            id="synthesize__h1",
+            kind="work",
+            agent="lemma_synthesizer",
+            instruction="h1",
+            upstream=["skeleton_check"],
+        )
+
+        prompt = runner._synthesize_instruction("mathlib_synth", node, "Prove in Lean 4 that P.")
+
+    assert "The verifier profile is `mathlib`" in prompt
+    assert "you may include `import Mathlib`" in prompt
+
+
+def test_synthesize_instruction_falls_back_to_ingested_formal_goal(tmp_path):
+    with patch.object(settings, "tasks_dir", tmp_path):
+        (tmp_path / "mathlib_no_options").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "mathlib_no_options" / "plan.md").write_text(
+            "---\ntask_id: mathlib_no_options\ntask_type: code\nscaffold: |\n  exact rfl\n---\n",
+            encoding="utf-8",
+        )
+        context_put("mathlib_no_options", "lean_profile", "mathlib")
+        context_put("mathlib_no_options", "formal_goal", "7 = 7")
+        node = WorkflowNode(
+            id="synthesize",
+            kind="work",
+            agent="lemma_synthesizer",
+            upstream=["skeleton_check"],
+        )
+
+        prompt = runner._synthesize_instruction(
+            "mathlib_no_options",
+            node,
+            "import Mathlib\n\ntheorem seven_eq : 7 = 7 := by\n  sorry",
+        )
+
+    assert "    7 = 7\n" in prompt
+    assert "theorem seven_eq" not in prompt
+
+
+def test_plan_task_mentions_active_verifier_profile():
+    calls = []
+
+    def fake_task(**kwargs):
+        calls.append(kwargs)
+        return kwargs
+
+    with patch.object(runner, "Task", side_effect=fake_task):
+        task = runner._plan_task(
+            "Prove in Lean 4 that ∀ (y : ℂ), 7 * (3 * y + 2) = 21 * y + 14.",
+            agent=MagicMock(),
+            lean_profile="mathlib",
+        )
+
+    assert task is calls[0]
+    assert "Verifier profile: mathlib" in task["description"]
+    assert "Mathlib imports" in task["description"]
 
 
 @pytest.mark.anyio
@@ -422,6 +618,56 @@ async def test_skeleton_failure_revises_decomposer_before_sourcing(tmp_path):
     assert calls[:3] == ["decompose", "decompose", "synthesize"]
     text = (tmp_path / "revise_skeleton" / "artifacts" / "result.lean").read_text(encoding="utf-8")
     assert "not Lean English prompt" not in text
+
+
+@pytest.mark.anyio
+async def test_skeleton_verifier_timeout_fails_without_decomposer_revision(tmp_path):
+    calls = []
+
+    async def _fake_stage(task_id, request, stage, agents, tasks, cb, deadline):
+        calls.append(stage)
+        if stage == "decompose":
+            base = settings.tasks_dir / task_id
+            base.mkdir(parents=True, exist_ok=True)
+            (base / "plan.md").write_text(
+                "---\n"
+                f"task_id: {task_id}\n"
+                "task_type: code\n"
+                "selected_option: a\n"
+                "scaffold: |\n"
+                "  have h1 : True := sorry\n"
+                "  exact h1\n"
+                "options:\n"
+                "  - id: a\n"
+                "    summary: direct\n"
+                "    subtasks:\n"
+                "      - id: h1\n"
+                "        description: prove target\n"
+                "        lean_type: 'True'\n"
+                "---\n",
+                encoding="utf-8",
+            )
+
+    def _timeout(_src, mode="full", **kwargs):
+        return {
+            "ok": False,
+            "errors": ["lean verifier unavailable: timed out"],
+            "infra_ok": False,
+        }
+
+    with patch.object(settings, "tasks_dir", tmp_path), \
+         patch.object(runner, "build_agent", MagicMock()), \
+         patch.object(runner, "load_agent", MagicMock()), \
+         patch.object(runner, "discover_context", MagicMock(return_value=None)), \
+         patch.object(runner, "_node_task", MagicMock()), \
+         patch.object(runner, "_run_stage", new=_fake_stage), \
+         patch.object(lean_handlers, "verify_lean", _timeout), \
+         patch("hyperion.server.meta_tasks.run_meta_tasks", new=AsyncMock()):
+        result = await runner.run_task("timeout_skeleton", "word problem", workflow="lean-prove")
+
+    assert result["status"] == "failed"
+    assert result["error"].startswith("verifier_timeout:")
+    assert calls == ["decompose"]
 
 
 # ---------------------------------------------------------------------------
@@ -884,6 +1130,51 @@ async def test_bank_skips_lemma_writes_in_eval_no_write_mode(tmp_path):
         assert res["n_banked"] == 0
         store.assert_not_called()
         assert (tmp_path / "prove_nowrite" / "artifacts" / "result.lean").exists()
+
+
+@pytest.mark.anyio
+async def test_bank_wraps_formal_statement_for_final_verify(tmp_path):
+    plan_md = """---
+task_id: formal_bank
+task_type: code
+scaffold: |
+  have h1 : 7 = 7 := sorry
+  exact h1
+options:
+  - id: a
+    summary: direct
+    subtasks:
+      - id: h1
+        description: prove target
+        lean_type: "7 = 7"
+selected_option: a
+---
+"""
+    with patch.object(settings, "tasks_dir", tmp_path):
+        (tmp_path / "formal_bank").mkdir(parents=True, exist_ok=True)
+        (tmp_path / "formal_bank" / "plan.md").write_text(plan_md, encoding="utf-8")
+        context_put("formal_bank", "learning_writes_enabled", False)
+        context_put("formal_bank", "formal_statement_ingestion", {
+            "preamble": "import Mathlib",
+            "header": "theorem seven_eq",
+            "goal": "7 = 7",
+            "local_context": [],
+        })
+        context_put("formal_bank", "discharged:h1", {
+            "proof_term": "rfl",
+            "statement": "theorem h : 7 = 7",
+            "path": "B",
+        })
+        node = WorkflowNode(id="bank", kind="native", handler="bank", upstream=[])
+        ctx = NativeNodeCtx(task_id="formal_bank", node=node, request="ignored", progress_callback=None)
+
+        with mock_lean(ok=True, targets=_VERIFY_TARGET) as lean:
+            await bank_handler(ctx)
+
+    source = lean.call_args.args[0]
+    assert source.startswith("import Mathlib\n\ntheorem seven_eq :\n  7 = 7 := by")
+    assert "example :" not in source
+    assert "exact h1" in source
 
 
 @pytest.mark.anyio
