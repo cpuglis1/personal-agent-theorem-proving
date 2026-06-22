@@ -1,0 +1,3932 @@
+{
+  "benchmark_result_files": [
+    "agents/hyperion/tasks/benchmark-core-dev-results.jsonl",
+    "agents/hyperion/tasks/benchmark-mathlib-dev-proposition-results.jsonl",
+    "agents/hyperion/tasks/benchmark-mathlib-dev-results.jsonl"
+  ],
+  "bucket_counts": {
+    "binder-threading ceiling": 1,
+    "decomposer scaffold contract": 13,
+    "eval methodology / self-authoring contamination": 2,
+    "operational/infra": 6,
+    "proof sourcing / downstream stall": 4,
+    "success": 42,
+    "unclassified": 11,
+    "verifier_latency": 2
+  },
+  "n_tasks": 81,
+  "secondary_tag_counts": {
+    "binder-threading ceiling": 1,
+    "decomposer scaffold contract": 15,
+    "operational/infra": 6,
+    "verifier_latency": 4
+  },
+  "stage_reach_task_counts": {
+    "abstract": 53,
+    "bank": 53,
+    "bank_concept": 33,
+    "birth_ablation": 33,
+    "compare": 53,
+    "decompose": 81,
+    "escalation_gate": 33,
+    "formal_ingest": 3,
+    "retrieve": 64,
+    "skeleton_check": 75,
+    "synthesize": 63,
+    "synthesize_definition": 33,
+    "verify": 63,
+    "verify_concept": 33
+  },
+  "task_roots": [
+    "ai-router/tasks",
+    "agents/hyperion/tasks"
+  ],
+  "tasks": [
+    {
+      "benchmark_rows": [],
+      "bucket": "operational/infra",
+      "error": null,
+      "eval_mode": "dev",
+      "final_verify": null,
+      "lean_profile": "mathlib",
+      "plan_signals": {
+        "closing_line": "exact h4",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "h1",
+          "h2",
+          "h3",
+          "h4"
+        ],
+        "n_have_lines": 4,
+        "n_lean_types": 0
+      },
+      "reasons": [
+        "db_status_running",
+        "no_terminal_progress_marker"
+      ],
+      "root": "ai-router/tasks",
+      "secondary_tags": [
+        "operational/infra",
+        "verifier_latency"
+      ],
+      "skeleton_errors": [
+        "lean verifier unavailable: timed out"
+      ],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 2,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 1,
+        "verify_concept": 0
+      },
+      "status": "running",
+      "subgoal_unbound_context": [],
+      "task_id": "145b9bb6"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "operational/infra",
+      "error": null,
+      "eval_mode": "dev",
+      "final_verify": null,
+      "lean_profile": "mathlib",
+      "plan_signals": {
+        "closing_line": "exact h3'",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [
+          "h2",
+          "h3"
+        ],
+        "n_have_lines": 2,
+        "n_lean_types": 0
+      },
+      "reasons": [
+        "db_status_running",
+        "no_terminal_progress_marker"
+      ],
+      "root": "ai-router/tasks",
+      "secondary_tags": [
+        "operational/infra",
+        "verifier_latency"
+      ],
+      "skeleton_errors": [
+        "lean verifier unavailable: timed out"
+      ],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 2,
+        "retrieve": 1,
+        "skeleton_check": 1,
+        "synthesize": 0,
+        "synthesize_definition": 0,
+        "verify": 0,
+        "verify_concept": 0
+      },
+      "status": "running",
+      "subgoal_unbound_context": [],
+      "task_id": "16918b9b"
+    },
+    {
+      "benchmark_rows": [
+        {
+          "_source_file": "agents/hyperion/tasks/benchmark-mathlib-dev-proposition-results.jsonl",
+          "_source_line": 1,
+          "case_id": "miniF2F-valid-mathd-algebra-182",
+          "error": "skeleton_check failed after revision budget: 1:26: failed to synthesize; 1:39: failed to synthesize; 3:17: failed to synthesize; 3:26: failed to synthesize; 5:17: failed to synthesize; 5:35: failed to synthesize; 6:2: type mismatch",
+          "eval_mode": "dev",
+          "final_verify": null,
+          "lean_profile": "mathlib",
+          "n_subgoals": 3,
+          "status": "failed",
+          "task_id": "199fd24d",
+          "trace_events": 6
+        }
+      ],
+      "bucket": "decomposer scaffold contract",
+      "error": "skeleton_check failed after revision budget: 1:26: failed to synthesize; 1:39: failed to synthesize; 3:17: failed to synthesize; 3:26: failed to synthesize; 5:17: failed to synthesize; 5:35: failed to synthesize; 6:2: type mismatch",
+      "eval_mode": "dev",
+      "final_verify": null,
+      "lean_profile": "mathlib",
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": true,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 3
+      },
+      "reasons": [
+        "skeleton_check_failed",
+        "fragile_closing"
+      ],
+      "root": "ai-router/tasks",
+      "secondary_tags": [
+        "decomposer scaffold contract"
+      ],
+      "skeleton_errors": [
+        "1:26: failed to synthesize",
+        "1:39: failed to synthesize",
+        "3:17: failed to synthesize",
+        "3:26: failed to synthesize",
+        "5:17: failed to synthesize",
+        "5:35: failed to synthesize",
+        "6:2: type mismatch"
+      ],
+      "skeleton_ok": false,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 0,
+        "skeleton_check": 3,
+        "synthesize": 0,
+        "synthesize_definition": 0,
+        "verify": 0,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "199fd24d"
+    },
+    {
+      "benchmark_rows": [
+        {
+          "_source_file": "agents/hyperion/tasks/benchmark-mathlib-dev-proposition-results.jsonl",
+          "_source_line": 2,
+          "case_id": "miniF2F-valid-mathd-algebra-462",
+          "error": "skeleton_check failed after revision budget: 1:12: failed to synthesize; 1:11: failed to synthesize; 2:13: failed to synthesize; 2:12: failed to synthesize; 1:62: unsolved goals",
+          "eval_mode": "dev",
+          "final_verify": null,
+          "lean_profile": "mathlib",
+          "n_subgoals": 3,
+          "status": "failed",
+          "task_id": "1c681809",
+          "trace_events": 6
+        }
+      ],
+      "bucket": "decomposer scaffold contract",
+      "error": "skeleton_check failed after revision budget: 1:12: failed to synthesize; 1:11: failed to synthesize; 2:13: failed to synthesize; 2:12: failed to synthesize; 1:62: unsolved goals",
+      "eval_mode": "dev",
+      "final_verify": null,
+      "lean_profile": "mathlib",
+      "plan_signals": {
+        "closing_line": "exact h3",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [
+          "h1",
+          "h2",
+          "h3"
+        ],
+        "n_have_lines": 3,
+        "n_lean_types": 0
+      },
+      "reasons": [
+        "skeleton_check_failed",
+        "trailing_sorry_comma"
+      ],
+      "root": "ai-router/tasks",
+      "secondary_tags": [
+        "decomposer scaffold contract"
+      ],
+      "skeleton_errors": [
+        "1:12: failed to synthesize",
+        "1:11: failed to synthesize",
+        "2:13: failed to synthesize",
+        "2:12: failed to synthesize",
+        "1:62: unsolved goals"
+      ],
+      "skeleton_ok": false,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 0,
+        "skeleton_check": 3,
+        "synthesize": 0,
+        "synthesize_definition": 0,
+        "verify": 0,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "1c681809"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "decomposer scaffold contract",
+      "error": "skeleton_check failed after revision budget: 1:12: failed to synthesize; 1:11: failed to synthesize; 2:13: failed to synthesize; 2:12: failed to synthesize; 1:61: unsolved goals",
+      "eval_mode": "dev",
+      "final_verify": null,
+      "lean_profile": "mathlib",
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 3
+      },
+      "reasons": [
+        "skeleton_check_failed",
+        "trailing_sorry_comma"
+      ],
+      "root": "ai-router/tasks",
+      "secondary_tags": [
+        "decomposer scaffold contract"
+      ],
+      "skeleton_errors": [
+        "1:12: failed to synthesize",
+        "1:11: failed to synthesize",
+        "2:13: failed to synthesize",
+        "2:12: failed to synthesize",
+        "1:61: unsolved goals"
+      ],
+      "skeleton_ok": false,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 0,
+        "skeleton_check": 3,
+        "synthesize": 0,
+        "synthesize_definition": 0,
+        "verify": 0,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "27166865"
+    },
+    {
+      "benchmark_rows": [
+        {
+          "_source_file": "agents/hyperion/tasks/benchmark-mathlib-dev-proposition-results.jsonl",
+          "_source_line": 3,
+          "case_id": "miniF2F-valid-mathd-numbertheory-132",
+          "error": "cannot assemble result.lean; undischarged sub-goal(s): h1, h2",
+          "eval_mode": "dev",
+          "final_verify": null,
+          "lean_profile": "mathlib",
+          "n_subgoals": 2,
+          "status": "failed",
+          "task_id": "601c3b10",
+          "trace_events": 18
+        }
+      ],
+      "bucket": "proof sourcing / downstream stall",
+      "error": "cannot assemble result.lean; undischarged sub-goal(s): h1, h2",
+      "eval_mode": "dev",
+      "final_verify": null,
+      "lean_profile": "mathlib",
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "normal_prover_stall_after_skeleton"
+      ],
+      "root": "ai-router/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 1,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "601c3b10"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "decomposer scaffold contract",
+      "error": "skeleton_check failed after revision budget: 1:23: failed to synthesize; 1:36: failed to synthesize; 2:17: failed to synthesize; 2:26: failed to synthesize; 4:17: failed to synthesize; 4:35: failed to synthesize; 6:9: failed to synthesize; 6:27: failed to synthesize; 5:2: 'calc' expression has type; 6:42: unexpected token ':'; expected command",
+      "eval_mode": "dev",
+      "final_verify": null,
+      "lean_profile": "mathlib",
+      "plan_signals": {
+        "closing_line": "calc",
+        "has_fragile_close": true,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [
+          "h1",
+          "h2",
+          "h3"
+        ],
+        "n_have_lines": 3,
+        "n_lean_types": 0
+      },
+      "reasons": [
+        "skeleton_check_failed",
+        "fragile_closing",
+        "trailing_sorry_comma"
+      ],
+      "root": "ai-router/tasks",
+      "secondary_tags": [
+        "decomposer scaffold contract"
+      ],
+      "skeleton_errors": [
+        "1:23: failed to synthesize",
+        "1:36: failed to synthesize",
+        "2:17: failed to synthesize",
+        "2:26: failed to synthesize",
+        "4:17: failed to synthesize",
+        "4:35: failed to synthesize",
+        "6:9: failed to synthesize",
+        "6:27: failed to synthesize",
+        "5:2: 'calc' expression has type",
+        "6:42: unexpected token ':'; expected command"
+      ],
+      "skeleton_ok": false,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 0,
+        "skeleton_check": 3,
+        "synthesize": 0,
+        "synthesize_definition": 0,
+        "verify": 0,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "6d5fad7f"
+    },
+    {
+      "benchmark_rows": [
+        {
+          "_source_file": "agents/hyperion/tasks/benchmark-core-dev-results.jsonl",
+          "_source_line": 1,
+          "case_id": "core-dev-exp-chain-001",
+          "error": null,
+          "eval_mode": "dev",
+          "final_verify": {
+            "errors": [],
+            "infra_ok": true,
+            "ok": true,
+            "result_path": "/app/tasks/8265b9d3/artifacts/result.lean"
+          },
+          "lean_profile": "core",
+          "n_subgoals": 2,
+          "status": "done",
+          "task_id": "8265b9d3",
+          "trace_events": 24
+        }
+      ],
+      "bucket": "eval methodology / self-authoring contamination",
+      "error": null,
+      "eval_mode": "dev",
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": true,
+        "result_path": "/app/tasks/8265b9d3/artifacts/result.lean"
+      },
+      "lean_profile": "core",
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": true,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "curated_core_case"
+      ],
+      "root": "ai-router/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 2,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "8265b9d3"
+    },
+    {
+      "benchmark_rows": [
+        {
+          "_source_file": "agents/hyperion/tasks/benchmark-mathlib-dev-results.jsonl",
+          "_source_line": 1,
+          "case_id": "miniF2F-valid-mathd-algebra-182",
+          "error": "subgoal_unbound_context: subgoal_unbound_context: h1 references unbound y; subgoal_unbound_context: h2 references unbound y",
+          "eval_mode": "dev",
+          "final_verify": null,
+          "formal_statement_ingestion": {
+            "goal": "7 * (3 * y + 2) = 21 * y + 14",
+            "header": "theorem mathd_algebra_182\n  (y : \u2102)",
+            "local_context": [
+              {
+                "names": [
+                  "y"
+                ],
+                "raw": "(y : \u2102)",
+                "type": "\u2102"
+              }
+            ],
+            "original": "import Mathlib\n\nopen Real Nat Topology\nopen BigOperators\n\ntheorem mathd_algebra_182\n  (y : \u2102) :\n  7 * (3 * y + 2) = 21 * y + 14 := by\n  sorry",
+            "preamble": "import Mathlib\n\nopen Real Nat Topology\nopen BigOperators"
+          },
+          "lean_profile": "mathlib",
+          "n_subgoals": 3,
+          "status": "failed",
+          "subgoal_unbound_context": [
+            {
+              "id": "h1",
+              "identifier": "y",
+              "lean_type": "7 * (3 * y + 2) = 7 * 3 * y + 7 * 2"
+            },
+            {
+              "id": "h2",
+              "identifier": "y",
+              "lean_type": "7 * 3 * y = 21 * y"
+            }
+          ],
+          "task_id": "8984a2d2",
+          "trace_events": 3
+        }
+      ],
+      "bucket": "binder-threading ceiling",
+      "error": "subgoal_unbound_context: subgoal_unbound_context: h1 references unbound y; subgoal_unbound_context: h2 references unbound y",
+      "eval_mode": "dev",
+      "final_verify": null,
+      "lean_profile": "mathlib",
+      "plan_signals": {
+        "closing_line": "exact rfl",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [
+          "h1",
+          "h2",
+          "h3",
+          "h4"
+        ],
+        "n_have_lines": 4,
+        "n_lean_types": 0
+      },
+      "reasons": [
+        "subgoal_unbound_context"
+      ],
+      "root": "ai-router/tasks",
+      "secondary_tags": [
+        "binder-threading ceiling"
+      ],
+      "skeleton_errors": [
+        "subgoal_unbound_context: h1 references unbound y",
+        "subgoal_unbound_context: h2 references unbound y"
+      ],
+      "skeleton_ok": false,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 2,
+        "retrieve": 0,
+        "skeleton_check": 1,
+        "synthesize": 0,
+        "synthesize_definition": 0,
+        "verify": 0,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [
+        {
+          "id": "h1",
+          "identifier": "y",
+          "lean_type": "7 * (3 * y + 2) = 7 * 3 * y + 7 * 2"
+        },
+        {
+          "id": "h2",
+          "identifier": "y",
+          "lean_type": "7 * 3 * y = 21 * y"
+        }
+      ],
+      "task_id": "8984a2d2"
+    },
+    {
+      "benchmark_rows": [
+        {
+          "_source_file": "agents/hyperion/tasks/benchmark-core-dev-results.jsonl",
+          "_source_line": 2,
+          "case_id": "core-dev-string-conj-001",
+          "error": null,
+          "eval_mode": "dev",
+          "final_verify": {
+            "errors": [],
+            "infra_ok": true,
+            "ok": true,
+            "result_path": "/app/tasks/b1befa83/artifacts/result.lean"
+          },
+          "lean_profile": "core",
+          "n_subgoals": 2,
+          "status": "done",
+          "task_id": "b1befa83",
+          "trace_events": 25
+        }
+      ],
+      "bucket": "eval methodology / self-authoring contamination",
+      "error": null,
+      "eval_mode": "dev",
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": true,
+        "result_path": "/app/tasks/b1befa83/artifacts/result.lean"
+      },
+      "lean_profile": "core",
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "curated_core_case"
+      ],
+      "root": "ai-router/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 2,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "b1befa83"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "exact h7",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "h1",
+          "h2",
+          "h3",
+          "h4",
+          "h5",
+          "h6",
+          "h7"
+        ],
+        "n_have_lines": 7,
+        "n_lean_types": 8
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "00da10d4"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "id1",
+          "id2"
+        ],
+        "n_have_lines": 2,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "0bfbb453"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "unclassified",
+      "error": "sub-goal '0': no candidate closed after 0 Path-A attempt(s) and 0 repair iteration(s)",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 0
+      },
+      "reasons": [
+        "unclassified"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "0f159327"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": true,
+        "result_path": "/app/tasks/13b6236d/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 2,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "13b6236d"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "exact h1",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "h1"
+        ],
+        "n_have_lines": 1,
+        "n_lean_types": 1
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 2,
+        "decompose": 2,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "14471e4f"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "unclassified",
+      "error": "sub-goal 'h1': no candidate closed after 0 Path-A attempt(s) and 0 repair iteration(s)",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "h1"
+        ],
+        "n_have_lines": 1,
+        "n_lean_types": 1
+      },
+      "reasons": [
+        "unclassified"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "17e32a45"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "decomposer scaffold contract",
+      "error": "skeleton_check failed after revision budget: 2:31: failed to synthesize; 1:15: unsolved goals; 2:34: unexpected token ':='; expected command",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [
+          "stickers_given_away",
+          "stickers_bought",
+          "remaining_after_giving",
+          "final_count"
+        ],
+        "n_have_lines": 4,
+        "n_lean_types": 11
+      },
+      "reasons": [
+        "skeleton_check_failed",
+        "trailing_sorry_comma"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [
+        "decomposer scaffold contract"
+      ],
+      "skeleton_errors": [
+        "2:31: failed to synthesize",
+        "1:15: unsolved goals",
+        "2:34: unexpected token ':='; expected command"
+      ],
+      "skeleton_ok": false,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 0,
+        "skeleton_check": 3,
+        "synthesize": 0,
+        "synthesize_definition": 0,
+        "verify": 0,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "1d2e36c1"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 1
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": false,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "1d68a287"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "unclassified",
+      "error": "sub-goal '0': no candidate closed after 0 Path-A attempt(s) and 0 repair iteration(s)",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "unclassified"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "227c6e28"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "unclassified",
+      "error": "sub-goal '0': no candidate closed after 0 Path-A attempt(s) and 3 repair iteration(s)",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 0
+      },
+      "reasons": [
+        "unclassified"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "2adc5184"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "unclassified",
+      "error": "sub-goal '0': no candidate closed after 0 Path-A attempt(s) and 3 repair iteration(s)",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "exact eq",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "n",
+          "eq"
+        ],
+        "n_have_lines": 2,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "unclassified"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "395e6750"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "verifier_latency",
+      "error": "assembled result.lean failed final verification: verifier unavailable",
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": false,
+        "result_path": "/app/tasks/3a002be8/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": true,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 0
+      },
+      "reasons": [
+        "verifier_unavailable_or_timeout"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [
+        "verifier_latency"
+      ],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 1,
+        "bank_concept": 2,
+        "birth_ablation": 2,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 2,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 2,
+        "verify": 2,
+        "verify_concept": 2
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "3a002be8"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "exact h1",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "h1"
+        ],
+        "n_have_lines": 1,
+        "n_lean_types": 1
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": false,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 2,
+        "birth_ablation": 2,
+        "compare": 2,
+        "decompose": 2,
+        "escalation_gate": 2,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 2,
+        "verify": 2,
+        "verify_concept": 2
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "3b779e3c"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": true,
+        "result_path": "/app/tasks/3c101786/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 2,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "3c101786"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "exact h1",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "h2",
+          "h3"
+        ],
+        "n_have_lines": 2,
+        "n_lean_types": 3
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": false,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "3de2fed4"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 0
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "41a3eb0f"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "unclassified",
+      "error": "sub-goal 'h1': no candidate closed after 0 Path-A attempt(s) and 3 repair iteration(s)",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "h1"
+        ],
+        "n_have_lines": 1,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "unclassified"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": false,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "430725e7"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "step2",
+          "step3",
+          "step4",
+          "step5",
+          "final"
+        ],
+        "n_have_lines": 5,
+        "n_lean_types": 7
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": false,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "47b24c71"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 6
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "4bd415c9"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": true,
+        "result_path": "/app/tasks/4c6bf405/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 2,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "4c6bf405"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "unclassified",
+      "error": "string indices must be integers, not 'str'",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "base_case",
+          "inductive_step"
+        ],
+        "n_have_lines": 2,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "unclassified"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": false,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 1,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "4f5b3627"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "decomposer scaffold contract",
+      "error": "skeleton_check failed after revision budget: 1:29: unsolved goals; 2:32: unexpected token ','; expected command",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "skeleton_check_failed",
+        "trailing_sorry_comma"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [
+        "decomposer scaffold contract"
+      ],
+      "skeleton_errors": [
+        "1:29: unsolved goals",
+        "2:32: unexpected token ','; expected command"
+      ],
+      "skeleton_ok": false,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 0,
+        "skeleton_check": 3,
+        "synthesize": 0,
+        "synthesize_definition": 0,
+        "verify": 0,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "57c7e453"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 0
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [
+        "decomposer scaffold contract"
+      ],
+      "skeleton_errors": [
+        "no scaffold in plan"
+      ],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 2,
+        "birth_ablation": 2,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 2,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 2,
+        "verify": 2,
+        "verify_concept": 2
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "5882ac6c"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 1
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "5d4c8a87"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": true,
+        "result_path": "/app/tasks/60cc7df7/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 2,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "60cc7df7"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "proof sourcing / downstream stall",
+      "error": "cannot assemble result.lean; undischarged sub-goal(s): h2",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "normal_prover_stall_after_skeleton"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 1,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "621f5f1a"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": true,
+        "result_path": "/app/tasks/62839571/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 2,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "62839571"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "exact sorry",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "base_case",
+          "inductive_step"
+        ],
+        "n_have_lines": 2,
+        "n_lean_types": 7
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "6436f5fa"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "decomposer scaffold contract",
+      "error": "assembled result.lean failed final verification: 3:2: expected '{' or indented tactic sequence; 2:25: unsolved goals; 1:27: unsolved goals",
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [
+          "3:2: expected '{' or indented tactic sequence",
+          "2:25: unsolved goals",
+          "1:27: unsolved goals"
+        ],
+        "infra_ok": true,
+        "ok": false,
+        "result_path": "/app/tasks/6efbb443/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": true,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "final_verify_failed"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 1,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "6efbb443"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "unclassified",
+      "error": "sub-goal 'h_base': no candidate closed after 0 Path-A attempt(s) and 3 repair iteration(s)",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 6
+      },
+      "reasons": [
+        "unclassified"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": false,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "745b7239"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "exact h1",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "h1"
+        ],
+        "n_have_lines": 1,
+        "n_lean_types": 1
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 2,
+        "decompose": 2,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "7609560c"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "exact h1",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "h1"
+        ],
+        "n_have_lines": 1,
+        "n_lean_types": 1
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 2,
+        "decompose": 2,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "78ac17a4"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "operational/infra",
+      "error": "litellm.InternalServerError: InternalServerError: OpenAIException - Connection error.",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 0
+      },
+      "reasons": [
+        "llm_or_router_infra_error"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [
+        "operational/infra"
+      ],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 0,
+        "skeleton_check": 0,
+        "synthesize": 0,
+        "synthesize_definition": 0,
+        "verify": 0,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "8283a4ef"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": true,
+        "result_path": "/app/tasks/8decb496/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": true,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 2,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "8decb496"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "decomposer scaffold contract",
+      "error": "cannot assemble result.lean; undischarged sub-goal(s): 0",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "exact h2",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [
+          "h1",
+          "h2"
+        ],
+        "n_have_lines": 2,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "skeleton_check_failed",
+        "trailing_sorry_comma"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [
+        "decomposer scaffold contract"
+      ],
+      "skeleton_errors": [
+        "no scaffold in plan"
+      ],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 1,
+        "bank_concept": 2,
+        "birth_ablation": 2,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 2,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 3,
+        "synthesize": 2,
+        "synthesize_definition": 2,
+        "verify": 2,
+        "verify_concept": 2
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "8f3a7726"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": true,
+        "result_path": "/app/tasks/97c17dc3/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": true,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 2,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "97c17dc3"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": true,
+        "result_path": "/app/tasks/9b1cdbd1/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 2,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "9b1cdbd1"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": true,
+        "result_path": "/app/tasks/a1d4af92/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 2,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "a1d4af92"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "unclassified",
+      "error": "mapping values are not allowed here\n  in \"<unicode string>\", line 2, column 34:\n    original_request: Prove in Lean 4: for every natural number n, n  ... \n                                     ^",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "base_case",
+          "inductive_step"
+        ],
+        "n_have_lines": 2,
+        "n_lean_types": 3
+      },
+      "reasons": [
+        "unclassified"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 0,
+        "skeleton_check": 0,
+        "synthesize": 0,
+        "synthesize_definition": 0,
+        "verify": 0,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "a3cbc1d1"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "h2",
+          "h3"
+        ],
+        "n_have_lines": 2,
+        "n_lean_types": 3
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": false,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "a5898722"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 0
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "ab4e3339"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": true,
+        "result_path": "/app/tasks/acb7e3b1/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 2,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "acb7e3b1"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "exact inductive_step",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "base_case",
+          "inductive_step"
+        ],
+        "n_have_lines": 2,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": false,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "b3054b89"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": true,
+        "result_path": "/app/tasks/b3ed325a/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 2,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "b3ed325a"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "exact h1",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "h1"
+        ],
+        "n_have_lines": 1,
+        "n_lean_types": 1
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 2,
+        "decompose": 2,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "b671a400"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "operational/infra",
+      "error": "litellm.BadRequestError: OpenAIException - litellm.BadRequestError: AnthropicException - {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"This model does not support assistant message prefill. The conversation must end with a user message.\"},\"request_id\":\"req_011CcBcBAWM5bY4ZTExeLR83\"}. Received Model Group=smart\nAvailable Model Group Fallbacks=['worker', 'claude-sonnet-4-6']\nError doing the fallback: litellm.BadRequestError: AnthropicException - {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"This model does not support assistant message prefill. The conversation must end with a user message.\"},\"request_id\":\"req_011CcBcBCPTRVL1j5grUCHdE\"}No fallback model group found for original model_group=claude-sonnet-4-6. Fallbacks=[{'smart': ['worker', 'claude-sonnet-4-6']}, {'worker': ['claude-sonnet-4-6']}, {'cheap': ['fast', 'claude-sonnet-4-6']}, {'fast': ['claude-sonnet-4-6']}]. Received Model Group=claude-sonnet-4-6\nAvailable Model Group Fallbacks=None\nError doing the fallback: litellm.BadRequestError: AnthropicException - {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"This model does not support assistant message prefill. The conversation must end with a user message.\"},\"request_id\":\"req_011CcBcBCPTRVL1j5grUCHdE\"}No fallback model group found for original model_group=claude-sonnet-4-6. Fallbacks=[{'smart': ['worker', 'claude-sonnet-4-6']}, {'worker': ['claude-sonnet-4-6']}, {'cheap': ['fast', 'claude-sonnet-4-6']}, {'fast': ['claude-sonnet-4-6']}] LiteLLM Retried: 2 times LiteLLM Retried: 2 times",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "exact h",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "h"
+        ],
+        "n_have_lines": 1,
+        "n_lean_types": 4
+      },
+      "reasons": [
+        "llm_or_router_infra_error"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [
+        "operational/infra"
+      ],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 0,
+        "skeleton_check": 0,
+        "synthesize": 0,
+        "synthesize_definition": 0,
+        "verify": 0,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "b8176743"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 0
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "bc9ef5e2"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": true,
+        "result_path": "/app/tasks/bfb7b90b/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": true,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 2,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "bfb7b90b"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": true,
+        "result_path": "/app/tasks/bfc9f4d3/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 2,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 2,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "bfc9f4d3"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "unclassified",
+      "error": "sub-goal 'h': no candidate closed after 0 Path-A attempt(s) and 0 repair iteration(s)",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 1
+      },
+      "reasons": [
+        "unclassified"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "c140b811"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "exact h1",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "h1"
+        ],
+        "n_have_lines": 1,
+        "n_lean_types": 1
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 2,
+        "decompose": 2,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "cb0746c8"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "proof sourcing / downstream stall",
+      "error": "cannot assemble result.lean; undischarged sub-goal(s): h2",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "normal_prover_stall_after_skeleton"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 1,
+        "bank_concept": 2,
+        "birth_ablation": 2,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 2,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 2,
+        "synthesize": 2,
+        "synthesize_definition": 2,
+        "verify": 2,
+        "verify_concept": 2
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "cd735778"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 0
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "cdaa1c0a"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "unclassified",
+      "error": "1 validation error for PlanFrontmatter\nkeywords.0\n  Input should be a valid string [type=string_type, input_value=True, input_type=bool]\n    For further information visit https://errors.pydantic.dev/2.13/v/string_type",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "h1"
+        ],
+        "n_have_lines": 1,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "unclassified"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 0,
+        "skeleton_check": 0,
+        "synthesize": 0,
+        "synthesize_definition": 0,
+        "verify": 0,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "d19fe475"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "operational/infra",
+      "error": "litellm.BadRequestError: OpenAIException - litellm.BadRequestError: AnthropicException - {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"`temperature` is deprecated for this model.\"},\"request_id\":\"req_011CcBc13hYUWmJzjbs1H66F\"}. Received Model Group=smart\nAvailable Model Group Fallbacks=['claude-opus-4-8', 'worker']\nError doing the fallback: litellm.BadRequestError: AnthropicException - {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"This model does not support assistant message prefill. The conversation must end with a user message.\"},\"request_id\":\"req_011CcBc15Sy4DbpgwieQcsLZ\"}. Received Model Group=worker\nAvailable Model Group Fallbacks=['claude-sonnet-4-6']\nError doing the fallback: litellm.BadRequestError: AnthropicException - {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"This model does not support assistant message prefill. The conversation must end with a user message.\"},\"request_id\":\"req_011CcBc164BQ99Z7h3jZ4KUX\"}No fallback model group found for original model_group=claude-sonnet-4-6. Fallbacks=[{'smart': ['claude-opus-4-8', 'worker']}, {'worker': ['claude-sonnet-4-6']}, {'cheap': ['fast', 'claude-sonnet-4-6']}, {'fast': ['claude-sonnet-4-6']}]. Received Model Group=claude-sonnet-4-6\nAvailable Model Group Fallbacks=None\nError doing the fallback: litellm.BadRequestError: AnthropicException - {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"This model does not support assistant message prefill. The conversation must end with a user message.\"},\"request_id\":\"req_011CcBc164BQ99Z7h3jZ4KUX\"}No fallback model group found for original model_group=claude-sonnet-4-6. Fallbacks=[{'smart': ['claude-opus-4-8', 'worker']}, {'worker': ['claude-sonnet-4-6']}, {'cheap': ['fast', 'claude-sonnet-4-6']}, {'fast': ['claude-sonnet-4-6']}] LiteLLM Retried: 2 times LiteLLM Retried: 2 times LiteLLM Retried: 2 times",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "exact h",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "h"
+        ],
+        "n_have_lines": 1,
+        "n_lean_types": 3
+      },
+      "reasons": [
+        "llm_or_router_infra_error"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [
+        "operational/infra"
+      ],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 0,
+        "skeleton_check": 0,
+        "synthesize": 0,
+        "synthesize_definition": 0,
+        "verify": 0,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "d3a1e188"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "verifier_latency",
+      "error": "assembled result.lean failed final verification: verifier unavailable",
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": false,
+        "result_path": "/app/tasks/d41d37ae/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": true,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 0
+      },
+      "reasons": [
+        "verifier_unavailable_or_timeout"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [
+        "verifier_latency"
+      ],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 1,
+        "bank_concept": 2,
+        "birth_ablation": 2,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 2,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 2,
+        "verify": 2,
+        "verify_concept": 2
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "d41d37ae"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "decomposer scaffold contract",
+      "error": "skeleton_check failed after revision budget: 1:25: unsolved goals; 2:32: unexpected token ','; expected command",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [
+          "h2"
+        ],
+        "n_have_lines": 1,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "skeleton_check_failed",
+        "trailing_sorry_comma"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [
+        "decomposer scaffold contract"
+      ],
+      "skeleton_errors": [
+        "1:25: unsolved goals",
+        "2:32: unexpected token ','; expected command"
+      ],
+      "skeleton_ok": false,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 0,
+        "skeleton_check": 3,
+        "synthesize": 0,
+        "synthesize_definition": 0,
+        "verify": 0,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "d7d72809"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "decomposer scaffold contract",
+      "error": "skeleton_check failed after revision budget: no scaffold in plan",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "exact \u27e8h1, h2\u27e9",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "h1",
+          "h2"
+        ],
+        "n_have_lines": 2,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "skeleton_check_failed"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [
+        "decomposer scaffold contract"
+      ],
+      "skeleton_errors": [
+        "no scaffold in plan"
+      ],
+      "skeleton_ok": false,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 0,
+        "skeleton_check": 3,
+        "synthesize": 0,
+        "synthesize_definition": 0,
+        "verify": 0,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "d8e84582"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": true,
+        "result_path": "/app/tasks/de6a507a/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": true,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 2,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "de6a507a"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": true,
+        "result_path": "/app/tasks/e02cb3d0/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 2,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "e02cb3d0"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": true,
+        "result_path": "/app/tasks/e097f052/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 2,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "e097f052"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "proof sourcing / downstream stall",
+      "error": "cannot assemble result.lean; undischarged sub-goal(s): h1",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "normal_prover_stall_after_skeleton"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 1,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 2,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "e16feef8"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": true,
+        "result_path": "/app/tasks/e19a47c1/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 2,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "e19a47c1"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 0
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [
+        "decomposer scaffold contract"
+      ],
+      "skeleton_errors": [
+        "no scaffold in plan"
+      ],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 2,
+        "birth_ablation": 2,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 2,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 2,
+        "verify": 2,
+        "verify_concept": 2
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "e24f8608"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "decomposer scaffold contract",
+      "error": "skeleton_check failed after revision budget: 4:18: invalid `\u25b8` notation, expected result type of cast is",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": true,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "skeleton_check_failed",
+        "fragile_closing",
+        "trailing_sorry_comma"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [
+        "decomposer scaffold contract"
+      ],
+      "skeleton_errors": [
+        "4:18: invalid `\u25b8` notation, expected result type of cast is"
+      ],
+      "skeleton_ok": false,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 0,
+        "skeleton_check": 3,
+        "synthesize": 0,
+        "synthesize_definition": 0,
+        "verify": 0,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "e66ea472"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "step1",
+          "step2",
+          "step3",
+          "step4",
+          "final"
+        ],
+        "n_have_lines": 5,
+        "n_lean_types": 4
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 0,
+        "verify": 2,
+        "verify_concept": 0
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "ee9b57b9"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 0
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [
+        "decomposer scaffold contract"
+      ],
+      "skeleton_errors": [
+        "no scaffold in plan"
+      ],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 2,
+        "bank_concept": 2,
+        "birth_ablation": 2,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 2,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 2,
+        "verify": 2,
+        "verify_concept": 2
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "f533b548"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "decomposer scaffold contract",
+      "error": "skeleton_check failed after revision budget: 4:17: application type mismatch",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": true,
+        "has_trailing_sorry_comma": true,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "skeleton_check_failed",
+        "fragile_closing",
+        "trailing_sorry_comma"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [
+        "decomposer scaffold contract"
+      ],
+      "skeleton_errors": [
+        "4:17: application type mismatch"
+      ],
+      "skeleton_ok": false,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 0,
+        "skeleton_check": 3,
+        "synthesize": 0,
+        "synthesize_definition": 0,
+        "verify": 0,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "f6f84705"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "operational/infra",
+      "error": "litellm.BadRequestError: OpenAIException - litellm.BadRequestError: AnthropicException - {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"This model does not support assistant message prefill. The conversation must end with a user message.\"},\"request_id\":\"req_011CcBbYQCLbJYUag1o1r53x\"}. Received Model Group=smart\nAvailable Model Group Fallbacks=['worker', 'claude-sonnet-4-6']\nError doing the fallback: litellm.BadRequestError: AnthropicException - {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"This model does not support assistant message prefill. The conversation must end with a user message.\"},\"request_id\":\"req_011CcBbYS3DEUZaVWCwZ4xna\"}No fallback model group found for original model_group=claude-sonnet-4-6. Fallbacks=[{'smart': ['worker', 'claude-sonnet-4-6']}, {'worker': ['claude-sonnet-4-6']}, {'cheap': ['fast', 'claude-haiku-4-5']}, {'fast': ['claude-haiku-4-5']}]. Received Model Group=claude-sonnet-4-6\nAvailable Model Group Fallbacks=None\nError doing the fallback: litellm.BadRequestError: AnthropicException - {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\",\"message\":\"This model does not support assistant message prefill. The conversation must end with a user message.\"},\"request_id\":\"req_011CcBbYS3DEUZaVWCwZ4xna\"}No fallback model group found for original model_group=claude-sonnet-4-6. Fallbacks=[{'smart': ['worker', 'claude-sonnet-4-6']}, {'worker': ['claude-sonnet-4-6']}, {'cheap': ['fast', 'claude-haiku-4-5']}, {'fast': ['claude-haiku-4-5']}] LiteLLM Retried: 2 times LiteLLM Retried: 2 times",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "exact h_trivial",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [
+          "h_refl",
+          "h_eq_refl",
+          "h_trivial"
+        ],
+        "n_have_lines": 3,
+        "n_lean_types": 3
+      },
+      "reasons": [
+        "llm_or_router_infra_error"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [
+        "operational/infra"
+      ],
+      "skeleton_errors": [],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 0,
+        "bank": 0,
+        "bank_concept": 0,
+        "birth_ablation": 0,
+        "compare": 0,
+        "decompose": 1,
+        "escalation_gate": 0,
+        "formal_ingest": 0,
+        "retrieve": 0,
+        "skeleton_check": 0,
+        "synthesize": 0,
+        "synthesize_definition": 0,
+        "verify": 0,
+        "verify_concept": 0
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "f758c0ab"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "decomposer scaffold contract",
+      "error": "cannot assemble result.lean; undischarged sub-goal(s): 0",
+      "eval_mode": null,
+      "final_verify": null,
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 0
+      },
+      "reasons": [
+        "skeleton_check_failed"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [
+        "decomposer scaffold contract"
+      ],
+      "skeleton_errors": [
+        "no scaffold in plan"
+      ],
+      "skeleton_ok": null,
+      "stage_counts": {
+        "abstract": 2,
+        "bank": 1,
+        "bank_concept": 2,
+        "birth_ablation": 2,
+        "compare": 2,
+        "decompose": 1,
+        "escalation_gate": 2,
+        "formal_ingest": 0,
+        "retrieve": 2,
+        "skeleton_check": 1,
+        "synthesize": 2,
+        "synthesize_definition": 2,
+        "verify": 2,
+        "verify_concept": 2
+      },
+      "status": "failed",
+      "subgoal_unbound_context": [],
+      "task_id": "fa179010"
+    },
+    {
+      "benchmark_rows": [],
+      "bucket": "success",
+      "error": null,
+      "eval_mode": null,
+      "final_verify": {
+        "errors": [],
+        "infra_ok": true,
+        "ok": true,
+        "result_path": "/app/tasks/fee8cb6f/artifacts/result.lean"
+      },
+      "lean_profile": null,
+      "plan_signals": {
+        "closing_line": "",
+        "has_fragile_close": false,
+        "has_trailing_sorry_comma": false,
+        "have_ids": [],
+        "n_have_lines": 0,
+        "n_lean_types": 2
+      },
+      "reasons": [
+        "terminal_done"
+      ],
+      "root": "agents/hyperion/tasks",
+      "secondary_tags": [],
+      "skeleton_errors": [],
+      "skeleton_ok": true,
+      "stage_counts": {
+        "abstract": 3,
+        "bank": 2,
+        "bank_concept": 3,
+        "birth_ablation": 3,
+        "compare": 3,
+        "decompose": 1,
+        "escalation_gate": 3,
+        "formal_ingest": 0,
+        "retrieve": 3,
+        "skeleton_check": 1,
+        "synthesize": 4,
+        "synthesize_definition": 3,
+        "verify": 3,
+        "verify_concept": 3
+      },
+      "status": "done",
+      "subgoal_unbound_context": [],
+      "task_id": "fee8cb6f"
+    }
+  ]
+}
