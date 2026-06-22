@@ -1,8 +1,8 @@
 /**
  * ThesisReadout — the compact "did the thesis hold?" panel. Across all sub-goals
  * of a run it surfaces the two headline numbers: solved-rate and Path-A
- * (retrieval) win-rate, plus how many proofs were abstracted/generalized and how
- * many sub-goals were a real A-vs-B contest.
+ * (retrieval) win-rate, plus how often definition-synthesis escalation produced
+ * a verified proof-through close.
  */
 import { thesisStats, type Subgoal } from "../../api/prover";
 
@@ -58,14 +58,14 @@ export default function ThesisReadout({
           sub={`retrieval won ${s.pathAWins} of ${s.solved}`}
         />
         <Stat
-          label="Abstractions"
-          value={`${s.abstractionsFired}`}
-          sub="generalized + re-verified"
+          label="Path-C wins"
+          value={`${s.pathCWins}`}
+          sub="concept-mediated closes"
         />
         <Stat
-          label="Real contests"
-          value={`${s.realContests}`}
-          sub="A vs B, both verified"
+          label="Escalations"
+          value={`${s.escalations}`}
+          sub={`${s.conceptsVerified} concepts verified · ${s.proveThroughSolved} proved through`}
         />
       </div>
     </section>

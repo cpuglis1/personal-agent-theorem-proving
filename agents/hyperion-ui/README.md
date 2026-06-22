@@ -27,15 +27,15 @@ The backend base URL defaults to `http://localhost:4100`; override with the
 A math/Lean-friendly view of what each stage of a Lean-4 proof run produced. The
 backend prover, per sub-goal, races two paths — **Path A "retrieve"** (reuse a
 banked lemma) ‖ **Path B "synthesize"** (write a fresh proof) — then **verify**
-(Lean kernel verdict + bounded repair), **compare** (pick winner + log a
-`(retrieved, synthesized, winner)` triple), **abstract** (generalize a fresh
-Path-B lemma and re-verify), and **bank** (assemble the final `result.lean`).
+(Lean kernel verdict + bounded repair). If that basic path stalls, the run can
+escalate through **definition synthesis**, **verify_concept**, and
+**prove_through** before **bank** assembles the final `result.lean`.
 
 Three views:
 
 | Route | What |
 | --- | --- |
-| `/prover` | **Run view** (centerpiece). Per-sub-goal pipeline cards: retrieve → synthesize → verify → compare → abstract → discharged, with the winning path, repair iters, research/deploy mode, generality scores, and whether abstraction fired. Shows the **scaffold** and final **`result.lean`** prominently, plus a compact **thesis read-out** (solved-rate, Path-A retrieval win-rate). |
+| `/prover` | **Run view** (centerpiece). Per-subgoal pipeline cards: retrieve → synthesize → verify → concept escalation/prove-through → discharged, with the winning path and repair iterations. Shows the **scaffold** and final **`result.lean`** prominently, plus a compact read-out (solved-rate, Path-A retrieval win-rate, Path-C concept wins). |
 | `/prover/submit` | **Submit view**. POST a theorem with workflow `lean-prove`; returns a `task_id` and links to its live Run view. |
 | `/prover/runs/:id` | The Run view bound to a specific live `task_id`. |
 
@@ -65,5 +65,5 @@ The Run view has a **data-source toggle**:
 - Code blocks have a copy button and scroll horizontally (no wrapping).
 
 > Visual check: after `npm run dev`, open `/prover` — the scaffold and
-> `result.lean` should be highlighted Lean, and the abstracted lemma's type
-> `∀ {α : Type} (x : α), x = x` should render its glyphs cleanly.
+> `result.lean` should be highlighted Lean, and the subgoal cards should show
+> Path A / Path B / Path C status without compare or abstraction rows.

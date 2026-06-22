@@ -6,6 +6,13 @@
 > apparatus, no cross-theorem necessity, no regimes. Keyed to `WORKFLOW-AND-THESIS.md` snapshot
 > 2026-06-22. Suggested branch: `trim-to-pipeline`.
 
+## Implementation status
+
+As of commit `f4b67fa` (`trim lean prover DAG`), the cut pass is implemented in Hyperion:
+`compare`, `abstract`, `birth_ablation`, weak/strong regimes, and cross-theorem
+promotion/pruning are removed from the runtime and tests. The active concept branch is
+`escalation_gate → synthesize_definition → verify_concept → prove_through → bank_concept`.
+
 ## The one thesis (kept simple)
 
 > **When the basic pipeline fails to close a goal, does LLM-proposed definition synthesis

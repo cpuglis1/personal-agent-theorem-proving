@@ -197,7 +197,7 @@ def store_lemma(
         statement: The lemma / goal type. Embedded for retrieval and normalized for
             the dedup identity.
         proof_term: The verified proof closing ``statement``.
-        generality_score: Reusability score (Phase 5 compare); stored now.
+        generality_score: Optional reuse score stored for retrieval/readout.
         source_goal: The originating sub-goal this lemma was derived for.
         verification_mode: How it was verified (``"full"`` / ``"skeleton"``).
         verified_at: Epoch seconds of verification; defaults to now when unset.
@@ -299,7 +299,7 @@ def _bump_times_retrieved(qdrant, lemmas: list[dict[str, Any]]) -> None:
 
 
 def bump_times_won(lemma: dict[str, Any]) -> int:
-    """Best-effort telemetry bump when a banked lemma wins compare.
+    """Best-effort telemetry bump when a banked lemma wins.
 
     Returns the incremented count so callers can carry it into a later ``store_lemma``
     upsert; that prevents banking the winning lemma from resetting the counter to zero.

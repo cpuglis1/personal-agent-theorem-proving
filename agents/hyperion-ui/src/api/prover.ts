@@ -7,8 +7,8 @@
  *
  *   - Types mirror the per-stage prover trace returned under `prover` by
  *     GET /tasks/{id}/trace (null for non-prover tasks). See the backend prover
- *     workflow: decompose -> retrieve ‖ synthesize -> verify -> compare ->
- *     abstract -> bank.
+ *     workflow: decompose -> retrieve ‖ synthesize -> verify -> bank, with
+ *     definition-synthesis escalation through prove_through on stalls.
  *   - `useProverTrace(source, taskId)` is the single hook the pages consume. It
  *     supports two data sources behind one toggle:
  *       • "fixture" — bundled fixtures/sample-trace.json, so the Run view renders
@@ -27,11 +27,11 @@ export type CandidateOrigin =
   | "retrieve"
   | "synthesize"
   | "repair"
-  | "abstract"
-  | "abstract-fallback";
+  | "battery"
+  | "concept";
 
-/** Which racing path a candidate belongs to: A = retrieve, B = synthesize. */
-export type ProofPath = "A" | "B";
+/** Which path closed a subgoal: A = retrieve/cache, B = synth/repair, C = concept. */
+export type ProofPath = "A" | "B" | "C";
 
 /** A single Lean proof candidate produced by one stage of the pipeline. */
 export interface LeanCandidate {
@@ -44,9 +44,19 @@ export interface LeanCandidate {
   generality_score?: number | null;
 }
 
+export interface ProveThroughTrace {
+  subgoal?: string;
+  ran?: boolean;
+  concept_id?: string | null;
+  solved?: boolean;
+  axioms_clean?: boolean | null;
+  repair_iters?: number;
+  reason?: string;
+}
+
 /** One kernel verdict in the verify race. */
 export interface VerifyVerdict {
-  path: ProofPath;
+  path: string;
   ok: boolean;
 }
 
@@ -56,22 +66,8 @@ export interface VerifyDecision {
   winner_path: ProofPath | null;
   a_attempts: number;
   repair_iters: number;
-  mode: "research" | "deploy" | string;
+  mode?: string;
   verdicts: VerifyVerdict[];
-}
-
-/** The compare stage's (retrieved, synthesized, winner) triple log. */
-export interface TripleLog {
-  subgoal?: string;
-  goal_type: string;
-  winner_path: ProofPath | null;
-  /** True when A and B both verified and were really contested head-to-head. */
-  compared: boolean;
-  scores: { a: number; b: number; winner: number };
-  retrieved_verified: boolean;
-  synthesized_verified: boolean;
-  mode: string;
-  ts?: number;
 }
 
 /** Full per-sub-goal trace across the pipeline stages. */
@@ -83,9 +79,14 @@ export interface Subgoal {
   verified_a: LeanCandidate | null;
   verified_b: LeanCandidate | null;
   verify_decision: VerifyDecision | null;
-  triple_log: TripleLog | null;
+  escalated?: boolean | null;
+  concept_candidates?: unknown[];
+  verify_concept?: unknown | null;
+  verified_concept?: unknown | null;
+  prove_through?: ProveThroughTrace | null;
+  accepted_concept?: unknown | null;
+  bank_concept?: unknown | null;
   discharged: LeanCandidate | null;
-  abstracted: LeanCandidate | null;
 }
 
 /** The `prover` object: per-stage trace for a whole proof run. */
@@ -178,15 +179,10 @@ export function useProverTrace(source: TraceSource, taskId?: string) {
 
 /**
  * The final winning path for a sub-goal: the discharged proof's path, falling
- * back to the compare winner, then the verify winner.
+ * back to the verify winner.
  */
 export function finalWinnerPath(sg: Subgoal): ProofPath | null {
-  return (
-    sg.discharged?.path ??
-    sg.triple_log?.winner_path ??
-    sg.verify_decision?.winner_path ??
-    null
-  );
+  return sg.discharged?.path ?? sg.verify_decision?.winner_path ?? null;
 }
 
 export interface ThesisStats {
@@ -195,10 +191,12 @@ export interface ThesisStats {
   solvedRate: number;
   pathAWins: number;
   pathBWins: number;
+  pathCWins: number;
   /** Path-A (retrieval) win-rate among *solved* sub-goals. */
   pathAWinRate: number;
-  abstractionsFired: number;
-  realContests: number;
+  escalations: number;
+  conceptsVerified: number;
+  proveThroughSolved: number;
 }
 
 /** Aggregate the thesis read-out across all sub-goals of a run. */
@@ -209,10 +207,12 @@ export function thesisStats(subgoals: Record<string, Subgoal>): ThesisStats {
   const solved = solvedGoals.length;
   let pathAWins = 0;
   let pathBWins = 0;
+  let pathCWins = 0;
   for (const g of solvedGoals) {
     const w = finalWinnerPath(g);
     if (w === "A") pathAWins += 1;
     else if (w === "B") pathBWins += 1;
+    else if (w === "C") pathCWins += 1;
   }
   return {
     total,
@@ -220,8 +220,10 @@ export function thesisStats(subgoals: Record<string, Subgoal>): ThesisStats {
     solvedRate: total ? solved / total : 0,
     pathAWins,
     pathBWins,
+    pathCWins,
     pathAWinRate: solved ? pathAWins / solved : 0,
-    abstractionsFired: goals.filter((g) => g.abstracted != null).length,
-    realContests: goals.filter((g) => g.triple_log?.compared).length,
+    escalations: goals.filter((g) => g.escalated === true).length,
+    conceptsVerified: goals.filter((g) => g.verified_concept != null).length,
+    proveThroughSolved: goals.filter((g) => g.prove_through?.solved === true).length,
   };
 }

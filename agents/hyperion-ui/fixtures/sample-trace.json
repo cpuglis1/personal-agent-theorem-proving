@@ -1,91 +1,103 @@
 {
-  "request": "prove S",
+  "request": "prove P ∧ Q",
   "status": "done",
-  "scaffold": "theorem target : S := by\n  have h1 : S := sorry\n  exact h1\n",
+  "scaffold": "theorem target : P ∧ Q := by\n  have h1 : P := sorry\n  have h2 : Q := sorry\n  exact ⟨h1, h2⟩\n",
   "skeleton_ok": true,
   "subgoals": {
     "h1": {
-      "lean_type": "S",
+      "lean_type": "P",
       "candidate_a": {
-        "source": "example : S := lemS_proof",
-        "statement": "lem_S",
-        "proof_term": "lemS_proof",
+        "source": "example : P := lemP_proof",
+        "statement": "lem_P",
+        "proof_term": "lemP_proof",
         "origin": "retrieve",
-        "lean_type": "S"
+        "lean_type": "P"
       },
       "candidates_a": [
         {
-          "source": "example : S := lemS_proof",
-          "statement": "lem_S",
-          "proof_term": "lemS_proof",
+          "source": "example : P := lemP_proof",
+          "statement": "lem_P",
+          "proof_term": "lemP_proof",
           "origin": "retrieve",
-          "lean_type": "S"
+          "lean_type": "P"
         }
       ],
-      "candidate_b": {
-        "source": "theorem t_h1 : S := by exact s_proof",
-        "statement": "theorem t_h1 : S",
-        "proof_term": "s_proof",
-        "origin": "synthesize",
-        "lean_type": "S"
-      },
+      "candidate_b": null,
       "verified_a": {
-        "source": "example : S := lemS_proof",
-        "statement": "lem_S",
-        "proof_term": "lemS_proof",
+        "source": "example : P := lemP_proof",
+        "statement": "lem_P",
+        "proof_term": "lemP_proof",
         "origin": "retrieve",
-        "lean_type": "S",
+        "lean_type": "P",
         "path": "A"
       },
-      "verified_b": {
-        "source": "theorem t_h1 : S := by exact s_proof",
-        "statement": "theorem t_h1 : S",
-        "proof_term": "s_proof",
-        "origin": "synthesize",
-        "lean_type": "S",
-        "path": "B"
-      },
+      "verified_b": null,
       "verify_decision": {
         "subgoal": "h1",
         "winner_path": "A",
         "a_attempts": 1,
         "repair_iters": 0,
-        "verdicts": [
-          { "path": "A", "ok": true },
-          { "path": "B", "ok": true }
-        ],
-        "mode": "research"
+        "verdicts": [{ "path": "A", "ok": true }]
       },
-      "triple_log": {
-        "subgoal": "h1",
-        "goal_type": "S",
-        "retrieved_verified": true,
-        "synthesized_verified": true,
-        "winner_path": "B",
-        "scores": { "a": 0.0, "b": 0.0, "winner": 0.0 },
-        "compared": true,
-        "mode": "research",
-        "ts": 1781746902
-      },
+      "escalated": false,
+      "concept_candidates": [],
+      "verify_concept": null,
+      "verified_concept": null,
+      "prove_through": null,
+      "accepted_concept": null,
+      "bank_concept": null,
       "discharged": {
-        "source": "theorem t_h1 : S := by exact s_proof",
-        "statement": "theorem t_h1 : S",
-        "proof_term": "s_proof",
+        "source": "example : P := lemP_proof",
+        "statement": "lem_P",
+        "proof_term": "lemP_proof",
+        "origin": "retrieve",
+        "lean_type": "P",
+        "path": "A"
+      }
+    },
+    "h2": {
+      "lean_type": "Q",
+      "candidate_a": null,
+      "candidates_a": [],
+      "candidate_b": {
+        "source": "theorem t_h2 : Q := by exact q_proof",
+        "statement": "theorem t_h2 : Q",
+        "proof_term": "q_proof",
         "origin": "synthesize",
-        "lean_type": "S",
-        "path": "B",
-        "generality_score": 0.0
+        "lean_type": "Q"
       },
-      "abstracted": {
-        "source": "theorem gen {α : Type} (x : α) : x = x := rfl",
-        "statement": "theorem gen {α : Type} (x : α) : x = x",
-        "proof_term": "rfl",
-        "origin": "abstract",
-        "lean_type": "∀ {α : Type} (x : α), x = x",
-        "path": "B",
-        "generality_score": 3.0
+      "verified_a": null,
+      "verified_b": {
+        "source": "theorem t_h2 : Q := by exact q_proof",
+        "statement": "theorem t_h2 : Q",
+        "proof_term": "q_proof",
+        "origin": "synthesize",
+        "lean_type": "Q",
+        "path": "B"
+      },
+      "verify_decision": {
+        "subgoal": "h2",
+        "winner_path": "B",
+        "a_attempts": 0,
+        "repair_iters": 0,
+        "verdicts": [{ "path": "B", "ok": true }]
+      },
+      "escalated": false,
+      "concept_candidates": [],
+      "verify_concept": null,
+      "verified_concept": null,
+      "prove_through": null,
+      "accepted_concept": null,
+      "bank_concept": null,
+      "discharged": {
+        "source": "theorem t_h2 : Q := by exact q_proof",
+        "statement": "theorem t_h2 : Q",
+        "proof_term": "q_proof",
+        "origin": "synthesize",
+        "lean_type": "Q",
+        "path": "B"
       }
     }
   },
-  "result_lean": "theorem target : S := by\n  have h1 : S := s_proof\n  exact h1\n"
+  "result_lean": "theorem target : P ∧ Q := by\n  have h1 : P := lemP_proof\n  have h2 : Q := q_proof\n  exact ⟨h1, h2⟩\n"
 }

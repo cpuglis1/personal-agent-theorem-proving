@@ -20,6 +20,7 @@ from hyperion.crews import lean_handlers
 from hyperion.crews.lean_handlers import (
     ProofOutcome,
     definition_degeneracy_reasons,
+    prove_through_handler,
     synthesize_definition_handler,
     verify_concept_handler,
 )
@@ -244,3 +245,81 @@ async def test_verify_concept_keeps_first_passing_candidate(tmp_path, monkeypatc
         res = await verify_concept_handler(ctx)
     assert res["ok"] is True
     assert res["concept_id"] == "c2"
+
+
+# ---------------------------------------------------------------------------
+# prove_through_handler — close the stalled goal with verified concept in scope
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.anyio
+async def test_prove_through_no_verified_concept_noops(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERION_TASKS_DIR", str(tmp_path))
+    ctx = _ctx("t-pt0", "prove_through")
+    pp = AsyncMock(return_value=_won())
+
+    with patch.object(lean_handlers, "prove_proposition", pp):
+        res = await prove_through_handler(ctx)
+
+    assert res["ok"] is False
+    assert res["reason"] == "no verified concept"
+    assert context_get("t-pt0", "prove_through:root")["ran"] is False
+    assert context_get("t-pt0", "accepted_concept:root") is None
+    assert context_get("t-pt0", "discharged:root") is None
+    pp.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_prove_through_accepts_clean_proof_and_stages_path_c(tmp_path, monkeypatch):
+    monkeypatch.setenv("HYPERION_TASKS_DIR", str(tmp_path))
+    concept = {
+        "concept_id": "c1",
+        "definition": {"name": "Balanced", "source": "def Balanced : Prop := True"},
+        "bridges": [{"name": "Balanced.intro", "source": "theorem Balanced.intro : Balanced := by trivial"}],
+        "origin": "synthesized",
+    }
+    context_put("t-pt1", "verified_concept:root", concept)
+    proof = "theorem concept_target : something := by trivial"
+    pp = AsyncMock(return_value=ProofOutcome(
+        closed=True,
+        source=proof,
+        proof_term="by trivial",
+        repair_iters=1,
+        axioms=[],
+        axioms_clean=True,
+    ))
+
+    with patch.object(lean_handlers, "prove_proposition", pp):
+        res = await prove_through_handler(_ctx("t-pt1", "prove_through"))
+
+    assert res["ok"] is True
+    accepted = context_get("t-pt1", "accepted_concept:root")
+    discharged = context_get("t-pt1", "discharged:root")
+    assert accepted["concept_id"] == "c1"
+    assert accepted["through_proof"] == proof
+    assert discharged["path"] == "C"
+    assert discharged["concept_id"] == "c1"
+    assert discharged["proof_term"] == "by trivial"
+    pp.assert_awaited_once()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("outcome", [_lost(), _won(axioms_clean=False)])
+async def test_prove_through_failed_or_dirty_proof_does_not_discharge(tmp_path, monkeypatch, outcome):
+    monkeypatch.setenv("HYPERION_TASKS_DIR", str(tmp_path))
+    concept = {
+        "concept_id": "c1",
+        "definition": {"name": "Balanced", "source": "def Balanced : Prop := True"},
+        "bridges": [],
+        "origin": "synthesized",
+    }
+    context_put("t-pt2", "verified_concept:root", concept)
+    pp = AsyncMock(return_value=outcome)
+
+    with patch.object(lean_handlers, "prove_proposition", pp):
+        res = await prove_through_handler(_ctx("t-pt2", "prove_through"))
+
+    assert res["ok"] is False
+    assert context_get("t-pt2", "accepted_concept:root") is None
+    assert context_get("t-pt2", "discharged:root") is None
+    assert context_get("t-pt2", "prove_through:root")["solved"] is False

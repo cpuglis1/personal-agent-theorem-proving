@@ -717,8 +717,7 @@ function nodeHandler(nodeId: string, workflowNode?: WorkflowRecord["nodes"][numb
   if (nodeId.startsWith("synth_")) return "synthesize";
   if (nodeId.startsWith("retrieve_")) return "retrieve";
   if (nodeId.startsWith("verify_")) return "verify";
-  if (nodeId.startsWith("compare_")) return "compare";
-  if (nodeId.startsWith("abstract_")) return "abstract";
+  if (nodeId.startsWith("prove_through_")) return "prove_through";
   return nodeId;
 }
 
@@ -851,24 +850,6 @@ function proverModuleIO(
       ),
     );
   }
-  if (handler === "compare") {
-    return goals.map(([id, sg]) =>
-      io(
-        `compare:${id}`,
-        { context_keys_read: [`verified_a:${id}`, `verified_b:${id}`, `verify_decision:${id}`], verified_a: sg.verified_a ?? null, verified_b: sg.verified_b ?? null },
-        { context_keys_written: [`triple_log:${id}`], triple_log: sg.triple_log ?? null, discharged: sg.discharged ?? null, selected_candidate: sg.discharged ?? null },
-      ),
-    );
-  }
-  if (handler === "abstract") {
-    return goals.map(([id, sg]) =>
-      io(
-        `abstract:${id}`,
-        { context_keys_read: [`verified_b:${id}`, `discharged:${id}`], verified_b: sg.verified_b ?? null, discharged: sg.discharged ?? null },
-        { context_keys_written: [`abstracted:${id}`], abstracted: sg.abstracted ?? null, failure_reason: sg.abstracted ? null : "no verified fresh abstraction accepted" },
-      ),
-    );
-  }
   if (handler === "escalation_gate") {
     return goals.map(([id, sg]) =>
       io(
@@ -896,12 +877,12 @@ function proverModuleIO(
       ),
     );
   }
-  if (handler === "birth_ablation") {
+  if (handler === "prove_through") {
     return goals.map(([id, sg]) =>
       io(
-        `birth_ablation:${id}`,
+        `prove_through:${id}`,
         { context_keys_read: [`verified_concept:${id}`, `discharged:${id}`], verified_concept: sg.verified_concept ?? null, lean_type: sg.lean_type },
-        { context_keys_written: [`birth_ablation:${id}`, `accepted_concept:${id}`], birth_ablation: sg.birth_ablation ?? null, accepted_concept: sg.accepted_concept ?? null, selected_candidate: sg.accepted_concept ?? null, failure_reason: sg.accepted_concept ? null : "concept did not pass birth ablation" },
+        { context_keys_written: [`prove_through:${id}`, `accepted_concept:${id}`, `discharged:${id}`], prove_through: sg.prove_through ?? null, accepted_concept: sg.accepted_concept ?? null, discharged: sg.discharged ?? null, selected_candidate: sg.discharged ?? null, failure_reason: asObject(sg.prove_through).solved ? null : "concept proof-through did not close" },
       ),
     );
   }
@@ -922,11 +903,9 @@ function proverModuleIO(
           context_keys_read: [
             "plan.md",
             ...goals.map(([id]) => `discharged:${id}`),
-            ...goals.map(([id]) => `abstracted:${id}`),
           ],
           scaffold,
           discharged: Object.fromEntries(goals.map(([id, sg]) => [id, sg.discharged ?? null])),
-          abstracted: Object.fromEntries(goals.map(([id, sg]) => [id, sg.abstracted ?? null])),
         },
         {
           context_keys_written: ["artifacts/result.lean", "final_verify"],
@@ -976,7 +955,7 @@ function buildGraph(
   });
 
   // "native-stage" rows are the deterministic prover nodes (skeleton_check/retrieve/
-  // verify/compare/abstract/bank) — they make no LLM call but ARE workflow nodes, so we
+  // verify/prove_through/bank) — they make no LLM call but ARE workflow nodes, so we
   // group them with the user-facing events to light up their DAG node with stage output
   // (otherwise they render as empty/dimmed and look like they never fired).
   const userEvents = data.events.filter(

@@ -2,10 +2,10 @@
  * SubgoalCard — the Run view centerpiece for ONE sub-goal. Walks the prover
  * pipeline in order and shows what each stage produced:
  *
- *   retrieve (Path A) ‖ synthesize (Path B) → verify → compare → abstract → discharged
+ *   retrieve (Path A) ‖ synthesize (Path B) → verify → prove_through → discharged
  *
- * Lean source/types render via <LeanCode>/<LeanInline>; verdicts, scores and
- * mode (research/deploy) render as compact key/value chips.
+ * Lean source/types render via <LeanCode>/<LeanInline>; verdicts and proof-through
+ * status render as compact key/value chips.
  */
 import type { ReactNode } from "react";
 
@@ -35,6 +35,7 @@ function Pill({
 function PathPill({ path }: { path: ProofPath | null }) {
   if (path === "A") return <Pill tone="a">Path A · retrieve</Pill>;
   if (path === "B") return <Pill tone="b">Path B · synthesize</Pill>;
+  if (path === "C") return <Pill tone="good">Path C · concept</Pill>;
   return <Pill tone="muted">no winner</Pill>;
 }
 
@@ -99,9 +100,8 @@ function CandidateBlock({
 
 export default function SubgoalCard({ id, sg }: { id: string; sg: Subgoal }) {
   const winner = finalWinnerPath(sg);
-  const abstractFired = sg.abstracted != null;
   const vd = sg.verify_decision;
-  const tl = sg.triple_log;
+  const pt = sg.prove_through;
 
   return (
     <section className="card subgoal">
@@ -112,11 +112,7 @@ export default function SubgoalCard({ id, sg }: { id: string; sg: Subgoal }) {
         </div>
         <div className="flex flex-wrap items-center gap-1.5">
           <PathPill path={winner} />
-          {abstractFired ? (
-            <Pill tone="good">abstracted ✦</Pill>
-          ) : (
-            <Pill tone="muted">no abstraction</Pill>
-          )}
+          {sg.escalated ? <Pill tone="good">escalated</Pill> : <Pill tone="muted">normal path</Pill>}
           {sg.discharged ? (
             <Pill tone="good">discharged</Pill>
           ) : (
@@ -181,67 +177,44 @@ export default function SubgoalCard({ id, sg }: { id: string; sg: Subgoal }) {
               />
               <KV k="A attempts" v={<span className="tabular-nums">{vd.a_attempts}</span>} />
               <KV k="repair iters" v={<span className="tabular-nums">{vd.repair_iters}</span>} />
-              <KV k="mode" v={<Pill tone="muted">{vd.mode}</Pill>} />
+              {vd.mode && <KV k="mode" v={<Pill tone="muted">{vd.mode}</Pill>} />}
             </div>
           ) : (
             <div className="stage__empty">no verify decision</div>
           )}
         </Stage>
 
-        {/* 4 — compare (triple log) */}
+        {/* 4 — escalation / concept proof-through */}
         <Stage
           step={4}
-          title="Compare"
-          badge={
-            tl ? (
-              tl.compared ? (
-                <Pill tone="good">A-vs-B contest</Pill>
-              ) : (
-                <Pill tone="muted">uncontested</Pill>
-              )
-            ) : undefined
-          }
+          title="Concept Escalation"
+          badge={sg.escalated ? <Pill tone="good">fired</Pill> : <Pill tone="muted">skipped</Pill>}
         >
-          {tl ? (
+          {sg.escalated ? (
             <div className="kv-grid">
-              <KV k="winner" v={<PathPill path={tl.winner_path} />} />
-              <KV
-                k="generality (A / B → winner)"
-                v={
-                  <span className="tabular-nums">
-                    {tl.scores.a} / {tl.scores.b} → {tl.scores.winner}
-                  </span>
-                }
-              />
-              <KV k="retrieved verified" v={<VerifiedPill ok={tl.retrieved_verified} />} />
-              <KV k="synthesized verified" v={<VerifiedPill ok={tl.synthesized_verified} />} />
-              <KV k="goal type" v={<LeanInline>{tl.goal_type}</LeanInline>} />
+              <KV k="candidates" v={<span className="tabular-nums">{sg.concept_candidates?.length ?? 0}</span>} />
+              <KV k="concept verified" v={<VerifiedPill ok={sg.verified_concept != null} />} />
+              <KV k="concept accepted" v={<VerifiedPill ok={sg.accepted_concept != null} />} />
             </div>
           ) : (
-            <div className="stage__empty">no triple logged</div>
+            <div className="stage__empty">normal proof discharged or no escalation attempted</div>
           )}
         </Stage>
 
-        {/* 5 — abstract (generalize Path-B lemma + re-verify) */}
+        {/* 5 — prove through verified concept */}
         <Stage
           step={5}
-          title="Abstract"
-          badge={
-            abstractFired ? <Pill tone="good">fired ✦</Pill> : <Pill tone="muted">skipped</Pill>
-          }
+          title="Prove Through"
+          badge={pt?.solved ? <Pill tone="good">solved</Pill> : <Pill tone="muted">not solved</Pill>}
         >
-          {sg.abstracted ? (
-            <>
-              <div className="stage__note">
-                Generalized statement:{" "}
-                <LeanInline>{sg.abstracted.statement}</LeanInline>
-              </div>
-              <CandidateBlock cand={sg.abstracted} label="generalized lemma" />
-            </>
-          ) : (
-            <div className="stage__empty">
-              abstraction did not fire for this sub-goal
+          {pt ? (
+            <div className="kv-grid">
+              <KV k="concept" v={<span>{pt.concept_id ?? "none"}</span>} />
+              <KV k="axioms clean" v={<VerifiedPill ok={pt.axioms_clean === true} />} />
+              <KV k="repair iters" v={<span className="tabular-nums">{pt.repair_iters ?? 0}</span>} />
             </div>
+          ) : (
+            <div className="stage__empty">proof-through did not run for this sub-goal</div>
           )}
         </Stage>
 
